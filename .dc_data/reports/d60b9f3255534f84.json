@@ -1,0 +1,1435 @@
+{
+  "source": ".dc_data/uploads/d60b9f3255534f84-source.docx",
+  "target": ".dc_data/uploads/d60b9f3255534f84-target.pdf",
+  "overall_risk": "high",
+  "summary": {
+    "total_alignments": 47,
+    "status_counts": {
+      "identical": 21,
+      "modified": 16,
+      "deleted": 10
+    },
+    "risk_distribution": {
+      "none": 21,
+      "low": 7,
+      "high": 18,
+      "medium": 1
+    },
+    "key_element_changes": 10
+  },
+  "diffs": [
+    {
+      "alignment_id": "al2",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "未经双方书面同意,任何一方不得擅自变更合作内容、服务标准及执行范围。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第二条合同期限"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.91"
+      ],
+      "page_regions": [
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.7177004417727509,
+            0.8102174235812158,
+            0.7351415638685793
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.7609838635224911,
+            0.34672572661828016,
+            0.7814423114840039
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "1.3",
+      "title": "未经双方书面同意,任何一方不得擅自变更合作内容、服务标准及执行范围。"
+    },
+    {
+      "alignment_id": "al3",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "本合同有效期自2026"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "年08"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "月01"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日起至2027"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "年07"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "月31"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日止。2.1 本合同有效"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "期自2026"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "年07"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "月09"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日起至2026"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "年07"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "月09"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日止。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.7959438876697966,
+            0.8322034609112505,
+            0.813385009765625
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.8171778880502153,
+            0.5856520882277667,
+            0.8346190101460437
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "2.1",
+      "title": "本合同有效期自2026年08月01日起至2027年07月31日止。2.1 本合同有效期自2026年07月09日起至2026年07月09日止。"
+    },
+    {
+      "alignment_id": "al4",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "合同期满前,双方可协商续约事宜,未达成书面续约协议的,本合同到期自动终"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "止。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:effective"
+      ],
+      "page_regions": [
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.8455400987928667,
+            0.8287640106572869,
+            0.8629812208886951
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.8688224738114237,
+            0.18830718417369935,
+            0.8829958954219863
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "2.2",
+      "title": "合同期满前,双方可协商续约事宜,未达成书面续约协议的,本合同到期自动终止。"
+    },
+    {
+      "alignment_id": "al5",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "合同存续期间,双方可根据实际情况,经书面协商一致后变更、补充合同期限。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第三条费用及支付方式"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.88"
+      ],
+      "page_regions": [
+        {
+          "page_index": 0,
+          "bbox": [
+            0.1511969760604788,
+            0.8951351501029914,
+            0.8287640106572869,
+            0.9125762721988198
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.08815730042808696,
+            0.42736157605949443,
+            0.10861573026752246
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "2.3",
+      "title": "合同存续期间,双方可根据实际情况,经书面协商一致后变更、补充合同期限。"
+    },
+    {
+      "alignment_id": "al6",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "本合同合作总费用为人民币(大写)人民币伍万元整(¥50000.00"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "元),该费用包"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "含完成本合同约定全部服务/产品的所有成本、人工、物料、税费等全部费用,无其他"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "隐形费用。\nXX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市恒信商贸有限公司3.2 支付方式:甲方按以下方式向乙方付款:合同签订后3"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "个"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "工作日内支付"
+        },
+        {
+          "op": "delete",
+          "text": "5"
+        },
+        {
+          "op": "insert",
+          "text": "4"
+        },
+        {
+          "op": "equal",
+          "text": "0%预付款,项目验收合格后5"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "个工作日内支付剩余"
+        },
+        {
+          "op": "delete",
+          "text": "5"
+        },
+        {
+          "op": "insert",
+          "text": "6"
+        },
+        {
+          "op": "equal",
+          "text": "0%尾款。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:amount, date, ratio"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.12325980034690005,
+            0.8463141943215823,
+            0.14070094962584434
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.14435243040252468,
+            0.8400573345954956,
+            0.16179357968146899
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.16777736274193697,
+            0.24374480650035438,
+            0.18195076623042236
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.1939474364074562,
+            0.8428895093973121,
+            0.21138859474743912
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.21518377453584286,
+            0.7872480563084051,
+            0.23262493287582578
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "3.1",
+      "title": "本合同合作总费用为人民币(大写)人民币伍万元整(¥50000.00元),该费用包含完成本合同约定全部服务/产品的所有成本、人工、物料、税费等全部费用,无其他隐形费用。"
+    },
+    {
+      "alignment_id": "al7",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "乙方需在甲方付款前提供合法有效票据,甲方收到票据后按约定时限完成付款,付"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "款周期最长不超过15"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "个工作日。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.24368733748121102,
+            0.8471084972831794,
+            0.26112849582119396
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.2647799856589129,
+            0.4201413298394188,
+            0.28222114399889586
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "3.3",
+      "title": "乙方需在甲方付款前提供合法有效票据,甲方收到票据后按约定时限完成付款,付款周期最长不超过15个工作日。"
+    },
+    {
+      "alignment_id": "al8",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "乙方指定收款账户:\n开户行:XX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市恒信商贸有限公司开户行:中国工商银行上海静安支行\n账户名:XX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市恒信商贸有限公司账户名:XX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市盛达文化传媒有限公司\n账"
+        },
+        {
+          "op": "delete",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "号:XX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市恒信商贸有限公司账"
+        },
+        {
+          "op": "delete",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "号:6222081001008899776"
+        },
+        {
+          "op": "insert",
+          "text": "\n第四条双方权利与义务"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.98"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.29328353048220385,
+            0.3481695759151223,
+            0.31072468882218673
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.32150087333914784,
+            0.7158741956996798,
+            0.3389420316791308
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.34986312032595385,
+            0.7261598371548194,
+            0.36730427866593673
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.37822297519855996,
+            0.6625991943051764,
+            0.3956641335385429
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.42150646943660924,
+            0.42736157605949443,
+            0.44196491739812205
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "3.4",
+      "title": "乙方指定收款账户:"
+    },
+    {
+      "alignment_id": "al13",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "妥善保管合作过程中获取的甲方商业信息、隐私资料,履行保密义务。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第五条验收标准"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.90"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.7329510396563242,
+            0.7713103696910437,
+            0.7503921617521526
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.7762333015931191,
+            0.34672572661828016,
+            0.7966917495546318
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "4",
+      "title": "妥善保管合作过程中获取的甲方商业信息、隐私资料,履行保密义务。"
+    },
+    {
+      "alignment_id": "al15",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "乙方完成约定工作后,书面通知甲方验收,甲方需在收到通知后3-7"
+        },
+        {
+          "op": "delete",
+          "text": "个工作"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日内完成验收"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "工作。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.8113358377560868,
+            0.8451048728048877,
+            0.8287769598519151
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.1511969760604788,
+            0.8346182127746437,
+            0.20665165798246535,
+            0.8487916343852063
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "5.1",
+      "title": "乙方完成约定工作后,书面通知甲方验收,甲方需在收到通知后3-7个工作日内完成验收工作。"
+    },
+    {
+      "alignment_id": "al18",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "若项目存在瑕疵,乙方需在甲方指定时限内无偿整改、修复,直至验收合格。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第六条保密条款"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.89"
+      ],
+      "page_regions": [
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.11356859365721496,
+            0.8102174235812158,
+            0.13100974293615925
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.15670837982250221,
+            0.34672572661828016,
+            0.17716680966193774
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "5.4",
+      "title": "若项目存在瑕疵,乙方需在甲方指定时限内无偿整改、修复,直至验收合格。"
+    },
+    {
+      "alignment_id": "al21",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "因一方泄密造成对方损失的,泄密方需承担全部赔偿责任。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第七条违约责任"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:breach"
+      ],
+      "page_regions": [
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.29100326574330093,
+            0.6624510283231836,
+            0.3084444240832839
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.3341430519085882,
+            0.34672572661828016,
+            0.3546014998701009
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "6.3",
+      "title": "因一方泄密造成对方损失的,泄密方需承担全部赔偿责任。"
+    },
+    {
+      "alignment_id": "al22",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "甲方逾期付款的,每逾期一日,按未付金额的万分之五向乙方支付违约金,逾期超"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "过30"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日的,乙方有权终止合同并追讨全部欠款及违约金。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.36924435577030135,
+            0.8471084972831794,
+            0.3866855141102843
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.3904807120207653,
+            0.623340951149727,
+            0.40792187036074823
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "7.1",
+      "title": "甲方逾期付款的,每逾期一日,按未付金额的万分之五向乙方支付违约金,逾期超过30日的,乙方有权终止合同并追讨全部欠款及违约金。"
+    },
+    {
+      "alignment_id": "al24",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "任何一方擅自单方解除合同、违反合同核心约定的,需向对方支付合同总金额"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "10%-20%的违约金,违约金不足以弥补损失的,需另行补足。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第八条不可抗力"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.96"
+      ],
+      "page_regions": [
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.46843793782938686,
+            0.8102309584667682,
+            0.4858790961693698
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.48967190196565097,
+            0.6564043694712043,
+            0.5071130603056339
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.5328116881309383,
+            0.34672572661828016,
+            0.553270136092451
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "7.3",
+      "title": "任何一方擅自单方解除合同、违反合同核心约定的,需向对方支付合同总金额10%-20%的违约金,违约金不足以弥补损失的,需另行补足。"
+    },
+    {
+      "alignment_id": "al26",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "不可抗力消失后,双方需尽快恢复合同履行。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第九条争议解决"
+        }
+      ],
+      "risk_level": "medium",
+      "risk_reasons": [
+        "语义相似度显著下降(0.85)"
+      ],
+      "page_regions": [
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.6387467554232853,
+            0.5515757067671146,
+            0.6561878775191137
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.6818865053444181,
+            0.34672572661828016,
+            0.7023449533059308
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "8.2",
+      "title": "不可抗力消失后,双方需尽快恢复合同履行。"
+    },
+    {
+      "alignment_id": "al28",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "争议解决期间,除争议事项外,本合同其他条款继续有效履行。"
+        },
+        {
+          "op": "insert",
+          "text": "\n第十条其他约定"
+        }
+      ],
+      "risk_level": "low",
+      "risk_reasons": [
+        "疑似差异,相似度 0.91"
+      ],
+      "page_regions": [
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.7665840203292013,
+            0.699342102025147,
+            0.7840251424250297
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 2,
+          "bbox": [
+            0.1511969760604788,
+            0.8098675145672506,
+            0.34672572661828016,
+            0.8303259625287633
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "9.2",
+      "title": "争议解决期间,除争议事项外,本合同其他条款继续有效履行。"
+    },
+    {
+      "alignment_id": "al31",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "本合同一式两份,甲乙双方各执一份,自双方签字盖章之日起生效,两份合同具"
+        },
+        {
+          "op": "insert",
+          "text": "\n"
+        },
+        {
+          "op": "equal",
+          "text": "有同等法律效力。\n(以下无正文,为签字盖章页)\n甲方(签字/盖章):XX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市恒信商贸有限公司\n日期:2026"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "年07"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "月09"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日\n乙方(签字/盖章):XX"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "市恒信商贸有限公司\n日期:2026"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "年07"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "月09"
+        },
+        {
+          "op": "insert",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "日\n|(注:部分内容可能由"
+        },
+        {
+          "op": "delete",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "AI 生成)"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.08520754272750891,
+            0.8392469845915582,
+            0.1026486920064532
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.10848997211229773,
+            0.2991824672783888,
+            0.12266336653974447
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.1368498269849039,
+            0.4100577888344577,
+            0.1510232214123506
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.1630991666164081,
+            0.5177100901341348,
+            0.18128836806199897
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.19152581946583655,
+            0.36450231200454114,
+            0.20896697780581946
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.21982125035374295,
+            0.5177100901341348,
+            0.2380104517993338
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.2731885389024458,
+            0.36450231200454114,
+            0.29062969724242876
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 3,
+          "bbox": [
+            0.1511969760604788,
+            0.30154839377505194,
+            0.42397044637232256,
+            0.3189895521150349
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "10.3",
+      "title": "本合同一式两份,甲乙双方各执一份,自双方签字盖章之日起生效,两份合同具有同等法律效力。"
+    }
+  ],
+  "key_elements": [
+    {
+      "kind": "date",
+      "word_value": "01日 | 07月 | 07月 | 07月 | 08月 | 09日 | 09日 | 2026年07月09日 | 2026年07月09日 | 2026年08月01日 | 2027年07月31日 | 31日",
+      "pdf_value": "01 日 | 07 月 | 07 月 | 07 月 | 08 月 | 09 日 | 09 日 | 2026 年07 月09 日 | 2026 年07 月09 日 | 2026 年08 月01 日 | 2027 年07 月31 日 | 31 日",
+      "changed": true
+    },
+    {
+      "kind": "effective",
+      "word_value": "终止",
+      "pdf_value": "",
+      "changed": true
+    },
+    {
+      "kind": "amount",
+      "word_value": "50000.00元 | ¥50000.00元 | 伍万元",
+      "pdf_value": "50000.00 元 | ¥50000.00 | 伍万元",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "3个工作日 | 5个工作日",
+      "pdf_value": "3 个\n工作日 | 5 个工作日",
+      "changed": true
+    },
+    {
+      "kind": "ratio",
+      "word_value": "50% | 50%",
+      "pdf_value": "40% | 60%",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "15个工作日",
+      "pdf_value": "15 个工作日",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "7个工作日",
+      "pdf_value": "7 日",
+      "changed": true
+    },
+    {
+      "kind": "breach",
+      "word_value": "赔偿",
+      "pdf_value": "赔偿 | 违约",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "30日",
+      "pdf_value": "30 日",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "07月 | 07月 | 09日 | 09日 | 2026年07月09日 | 2026年07月09日",
+      "pdf_value": "07 月 | 07 月 | 09 日 | 09 日 | 2026 年07 月09 日 | 2026 年07 月09 日",
+      "changed": true
+    }
+  ],
+  "unmatched_clauses": [
+    {
+      "alignment_id": "al37",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "一",
+      "title": "合作内容"
+    },
+    {
+      "alignment_id": "al38",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "二",
+      "title": "合同期限"
+    },
+    {
+      "alignment_id": "al39",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "三",
+      "title": "费用及支付方式"
+    },
+    {
+      "alignment_id": "al40",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "四",
+      "title": "双方权利与义务"
+    },
+    {
+      "alignment_id": "al41",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "五",
+      "title": "验收标准"
+    },
+    {
+      "alignment_id": "al42",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "六",
+      "title": "保密条款"
+    },
+    {
+      "alignment_id": "al43",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "七",
+      "title": "违约责任"
+    },
+    {
+      "alignment_id": "al44",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "八",
+      "title": "不可抗力"
+    },
+    {
+      "alignment_id": "al45",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "九",
+      "title": "争议解决"
+    },
+    {
+      "alignment_id": "al46",
+      "status": "deleted",
+      "segments": [],
+      "risk_level": "high",
+      "risk_reasons": [
+        "待核件缺失条款"
+      ],
+      "page_regions": [],
+      "number": "十",
+      "title": "其他约定"
+    }
+  ],
+  "page_meta": [
+    {
+      "page_index": 0,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    },
+    {
+      "page_index": 1,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    },
+    {
+      "page_index": 2,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    },
+    {
+      "page_index": 3,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    }
+  ]
+}

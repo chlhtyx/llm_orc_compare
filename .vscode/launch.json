@@ -1,0 +1,64 @@
+{
+  // 文档比对系统 VSCode 调试配置
+  // 按 F5 选择对应配置启动。断点需要在源码里点击行号左侧设置。
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // 主场景:启动 API 服务并调试。
+      // 用 debugpy + uvicorn,不开 --reload(reload 会 fork 子进程,
+      // 导致断点不命中)。改代码后重新 F5 即可。
+      "name": "Debug: API 服务 (uvicorn)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "document_comparison.api.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "DC_HOST": "127.0.0.1",
+        "DC_PORT": "8000",
+        // 本地调试用 mock 后端,无需 GPU / PaddlePaddle
+        "DC_OCR_BACKEND": "mock",
+        "DC_EMBED_BACKEND": "mock",
+        // 默认开发 Key;生产请换用 .env 覆盖
+        "DC_API_KEYS": "dev-key-please-change"
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+    {
+      // 运行并调试当前打开的 Python 文件
+      "name": "Debug: 当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      // 调试单个 pytest 文件:打开 tests/xxx.py 后按 F5
+      "name": "Debug: pytest(当前文件)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-x", "${file}"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

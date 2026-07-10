@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document-comparison"
+version = "0.1.0"
+description = "基于 PaddleOCR-VL 的合同条款篡改检测系统"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6",
+    "python-docx>=1.1",
+    "PyMuPDF>=1.24",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# 真实 OCR 引擎(需 GPU / PaddlePaddle >= 3.2.1,Python 3.9–3.13)
+ocr = ["paddleocr[doc-parser]>=3.0"]
+# 真实语义向量(对齐兜底)
+embed = ["FlagEmbedding>=1.2"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,29 @@
+services:
+  document-comparison:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: document-comparison:latest
+    container_name: document-comparison
+    restart: unless-stopped
+    ports:
+      - "${DC_PORT:-8000}:8000"
+    volumes:
+      - dc_data:/app/.dc_data
+    environment:
+      # —— 认证(逗号分隔多 Key;生产务必替换)——
+      DC_API_KEYS: ${DC_API_KEYS:-dev-key-please-change}
+      # —— OCR 引擎:mock | vllm | paddle | llm ——
+      DC_OCR_BACKEND: ${DC_OCR_BACKEND:-mock}
+      # —— 远端 LLM / VLM 推理(兼容 OpenAI Chat Completions 协议)——
+      DC_LLM_API_BASE: ${DC_LLM_API_BASE:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DC_LLM_API_KEY: ${DC_LLM_API_KEY:-}
+      DC_LLM_MODEL: ${DC_LLM_MODEL:-qwen-vl-max}
+      DC_LLM_TIMEOUT: ${DC_LLM_TIMEOUT:-120}
+      DC_LLM_MAX_CONCURRENCY: ${DC_LLM_MAX_CONCURRENCY:-4}
+      # —— 向量引擎:mock | bge ——
+      DC_EMBED_BACKEND: ${DC_EMBED_BACKEND:-mock}
+
+volumes:
+  dc_data:
+    driver: local

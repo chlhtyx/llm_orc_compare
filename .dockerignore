@@ -1,0 +1,32 @@
+# —— Python ——
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# —— Node ——
+web/node_modules/
+
+# —— 构建产物 ——
+web/dist/
+build/
+dist/
+
+# —— 数据与本地文件 ——
+.dc_data/
+*.pdf
+*.docx
+!tests/fixtures/*
+
+# —— 杂项 ——
+.DS_Store
+.git/
+.gitignore
+.vscode/
+.env
+docs/
+README.md

@@ -1,0 +1,173 @@
+{
+  "source": ".dc_data/uploads/9fc652e445e64266-source.docx",
+  "target": ".dc_data/uploads/9fc652e445e64266-target.pdf",
+  "overall_risk": "high",
+  "summary": {
+    "total_alignments": 47,
+    "status_counts": {
+      "identical": 45,
+      "modified": 2
+    },
+    "risk_distribution": {
+      "none": 45,
+      "high": 2
+    },
+    "key_element_changes": 2
+  },
+  "diffs": [
+    {
+      "alignment_id": "al9",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "本合同合作总费用为人民币(大写)人民币伍万元整(¥50000.00元),该费用包含完成本合同约定全部服务/产品的所有成本、人工、物料、税费等全部费用,无其他隐形费用。\nXX市恒信商贸有限公司3.2"
+        },
+        {
+          "op": "delete",
+          "text": " "
+        },
+        {
+          "op": "equal",
+          "text": "支付方式:甲方按以下方式向乙方付款:合同签订后3个工作日内支付"
+        },
+        {
+          "op": "delete",
+          "text": "5"
+        },
+        {
+          "op": "insert",
+          "text": "4"
+        },
+        {
+          "op": "equal",
+          "text": "0%预付款,项目验收合格后5个工作日内支付剩余"
+        },
+        {
+          "op": "delete",
+          "text": "5"
+        },
+        {
+          "op": "insert",
+          "text": "6"
+        },
+        {
+          "op": "equal",
+          "text": "0%尾款。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:ratio"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.149,
+            0.124,
+            0.846,
+            0.181
+          ],
+          "shape": "rect",
+          "polygon": null
+        },
+        {
+          "page_index": 1,
+          "bbox": [
+            0.149,
+            0.194,
+            0.842,
+            0.231
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "3.1",
+      "title": "本合同合作总费用为人民币(大写)人民币伍万元整(¥50000.00元),该费用包含完成本合同约定全部服务/产品的所有成本、人工、物料、税费等全部费用,无其他隐形费用。"
+    },
+    {
+      "alignment_id": "al18",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "乙方完成约定工作后,书面通知甲方验收,甲方需在收到通知后3-7"
+        },
+        {
+          "op": "delete",
+          "text": "个工作"
+        },
+        {
+          "op": "equal",
+          "text": "日内完成验收工作。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.149,
+            0.811,
+            0.844,
+            0.847
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "5.1",
+      "title": "乙方完成约定工作后,书面通知甲方验收,甲方需在收到通知后3-7个工作日内完成验收工作。"
+    }
+  ],
+  "key_elements": [
+    {
+      "kind": "ratio",
+      "word_value": "50%",
+      "pdf_value": "40% | 60%",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "7个工作日",
+      "pdf_value": "7日",
+      "changed": true
+    }
+  ],
+  "unmatched_clauses": [],
+  "page_meta": [
+    {
+      "page_index": 0,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    },
+    {
+      "page_index": 1,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    },
+    {
+      "page_index": 2,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    },
+    {
+      "page_index": 3,
+      "width_px": 2480.0,
+      "height_px": 3508.0,
+      "pdf_width_pt": 595.25,
+      "pdf_height_pt": 842.0
+    }
+  ]
+}

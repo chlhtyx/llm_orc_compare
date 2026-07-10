@@ -1,0 +1,138 @@
+{
+  "source": ".dc_data/uploads/e0aa7a5e1a3d4acd-source.docx",
+  "target": ".dc_data/uploads/e0aa7a5e1a3d4acd-target.pdf",
+  "overall_risk": "high",
+  "summary": {
+    "total_alignments": 48,
+    "status_counts": {
+      "identical": 46,
+      "modified": 2
+    },
+    "risk_distribution": {
+      "none": 46,
+      "high": 2
+    },
+    "key_element_changes": 2
+  },
+  "diffs": [
+    {
+      "alignment_id": "al10",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "支付方式:甲方按以下方式向乙方付款:合同签订后3"
+        },
+        {
+          "op": "delete",
+          "text": "个工作"
+        },
+        {
+          "op": "equal",
+          "text": "日内支付50%预付款,项目验收合格后5个工作日内支付剩余50%尾款。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.14,
+            0.21,
+            0.83,
+            0.25
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "3.2",
+      "title": "支付方式:甲方按以下方式向乙方付款:合同签订后3个工作日内支付50%预付款,项目验收合格后5个工作日内支付剩余50%尾款。"
+    },
+    {
+      "alignment_id": "al21",
+      "status": "modified",
+      "segments": [
+        {
+          "op": "equal",
+          "text": "乙方完成约定工作后,书面通知甲方验收,甲方需在收到通知后3-7"
+        },
+        {
+          "op": "delete",
+          "text": "个工作"
+        },
+        {
+          "op": "equal",
+          "text": "日内完成验收工作。"
+        }
+      ],
+      "risk_level": "high",
+      "risk_reasons": [
+        "高风险要素变更:date"
+      ],
+      "page_regions": [
+        {
+          "page_index": 1,
+          "bbox": [
+            0.14,
+            0.8499999999999999,
+            0.91,
+            0.89
+          ],
+          "shape": "rect",
+          "polygon": null
+        }
+      ],
+      "number": "5.1",
+      "title": "乙方完成约定工作后,书面通知甲方验收,甲方需在收到通知后3-7个工作日内完成验收工作。"
+    }
+  ],
+  "key_elements": [
+    {
+      "kind": "date",
+      "word_value": "3个工作日 | 5个工作日",
+      "pdf_value": "3日 | 5个工作日",
+      "changed": true
+    },
+    {
+      "kind": "date",
+      "word_value": "7个工作日",
+      "pdf_value": "7日",
+      "changed": true
+    }
+  ],
+  "unmatched_clauses": [],
+  "page_meta": [
+    {
+      "page_index": 0,
+      "width_px": 2479.0,
+      "height_px": 3588.0,
+      "pdf_width_pt": 595.0,
+      "pdf_height_pt": 861.0
+    },
+    {
+      "page_index": 1,
+      "width_px": 2479.0,
+      "height_px": 3571.0,
+      "pdf_width_pt": 595.0,
+      "pdf_height_pt": 857.0
+    },
+    {
+      "page_index": 2,
+      "width_px": 2479.0,
+      "height_px": 3525.0,
+      "pdf_width_pt": 595.0,
+      "pdf_height_pt": 846.0
+    },
+    {
+      "page_index": 3,
+      "width_px": 2479.0,
+      "height_px": 3629.0,
+      "pdf_width_pt": 595.0,
+      "pdf_height_pt": 871.0
+    }
+  ]
+}
