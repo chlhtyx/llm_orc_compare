@@ -147,6 +147,10 @@ watch(
   },
 )
 
+
+// ---- 设备像素比 ----
+const dpr = ref(window.devicePixelRatio || 2)
+
 // ---- 渲染 PDF ----
 async function renderPdf() {
   if (!props.pdfUrl) return
@@ -162,8 +166,9 @@ async function renderPdf() {
       const page = await pdf.getPage(i)
       const meta = props.pageMeta?.find((m) => m.page_index === i - 1) ?? null
 
-      // 假设 72 DPI 的 viewport，用 2x 缩放保证清晰
-      const viewport = page.getViewport({ scale: 2 * zoom.value })
+      // 使用设备像素比保证在各平台清晰且高亮对齐
+      const scale = dpr.value * zoom.value
+      const viewport = page.getViewport({ scale })
       const canvas = document.createElement('canvas')
       canvas.width = viewport.width
       canvas.height = viewport.height
@@ -174,8 +179,8 @@ async function renderPdf() {
       newPages.push({
         pageNum: i,
         canvas,
-        width: viewport.width / 2,   // CSS 显示尺寸 = canvasW / scale
-        height: viewport.height / 2,
+        width: viewport.width / dpr.value,   // CSS 显示尺寸
+        height: viewport.height / dpr.value,
         meta,
       })
     }
