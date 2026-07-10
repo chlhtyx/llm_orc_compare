@@ -1,8 +1,0 @@
-{
-  "ocr_backend": "vllm",
-  "llm_api_base": "https://api.siliconflow.cn/v1",
-  "llm_api_key": "sk-ubnrjvmqetupvvchpjbkbqtiqspqulvudlpcuzeebnwaptkz",
-  "llm_model": "Qwen/Qwen3.5-35B-A3B",
-  "llm_timeout": 120,
-  "llm_max_concurrency": 4
-}
