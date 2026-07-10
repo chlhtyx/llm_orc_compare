@@ -1,7 +1,7 @@
 """Mock OCR:直接读 PDF 文本层。
 
 适合开发与"文本 PDF"(非扫描件)。对扫描件(无文本层)返回空块——
-此时须切换 DC_OCR_BACKEND=vllm 走多模态 LLM 识别。
+此时须在 UI 设置页切换 ocr_backend=vllm 走多模态 LLM 识别。
 """
 from __future__ import annotations
 

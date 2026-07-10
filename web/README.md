@@ -14,10 +14,8 @@ npm run dev        # http://localhost:5173
 
 ```bash
 # 项目根目录
-DC_API_KEYS=dev-key-please-change python -m document_comparison.api.app
+python -m document_comparison.api.app
 ```
-
-默认 API Key 为 `dev-key-please-change`（见后端 [config.py](../src/document_comparison/config.py)），已写入 [.env.development](.env.development)；也可在「提交页 → API Key 设置」里临时替换，仅存本机 localStorage。
 
 ## 脚本
 
@@ -34,10 +32,10 @@ DC_API_KEYS=dev-key-please-change python -m document_comparison.api.app
 src/
 ├── api/
 │   ├── types.ts       # 与后端 pydantic 模型一一对应
-│   ├── client.ts      # fetch 封装:X-API-Key、错误归一化、fetch-Stream SSE
+│   ├── client.ts      # fetch 封装:错误归一化、fetch-Stream SSE
 │   └── compare.ts     # 端点封装(/health、/compare、/events、/report)
 ├── stores/
-│   ├── settings.ts    # API Key(localStorage + env 回落)
+│   ├── settings.ts    # 全局设置(后续扩展用)
 │   ├── task.ts        # 提交、SSE 进度(轮询兜底)、终结态
 │   └── report.ts      # 报告派生统计(按风险分级、要素变更)
 ├── router/            # / 提交页 · /report/:taskId 报告页
@@ -49,8 +47,7 @@ src/
 
 ## 与后端契约的对应
 
-- 鉴权：所有 `/api/*` 请求携带 `X-API-Key` 头（[client.ts](src/api/client.ts)）。
-- 进度流：`GET /api/v1/compare/{id}/events` 为 SSE。浏览器原生 `EventSource` 无法带自定义头，故用 `fetch` + `ReadableStream` 解析 `data:` 帧；流失败时自动降级为 `getTask` 轮询。
+- 进度流：`GET /api/v1/compare/{id}/events` 为 SSE，用 `fetch` + `ReadableStream` 解析 `data:` 帧；流失败时自动降级为 `getTask` 轮询。
 - 报告：`TamperReport` 的 TS 类型见 [types.ts](src/api/types.ts)，字段与后端 [models.py](../src/document_comparison/models.py) 完全对齐。
 
 ## 待办（已知留空）

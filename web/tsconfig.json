@@ -17,7 +17,6 @@
     "allowImportingTsExtensions": false,
     "noEmit": true,
     "jsx": "preserve",
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }

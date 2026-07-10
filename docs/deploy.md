@@ -12,7 +12,6 @@ cd document_comparison
 
 # 2. 准备环境变量
 cp .env.example .env
-# 编辑 .env,至少修改 DC_API_KEYS
 
 # 3. 构建并启动
 docker compose up -d --build
@@ -29,14 +28,7 @@ curl http://localhost:8000/health
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `DC_PORT` | `8000` | 宿主机映射端口(容器内固定 8000) |
-| `DC_API_KEYS` | `dev-key-please-change` | 认证 Key,逗号分隔多个;**生产务必替换** |
-| `DC_OCR_BACKEND` | `mock` | OCR 引擎:`mock` / `vllm` / `llm` |
-| `DC_LLM_API_BASE` | 阿里云 DashScope | LLM/VLM 推理地址(兼容 OpenAI 协议) |
-| `DC_LLM_API_KEY` | (空) | LLM API Key |
-| `DC_LLM_MODEL` | `qwen-vl-max` | 模型名 |
-| `DC_LLM_TIMEOUT` | `120` | 单页识别超时(秒) |
-| `DC_LLM_MAX_CONCURRENCY` | `4` | 并发页数 |
-| `DC_EMBED_BACKEND` | `mock` | 向量引擎:`mock` / `bge` |
+> LLM / OCR 配置(API Base、API Key、模型名、超时、并发等)统一持久化于 `.dc_data/llm_config.json`,通过 UI 设置页维护,不使用环境变量。
 
 ## 数据持久化
 
@@ -73,9 +65,9 @@ curl http://localhost:8000/health
 
 默认 `mock` 后端不调用任何外部服务。要启用真实 OCR:
 
-1. 在 `.env` 中设置 `DC_OCR_BACKEND=vllm`(或 `llm`)
-2. 配置 `DC_LLM_API_BASE`、`DC_LLM_API_KEY`、`DC_LLM_MODEL` 指向你的推理服务
-3. 也可以在启动后通过 UI 的"设置"页面在线修改(会持久化到数据卷)
+1. 打开 UI 的"设置"页面
+2. 配置 API Base、API Key、模型名指向你的推理服务(兼容 OpenAI 协议)
+3. 设置页的配置会持久化到数据卷 `.dc_data/llm_config.json`,容器重启后仍然生效
 
 ## 反向代理(Nginx)
 

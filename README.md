@@ -1,4 +1,4 @@
-# 文档比对系统（Document Comparison）
+# 文档比对系统（llm_orc_compare）
 
 基于 **多模态 LLM API** 的合同条款篡改检测：以原始 Word 合同为基准，自动比对 PDF 扫描件，识别条款是否被篡改。
 

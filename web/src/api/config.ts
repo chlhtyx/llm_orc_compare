@@ -3,7 +3,6 @@ import { request } from './client'
 
 /** 后端返回的生效配置(GET)。api_key 已脱敏。 */
 export interface LlmConfig {
-  ocr_backend: string
   llm_api_base: string
   llm_api_key: string // 脱敏,如 ****5678
   llm_api_key_set: boolean
@@ -16,7 +15,6 @@ export interface LlmConfig {
 
 /** 更新请求(PUT)。全部可选;不传的字段不修改。 */
 export interface LlmConfigUpdate {
-  ocr_backend?: 'mock' | 'vllm' | 'llm'
   llm_api_base?: string
   /** 传空串清除已保存 key;传 "********" 表示不修改 */
   llm_api_key?: string

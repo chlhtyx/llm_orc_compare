@@ -1,7 +1,7 @@
 """语义向量引擎(对齐兜底,§4)。
 
 默认 `mock`(字符袋余弦,反映字面相似度);生产切 `bge`(bge-m3)。
-由 DC_EMBED_BACKEND 控制。
+由 llm_config.json 的 embed_backend 字段控制。
 """
 from __future__ import annotations
 

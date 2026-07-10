@@ -30,7 +30,7 @@ def run_pipeline(
     on_progress: ProgressCb | None = None,
 ) -> TamperReport:
     cfg = cfg or settings
-    ocr = ocr or get_ocr_engine(cfg.ocr_backend)
+    ocr = ocr or get_ocr_engine()
     embed = embed or get_embed_engine(cfg.embed_backend)
     thresholds = {"identical": cfg.similarity_identical, "modified": cfg.similarity_modified}
 

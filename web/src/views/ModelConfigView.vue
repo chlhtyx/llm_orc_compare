@@ -6,7 +6,6 @@ import type { LlmConfig } from '@/api/config'
 const store = useModelConfigStore()
 
 const form = reactive({
-  ocr_backend: 'vllm' as 'vllm',
   llm_api_base: '',
   llm_api_key: '',
   llm_model: '',
@@ -20,7 +19,6 @@ const saveError = ref<string | null>(null)
 
 function syncFromConfig(c: LlmConfig | null): void {
   if (!c) return
-  form.ocr_backend = 'vllm'
   form.llm_api_base = c.llm_api_base || ''
   form.llm_api_key = c.llm_api_key || ''
   form.llm_model = c.llm_model || ''
@@ -45,7 +43,6 @@ async function onSave(): Promise<void> {
   saveError.value = null
   saved.value = false
   const payload: Record<string, unknown> = {
-    ocr_backend: 'vllm',
     llm_api_base: form.llm_api_base.trim(),
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),

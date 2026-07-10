@@ -9,7 +9,7 @@ import type {
 } from './types'
 import { ApiError, openEventStream, request } from './client'
 
-export function health(): Promise<{ status: string; ocr_backend: string }> {
+export function health(): Promise<{ status: string }> {
   return request('/health')
 }
 

@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
-    "composite": true,
-    "skipLibCheck": true,
+  "composite": true,
+  "declaration": true,
+  "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true,

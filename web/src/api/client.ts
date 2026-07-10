@@ -1,9 +1,6 @@
 // 极简 HTTP 客户端:
-// - 统一带 X-API-Key(api/compare.ts 默认经由此处)
 // - 统一错误归一化为 ApiError {code, message, request_id}
-// - 提供 fetch + ReadableStream 的 SSE 读取(EventSource 不能带自定义头)
-import { useSettingsStore } from '@/stores/settings'
-
+// - 提供 fetch + ReadableStream 的 SSE 读取
 export interface NormalizedError {
   code: number
   message: string
@@ -27,15 +24,6 @@ export function apiUrl(path: string): string {
   return `${base}${path}`
 }
 
-function currentApiKey(): string {
-  // settings store 可能尚未安装(例如在 main.ts 之前),做兜底
-  try {
-    return useSettingsStore().resolvedApiKey
-  } catch {
-    return import.meta.env.VITE_API_KEY ?? ''
-  }
-}
-
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: BodyInit
@@ -51,8 +39,6 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   } else if (opts.body !== undefined) {
     headers.set('Content-Type', 'application/json')
   }
-  const key = currentApiKey()
-  if (key) headers.set('X-API-Key', key)
 
   let res: Response
   try {
@@ -94,8 +80,6 @@ async function normalizeError(res: Response): Promise<NormalizedError> {
 
 /**
  * 读取 SSE 进度流(后端 GET /api/v1/compare/{id}/events)。
- *
- * 用 fetch + ReadableStream 而非 EventSource:后者无法携带 X-API-Key 头。
  * 解析 `data: {...}\n\n` 与 `event: done` 帧格式。
  */
 export interface SSEHandlers {
@@ -108,8 +92,6 @@ export function openEventStream(path: string, handlers: SSEHandlers): AbortContr
   const controller = new AbortController()
   const headers = new Headers()
   headers.set('Accept', 'text/event-stream')
-  const key = currentApiKey()
-  if (key) headers.set('X-API-Key', key)
 
   ;(async () => {
     let res: Response
@@ -138,7 +120,6 @@ export function openEventStream(path: string, handlers: SSEHandlers): AbortContr
         if (done) break
         buffer += decoder.decode(value, { stream: true })
 
-        // 帧以空行分隔
         let sep: number
         while ((sep = buffer.indexOf('\n\n')) !== -1) {
           const frame = buffer.slice(0, sep)
@@ -146,7 +127,6 @@ export function openEventStream(path: string, handlers: SSEHandlers): AbortContr
           parseSseFrame(frame, handlers)
         }
       }
-      // flush 残余
       if (buffer.trim()) parseSseFrame(buffer, handlers)
     } catch (e) {
       if (!controller.signal.aborted) handlers.onError?.(e as Error)

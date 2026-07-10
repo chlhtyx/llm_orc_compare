@@ -6,13 +6,13 @@
 - 每页 PDF 渲染为 PNG,以 image_url 发多模态请求,要求 LLM 返回 JSON 版面块。
 - 输出统一为 Block(bbox 为 PDF 点坐标),与 mock 引擎一致。
 
-配置(见 config.Settings):
-- DC_LLM_API_BASE        API 根地址(默认 https://api.openai.com/v1)
-- DC_LLM_API_KEY         API Key
-- DC_LLM_MODEL           多模态模型名(默认 gpt-4o)
-- DC_LLM_TIMEOUT         单次请求读取超时秒(默认 120;连接超时固定 10s)
-- DC_LLM_MAX_CONCURRENCY 逐页并发数(默认 4)
-- DC_LLM_MAX_RETRIES     单页瞬态失败(超时 / 429 / 5xx)重试次数(默认 2)
+配置(统一持久化于 .dc_data/llm_config.json,在 UI 设置页维护):
+- llm_api_base           API 根地址(兼容 OpenAI 协议)
+- llm_api_key            API Key
+- llm_model              多模态模型名
+- llm_timeout            单次请求读取超时秒(默认 120;连接超时固定 10s)
+- llm_max_concurrency    逐页并发数(默认 4)
+- llm_max_retries        单页瞬态失败(超时 / 429 / 5xx)重试次数(默认 2)
 """
 from __future__ import annotations
 

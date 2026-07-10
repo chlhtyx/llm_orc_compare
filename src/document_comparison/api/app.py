@@ -18,7 +18,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..auth import require_api_key
 from ..config import (
     llm_config_path,
     load_llm_overrides,
@@ -78,42 +77,42 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "ocr_backend": settings.ocr_backend}
+        return {"status": "ok"}
 
-    @app.get("/api/v1/config/llm", dependencies=[Depends(require_api_key)])
+    @app.get("/api/v1/config/llm")
     async def get_llm_config():
         """读取当前生效的 LLM 配置(环境变量 + 持久化覆盖后的合并值)。"""
         return {
-            "ocr_backend": settings.ocr_backend,
             "llm_api_base": settings.llm_api_base,
             "llm_api_key": _mask_key(settings.llm_api_key),
             "llm_api_key_set": bool(settings.llm_api_key),
             "llm_model": settings.llm_model,
             "llm_timeout": settings.llm_timeout,
             "llm_max_concurrency": settings.llm_max_concurrency,
+            "llm_max_retries": settings.llm_max_retries,
+            "embed_backend": settings.embed_backend,
             "persisted": load_llm_overrides(),
             "config_file": str(llm_config_path()),
         }
 
-    @app.put("/api/v1/config/llm", dependencies=[Depends(require_api_key)])
+    @app.put("/api/v1/config/llm")
     async def put_llm_config(body: dict):
         """更新 LLM 配置并持久化。
 
-        可选字段:ocr_backend, llm_api_base, llm_api_key, llm_model,
+        可选字段:llm_api_base, llm_api_key, llm_model,
         llm_timeout, llm_max_concurrency。空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
         allowed = {
-            "ocr_backend", "llm_api_base", "llm_api_key", "llm_model",
-            "llm_timeout", "llm_max_concurrency",
+            "llm_api_base", "llm_api_key", "llm_model",
+            "llm_timeout", "llm_max_concurrency", "llm_max_retries",
+            "embed_backend",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
             raise HTTPException(400, f"未知字段: {sorted(unknown)}")
 
         # 类型校验
-        if "ocr_backend" in body and body["ocr_backend"] not in ("mock", "vllm", "llm"):
-            raise HTTPException(400, "ocr_backend 仅支持 mock | vllm | llm")
         if "llm_timeout" in body and body["llm_timeout"] is not None:
             try:
                 float(body["llm_timeout"])
@@ -124,6 +123,13 @@ def create_app() -> FastAPI:
                 int(body["llm_max_concurrency"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "llm_max_concurrency 必须为整数")
+        if "llm_max_retries" in body and body["llm_max_retries"] is not None:
+            try:
+                int(body["llm_max_retries"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "llm_max_retries 必须为整数")
+        if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge"):
+            raise HTTPException(400, "embed_backend 仅支持 mock | bge")
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
         overrides = dict(body)
@@ -134,17 +140,18 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "config": {
-                "ocr_backend": settings.ocr_backend,
                 "llm_api_base": settings.llm_api_base,
                 "llm_api_key": _mask_key(settings.llm_api_key),
                 "llm_api_key_set": bool(settings.llm_api_key),
                 "llm_model": settings.llm_model,
                 "llm_timeout": settings.llm_timeout,
                 "llm_max_concurrency": settings.llm_max_concurrency,
+                "llm_max_retries": settings.llm_max_retries,
+                "embed_backend": settings.embed_backend,
             },
         }
 
-    @app.post("/api/v1/compare", dependencies=[Depends(require_api_key)])
+    @app.post("/api/v1/compare")
     async def compare(
         source: UploadFile = File(..., description="原始 Word(.docx)"),
         target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
@@ -183,7 +190,7 @@ def create_app() -> FastAPI:
         return {"task_id": task_id, "status": "pending"}
 
     @app.get(
-        "/api/v1/compare/{task_id}", dependencies=[Depends(require_api_key)]
+        "/api/v1/compare/{task_id}"
     )
     async def get_result(task_id: str):
         task = task_manager.get(task_id)
@@ -201,7 +208,6 @@ def create_app() -> FastAPI:
 
     @app.get(
         "/api/v1/compare/{task_id}/events",
-        dependencies=[Depends(require_api_key)],
     )
     async def events(task_id: str):
         task = task_manager.get(task_id)
@@ -217,7 +223,6 @@ def create_app() -> FastAPI:
 
     @app.get(
         "/api/v1/compare/{task_id}/report",
-        dependencies=[Depends(require_api_key)],
     )
     async def download_report(task_id: str, format: str = "json"):
         task = task_manager.get(task_id)
