@@ -39,3 +39,15 @@ def load_report(task_id: str) -> TamperReport | None:
 
 def report_path(task_id: str, fmt: str) -> Path:
     return settings.reports_dir / f"{task_id}.{fmt}"
+
+
+def upload_path(task_id: str, role: str) -> Path | None:
+    """查找已上传文件路径。role ∈ {source, target}。
+    
+    返回匹配的第一个文件(通过前缀 task_id-role 匹配,不限后缀)。
+    不存在时返回 None。
+    """
+    for f in settings.uploads_dir.iterdir():
+        if f.is_file() and f.name.startswith(f"{task_id}-{role}"):
+            return f
+    return None

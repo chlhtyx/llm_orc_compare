@@ -7,7 +7,7 @@ import type {
   TaskStatus,
   TamperReport,
 } from './types'
-import { ApiError, openEventStream, request } from './client'
+import { ApiError, apiUrl, openEventStream, request } from './client'
 
 export function health(): Promise<{ status: string }> {
   return request('/health')
@@ -40,6 +40,11 @@ export function getReport(taskId: string, format: 'json' = 'json'): Promise<Tamp
     `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=${format}`,
   )
   // 后端 pdf 烧录暂未实现;非 json 时由后端返回 501,前端统一按 json 调用即可
+}
+
+/** 返回 PDF 源文件的可访问 URL，供 <iframe> 或 pdf.js 加载。 */
+export function getSourcePdfUrl(taskId: string): string {
+  return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/source`)
 }
 
 export interface ProgressHandlers {

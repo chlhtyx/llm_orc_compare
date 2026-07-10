@@ -3,7 +3,14 @@ import { computed } from 'vue'
 import OverallBadge from './OverallBadge.vue'
 import type { Diff } from '@/api/types'
 
-const props = defineProps<{ diff: Diff }>()
+const props = defineProps<{
+  diff: Diff
+  selected?: boolean
+}>()
+
+const emit = defineEmits<{
+  select: [id: string]
+}>()
 
 const heading = computed(() => {
   const parts = [props.diff.number, props.diff.title].filter(Boolean)
@@ -16,7 +23,14 @@ const hasInlineDiff = computed(
 </script>
 
 <template>
-  <article class="diff-item" :class="`is-${diff.status}`">
+  <article
+    class="diff-item"
+    :class="{
+      [`is-${diff.status}`]: true,
+      'diff-item--sel': selected,
+    }"
+    @click="emit('select', diff.alignment_id)"
+  >
     <header class="diff-head">
       <span class="diff-title">{{ heading }}</span>
       <div class="diff-tags">
@@ -53,6 +67,15 @@ const hasInlineDiff = computed(
   border-radius: var(--radius-sm);
   padding: 12px 14px;
   background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.diff-item:hover {
+  background: var(--surface-2);
+}
+.diff-item--sel {
+  border-color: var(--primary);
+  background: rgba(59,130,246,.06);
 }
 .diff-item.is-modified {
   border-left: 3px solid var(--risk-medium);

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
+
+import pymupdf
 
 from ..compare.diff import char_diff
 from ..compare.elements import elements_changed, extract_key_elements
@@ -144,3 +147,99 @@ def build_report(
         unmatched_clauses=unmatched,
         page_meta=page_metas,
     )
+
+
+# ---- PDF 烧录：将高亮标注直接写入 PDF 页面 ----
+
+_RISK_FILL = {
+    "high": (1.0, 0.15, 0.15),     # 红
+    "medium": (1.0, 0.75, 0.15),   # 黄
+    "low": (0.2, 0.55, 1.0),       # 蓝
+    "none": (0.6, 0.65, 0.7),      # 灰
+}
+_RISK_STROKE = {
+    "high": (0.85, 0.0, 0.0),
+    "medium": (0.85, 0.6, 0.0),
+    "low": (0.1, 0.4, 0.9),
+    "none": (0.4, 0.45, 0.5),
+}
+
+
+def burn_pdf(
+    pdf_path: str | Path,
+    report: TamperReport,
+    output_path: str | Path,
+) -> Path:
+    """在源 PDF 页面上烧录差异标注矩形框,保存为新文件。
+
+    标注来自 report.diffs 中所有带 page_regions 的条款。每个区域:
+    - 按风险等级着色半透明矩形
+    - 在矩形右上角附加简短编号标签
+
+    返回输出文件路径。
+    """
+    doc = pymupdf.open(str(pdf_path))
+    pmeta = {m.page_index: m for m in report.page_meta}
+    # 逐页收集标注
+    page_regions: dict[int, list[tuple[Diff, PageRegion]]] = {}
+    for d in report.diffs:
+        for r in d.page_regions:
+            page_regions.setdefault(r.page_index, []).append((d, r))
+
+    for pi in range(len(doc)):
+        page = doc[pi]
+        meta = pmeta.get(pi)
+        if not meta:
+            continue
+        pw, ph = meta.pdf_width_pt, meta.pdf_height_pt
+        if pw <= 0 or ph <= 0:
+            continue
+        regions = page_regions.get(pi, [])
+        for d, r in regions:
+            x1, y1, x2, y2 = r.bbox
+            left = x1 * pw
+            top = y1 * ph
+            right = x2 * pw
+            bottom = y2 * ph
+            rect = pymupdf.Rect(left, top, right, bottom)
+            color_fill = _RISK_FILL.get(d.risk_level, _RISK_FILL["none"])
+            color_stroke = _RISK_STROKE.get(d.risk_level, _RISK_STROKE["none"])
+
+            # 半透明填充
+            annot = page.add_rect_annot(rect)
+            annot.set_colors(fill=color_fill, stroke=color_stroke)
+            annot.set_border(width=1.5)
+            annot.set_opacity(0.35)
+            annot.update()
+
+            # 简短标签(编号 + 风险级缩写)
+            label = d.number or d.alignment_id[-6:]
+            risk_abbr = {"high": "高", "medium": "中", "low": "低", "none": "-"}.get(d.risk_level, "?")
+            label_text = f"{label} [{risk_abbr}]"
+            # 标签写在矩形右上角外侧
+            label_rect = pymupdf.Rect(right + 2, top - 10, right + 80, top + 2)
+            page.insert_textbox(
+                label_rect,
+                label_text,
+                fontsize=7,
+                color=color_stroke,
+                fontname="china-s",
+                align=0,
+            )
+
+        # 页脚标注
+        if regions:
+            footer = f"文档比对 · 本页 {len(regions)} 处差异"
+            footer_rect = pymupdf.Rect(36, ph - 24, pw - 36, ph - 10)
+            page.insert_textbox(
+                footer_rect,
+                footer,
+                fontsize=8,
+                color=(0.5, 0.5, 0.5),
+                fontname="china-s",
+                align=1,
+            )
+
+    doc.save(str(output_path), incremental=False, deflate=True)
+    doc.close()
+    return Path(output_path)

@@ -5,6 +5,7 @@
   GET  /api/v1/compare/{task_id}    查询结果
   GET  /api/v1/compare/{task_id}/events   SSE 进度(§7.3)
   GET  /api/v1/compare/{task_id}/report   下载报告(json/pdf)
+  GET  /api/v1/compare/{task_id}/source   获取源 PDF 预览
   GET  /health
 """
 from __future__ import annotations
@@ -25,7 +26,8 @@ from ..config import (
     settings,
 )
 from ..models import CompareOptions
-from ..storage import load_report, report_path, save_upload
+from ..storage import load_report, report_path, save_upload, upload_path
+from ..report.builder import burn_pdf
 from ..tasks import task_manager
 
 
@@ -235,9 +237,36 @@ def create_app() -> FastAPI:
         if format == "json":
             return JSONResponse(content=report.model_dump())
         if format == "pdf":
-            # §5.6 烧录高亮 PDF 暂未实现(待 reportlab/PyMuPDF 批注)
-            raise HTTPException(501, "pdf 烧录报告尚未实现,请用 format=json")
-        raise HTTPException(400, "format 仅支持 json|pdf")
+            target_path = upload_path(task_id, "target")
+            if target_path is None:
+                raise HTTPException(404, "源 PDF 文件已过期,无法生成标注报告")
+            out = settings.reports_dir / f"{task_id}_annotated.pdf"
+            burn_pdf(target_path, report, out)
+            return FileResponse(
+                out,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="report-{task_id}.pdf"'
+                },
+            )
+
+    @app.get(
+        "/api/v1/compare/{task_id}/source",
+    )
+    async def get_source_file(task_id: str):
+        """返回上传的原始 PDF 扫描件,供前端预览。
+
+        在报告查看模式下,前端可通过此端点获取 PDF 文件路径,
+        以浏览器原生 <iframe> 或 pdf.js 渲染预览。
+        """
+        path = upload_path(task_id, "target")  # PDF 扫描件是 target
+        if path is None:
+            raise HTTPException(404, "source file not found (may have been cleaned up)")
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{task_id}-target.pdf"'},
+        )
 
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。

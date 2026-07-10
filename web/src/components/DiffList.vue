@@ -1,17 +1,28 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import DiffItem from './DiffItem.vue'
 import type { Diff } from '@/api/types'
 
-const props = defineProps<{ diffs: Diff[]; emptyHint?: string }>()
+defineProps<{
+  diffs: Diff[]
+  emptyHint?: string
+  selectedClauseId?: string | null
+}>()
 
-const items = computed(() => props.diffs)
+const emit = defineEmits<{
+  select: [id: string]
+}>()
 </script>
 
 <template>
   <div class="diff-list">
-    <p v-if="!items.length" class="muted empty">{{ emptyHint ?? '无条款差异。' }}</p>
-    <DiffItem v-for="d in items" :key="d.alignment_id" :diff="d" />
+    <p v-if="!diffs.length" class="muted empty">{{ emptyHint ?? '无条款差异。' }}</p>
+    <DiffItem
+      v-for="d in diffs"
+      :key="d.alignment_id"
+      :diff="d"
+      :selected="selectedClauseId === d.alignment_id"
+      @select="emit('select', $event)"
+    />
   </div>
 </template>
 

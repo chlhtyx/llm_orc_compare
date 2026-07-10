@@ -6,7 +6,7 @@ import OverallBadge from '@/components/OverallBadge.vue'
 import DiffList from '@/components/DiffList.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
-import { ApiError } from '@/api/compare'
+import { ApiError, getSourcePdfUrl } from '@/api/compare'
 import { useTaskStore } from '@/stores/task'
 import { useReportStore } from '@/stores/report'
 import type { Diff, TamperReport } from '@/api/types'
@@ -46,6 +46,7 @@ taskStore.dispose()
 
 const showPdf = ref(false)
 const filter = ref<'all' | 'risk' | 'modified'>('all')
+const selectedClauseId = ref<string | null>(null)
 
 const visibleDiffs = computed<Diff[]>(() => {
 const list = reportStore.diffsBySeverity
@@ -55,10 +56,16 @@ return list
 })
 
 const pdfUrl = computed(() => {
-// 预览仅在上传当次会话内可用(文件未持久化到可访问 URL)。
-// 真实部署可改为后端 /api/v1/compare/{id}/source 之类的静态路由。
-return null
+return getSourcePdfUrl(props.taskId)
 })
+
+/** 点击条款 → 选中 + 展开 PDF 预览 + 滚动到对应页 */
+function onSelectClause(id: string) {
+  selectedClauseId.value = id
+  if (!showPdf.value) {
+    showPdf.value = true
+  }
+}
 </script>
 
 <template>
@@ -124,12 +131,21 @@ return null
             <button :class="['chip', { on: filter === 'modified' }]" @click="filter = 'modified'">已修改</button>
         </div>
         </div>
-        <DiffList :diffs="visibleDiffs" />
+        <DiffList
+          :diffs="visibleDiffs"
+          :selected-clause-id="selectedClauseId"
+          @select="onSelectClause"
+        />
         </section>
 
         <section v-if="reportStore.unmatched.length" class="card">
         <h3 class="section-title">未对齐条款({{ reportStore.counts.unmatched }})</h3>
-        <DiffList :diffs="reportStore.unmatched" empty-hint="无" />
+        <DiffList
+          :diffs="reportStore.unmatched"
+          empty-hint="无"
+          :selected-clause-id="selectedClauseId"
+          @select="onSelectClause"
+        />
         </section>
 
         <section class="card">
@@ -142,6 +158,8 @@ return null
         :pdf-url="pdfUrl"
         :page-meta="reportStore.report.page_meta"
         :diffs="reportStore.diffs"
+        :selected-clause-id="selectedClauseId"
+        @select-clause="onSelectClause"
         />
         <p v-else class="muted">展开查看 PDF 页面与高亮区域。</p>
         </section>
