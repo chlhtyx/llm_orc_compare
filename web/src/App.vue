@@ -33,7 +33,7 @@ const activeName = computed(() =>
       <RouterView />
     </main>
     <footer class="app-foot">
-      <span>Document Comparison · PaddleOCR-VL</span>
+      <span>Document Comparison · LLM OCR</span>
     </footer>
   </div>
 </template>

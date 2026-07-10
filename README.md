@@ -1,6 +1,6 @@
 # 文档比对系统（Document Comparison）
 
-基于 **PaddleOCR-VL-1.5** 的合同条款篡改检测：以原始 Word 合同为基准，自动比对 PDF 扫描件，识别条款是否被篡改。
+基于 **多模态 LLM API** 的合同条款篡改检测：以原始 Word 合同为基准，自动比对 PDF 扫描件，识别条款是否被篡改。
 
 ## 它解决什么问题
 
@@ -9,7 +9,7 @@
 ## 核心思路
 
 1. **Word 解析**（python-docx）→ 结构化条款
-2. **PDF 扫描件 OCR**（PaddleOCR-VL-1.5）→ 结构化条款（含表格、印章）
+2. **PDF 扫描件 OCR**（多模态 LLM API）→ 结构化条款（含表格、印章）
 3. **条款对齐**：编号锚定 + 语义向量匹配
 4. **比对检测**：字符级 diff + 语义相似度 + 高风险要素强校验
 5. **报告**：结构化 JSON + PDF 高亮报告
@@ -26,7 +26,7 @@
 │   └── 技术方案.md        # 技术设计文档（当前）
 ├── src/                   # 后端源码（待实现）
 │   ├── parsing/           # Word/PDF 解析
-│   ├── ocr/               # PaddleOCR-VL-1.5 封装
+│   ├── ocr/               # 多模态 LLM OCR 封装
 │   ├── structure/         # 条款切分与归一化
 │   ├── align/             # 条款对齐
 │   ├── compare/           # 比对与篡改检测
@@ -42,12 +42,11 @@
 └── README.md
 ```
 
-## 环境要求（OCR 引擎）
+## 环境要求
 
-- Python 3.9–3.13
-- PaddlePaddle ≥ 3.2.1（NVIDIA GPU 需 CC ≥ 7.0）
-- `pip install -U "paddleocr[doc-parser]"`
-- 生产推荐：VLM 推理服务（vLLM / SGLang / FastDeploy）+ 官方 Docker 镜像
+- Python ≥ 3.9
+- OCR 通过多模态 LLM API（OpenAI 兼容）完成，无需本地 GPU / PaddlePaddle
+- 支持的模型：通义千问 VL、GPT-4o、PaddleOCR-VL（经 vLLM 部署）等，按模型名路由
 
 ## 状态
 

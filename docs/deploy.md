@@ -30,7 +30,7 @@ curl http://localhost:8000/health
 |------|--------|------|
 | `DC_PORT` | `8000` | 宿主机映射端口(容器内固定 8000) |
 | `DC_API_KEYS` | `dev-key-please-change` | 认证 Key,逗号分隔多个;**生产务必替换** |
-| `DC_OCR_BACKEND` | `mock` | OCR 引擎:`mock` / `vllm` / `paddle` / `llm` |
+| `DC_OCR_BACKEND` | `mock` | OCR 引擎:`mock` / `vllm` / `llm` |
 | `DC_LLM_API_BASE` | 阿里云 DashScope | LLM/VLM 推理地址(兼容 OpenAI 协议) |
 | `DC_LLM_API_KEY` | (空) | LLM API Key |
 | `DC_LLM_MODEL` | `qwen-vl-max` | 模型名 |
@@ -73,7 +73,7 @@ curl http://localhost:8000/health
 
 默认 `mock` 后端不调用任何外部服务。要启用真实 OCR:
 
-1. 在 `.env` 中设置 `DC_OCR_BACKEND=vllm`(或 `llm` / `paddle`)
+1. 在 `.env` 中设置 `DC_OCR_BACKEND=vllm`(或 `llm`)
 2. 配置 `DC_LLM_API_BASE`、`DC_LLM_API_KEY`、`DC_LLM_MODEL` 指向你的推理服务
 3. 也可以在启动后通过 UI 的"设置"页面在线修改(会持久化到数据卷)
 

@@ -42,9 +42,9 @@ def _mask_key(key: str) -> str:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="文档比对 API",
-        description="基于 PaddleOCR-VL 的合同条款篡改检测(§7、§14)",
-        version="0.1.0",
+       title="文档比对 API",
+        description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",
+       version="0.1.0",
     )
 
     app.add_middleware(
@@ -112,8 +112,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"未知字段: {sorted(unknown)}")
 
         # 类型校验
-        if "ocr_backend" in body and body["ocr_backend"] not in ("mock", "vllm", "paddle", "llm"):
-            raise HTTPException(400, "ocr_backend 仅支持 mock | vllm | paddle | llm")
+        if "ocr_backend" in body and body["ocr_backend"] not in ("mock", "vllm", "llm"):
+            raise HTTPException(400, "ocr_backend 仅支持 mock | vllm | llm")
         if "llm_timeout" in body and body["llm_timeout"] is not None:
             try:
                 float(body["llm_timeout"])

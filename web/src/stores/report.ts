@@ -34,14 +34,13 @@ export const useReportStore = defineStore('report', () => {
     keyElements.value.filter((k) => k.changed),
   )
 
-  const counts = computed(() => {
-    const total = diffs.value.length
-    const modified = diffs.value.filter((d) => d.status === 'modified').length
-    const added = diffs.value.filter((d) => d.status === 'added').length
-    const deleted = diffs.value.filter((d) => d.status === 'deleted').length
-    const identical = diffs.value.filter((d) => d.status === 'identical').length
-    return { total, modified, added, deleted, identical, unmatched: unmatched.value.length }
-  })
+ const counts = computed(() => {
+   const total = diffs.value.length
+   const modified = diffs.value.filter((d) => d.status === 'modified').length
+   const added = diffs.value.filter((d) => d.status === 'added').length
+   const deleted = diffs.value.filter((d) => d.status === 'deleted').length
+    return { total, modified, added, deleted, unmatched: unmatched.value.length }
+ })
 
   const overallRisk = computed<OverallRisk>(() => report.value?.overall_risk ?? 'clean')
 

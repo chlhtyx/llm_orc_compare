@@ -3,7 +3,7 @@
 模块布局对齐技术方案 docs/技术方案.md:
 - models        §6 数据结构
 - parsing       ① 文档解析层
-- ocr           ② OCR 文档理解层(接口 + mock + paddle 占位)
+- ocr           ② OCR 文档理解层(接口 + mock + LLM API)
 - structure     ③ 结构化抽取层
 - align         ④ 条款对齐层
 - compare       ⑤ 比对与篡改检测层

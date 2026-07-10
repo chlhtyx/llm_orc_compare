@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "document-comparison"
 version = "0.1.0"
-description = "基于 PaddleOCR-VL 的合同条款篡改检测系统"
+description = "基于多模态 LLM API 分析比对"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.110",
@@ -18,8 +18,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 真实 OCR 引擎(需 GPU / PaddlePaddle >= 3.2.1,Python 3.9–3.13)
-ocr = ["paddleocr[doc-parser]>=3.0"]
 # 真实语义向量(对齐兜底)
 embed = ["FlagEmbedding>=1.2"]
 dev = [

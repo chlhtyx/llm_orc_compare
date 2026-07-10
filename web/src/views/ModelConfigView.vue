@@ -6,7 +6,7 @@ import type { LlmConfig } from '@/api/config'
 const store = useModelConfigStore()
 
 const form = reactive({
-  ocr_backend: 'mock' as 'mock' | 'vllm',
+  ocr_backend: 'vllm' as 'vllm',
   llm_api_base: '',
   llm_api_key: '',
   llm_model: '',
@@ -18,14 +18,9 @@ const keyDirty = ref(false)
 const saved = ref(false)
 const saveError = ref<string | null>(null)
 
-// 后端可能返回 paddle/llm(旧别名),前端统一归一化为 vllm
-function normalizeBackend(b: string): 'mock' | 'vllm' {
-  return b === 'mock' ? 'mock' : 'vllm'
-}
-
 function syncFromConfig(c: LlmConfig | null): void {
   if (!c) return
-  form.ocr_backend = normalizeBackend(c.ocr_backend)
+  form.ocr_backend = 'vllm'
   form.llm_api_base = c.llm_api_base || ''
   form.llm_api_key = c.llm_api_key || ''
   form.llm_model = c.llm_model || ''
@@ -50,7 +45,7 @@ async function onSave(): Promise<void> {
   saveError.value = null
   saved.value = false
   const payload: Record<string, unknown> = {
-    ocr_backend: form.ocr_backend,
+    ocr_backend: 'vllm',
     llm_api_base: form.llm_api_base.trim(),
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),
@@ -73,24 +68,6 @@ async function onReset(): Promise<void> {
   saveError.value = null
   saved.value = false
 }
-
-const backendOptions = [
-  { value: 'mock' as const, label: 'Mock', desc: 'PDF 文本层(开发/文本 PDF)' },
-  { value: 'vllm' as const, label: 'vLLM 推理', desc: '远端多模态模型(PaddleOCR-VL / 千问 VL 等)' },
-]
-
-const modelPresets = [
-  { base: 'http://localhost:8000/v1', model: 'PaddleOCR-VL-1.5', label: 'PaddleOCR-VL(本地 vLLM)' },
-  { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-vl-max', label: '通义千问 VL Max' },
-  { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-vl-plus', label: '通义千问 VL Plus' },
-  { base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4v', label: '智谱 GLM-4V' },
-  { base: 'https://api.openai.com/v1', model: 'gpt-4o', label: 'OpenAI GPT-4o' },
-]
-
-function applyPreset(p: (typeof modelPresets)[number]): void {
-  form.llm_api_base = p.base
-  form.llm_model = p.model
-}
 </script>
 
 <template>
@@ -100,39 +77,13 @@ function applyPreset(p: (typeof modelPresets)[number]): void {
     <section class="card">
       <h2 class="page-title">OCR 引擎</h2>
       <p class="muted page-desc">
-        选择 PDF 扫描件的识别方式。PaddleOCR-VL 与通用多模态 LLM 均通过 vLLM 部署,
-        共用下方同一套 API 配置,按模型名路由到对应服务。
+        通过远端多模态推理服务(vLLM / SGLang / 云端 API)识别 PDF 扫描件。
+        所有模型(PaddleOCR-VL / 通义千问 VL / GPT-4o 等)共用下方同一套 API 配置,按模型名路由到对应服务。
       </p>
-
-      <div class="seg">
-        <button
-          v-for="opt in backendOptions"
-          :key="opt.value"
-          class="seg-btn"
-          :class="{ active: form.ocr_backend === opt.value }"
-          @click="form.ocr_backend = opt.value"
-        >
-          <span class="seg-label">{{ opt.label }}</span>
-          <span class="seg-desc">{{ opt.desc }}</span>
-        </button>
-      </div>
     </section>
 
-    <section v-if="form.ocr_backend === 'vllm'" class="card">
-      <h3 class="section-title">vLLM 推理服务配置</h3>
-
-      <div class="presets">
-        <span class="muted preset-hint">快捷预设:</span>
-        <button
-          v-for="p in modelPresets"
-          :key="p.label"
-          class="chip"
-          :class="{ active: form.llm_model === p.model && form.llm_api_base === p.base }"
-          @click="applyPreset(p)"
-        >
-          {{ p.label }}
-        </button>
-      </div>
+    <section class="card">
+      <h3 class="section-title">推理服务配置</h3>
 
       <div class="form-grid">
         <div class="field">
@@ -143,8 +94,8 @@ function applyPreset(p: (typeof modelPresets)[number]): void {
 
         <div class="field">
           <label>模型名称</label>
-          <input v-model="form.llm_model" class="input" placeholder="PaddleOCR-VL-1.5" />
-          <span class="hint">vLLM 加载的模型名(决定走哪个推理服务)</span>
+          <input v-model="form.llm_model" class="input" placeholder="qwen-vl-max" />
+          <span class="hint">加载的模型名(决定走哪个推理服务)</span>
         </div>
 
         <div class="field span-2">
@@ -178,12 +129,6 @@ function applyPreset(p: (typeof modelPresets)[number]): void {
       </div>
     </section>
 
-    <section v-else class="card">
-      <p class="muted">
-        Mock 引擎直接读取 PDF 文本层,适合开发与文本型 PDF。扫描件(无文本层)请切换到 vLLM 推理。
-      </p>
-    </section>
-
     <section class="card actions-card">
       <div class="actions">
         <button class="btn btn-primary" :disabled="store.saving" @click="onSave">
@@ -212,69 +157,6 @@ function applyPreset(p: (typeof modelPresets)[number]): void {
   margin: 0 0 16px;
 }
 
-.seg {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-.seg-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  cursor: pointer;
-  text-align: left;
-  transition: border-color 0.12s, background 0.12s;
-}
-.seg-btn:hover {
-  background: var(--surface-2);
-}
-.seg-btn.active {
-  border-color: var(--primary);
-  background: rgba(43, 95, 214, 0.06);
-}
-.seg-label {
-  font-weight: 600;
-  font-size: 14px;
-}
-.seg-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.presets {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.preset-hint {
-  font-size: 12px;
-}
-.chip {
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
-  font-size: 12px;
-  cursor: pointer;
-  transition: border-color 0.12s, color 0.12s, background 0.12s;
-}
-.chip:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-}
-.chip.active {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: rgba(43, 95, 214, 0.06);
-}
-
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -284,9 +166,6 @@ function applyPreset(p: (typeof modelPresets)[number]): void {
   grid-column: span 2;
 }
 @media (max-width: 640px) {
-  .seg {
-    grid-template-columns: 1fr;
-  }
   .form-grid {
     grid-template-columns: 1fr;
   }

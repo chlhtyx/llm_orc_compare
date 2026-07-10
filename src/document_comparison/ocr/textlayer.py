@@ -1,7 +1,7 @@
 """Mock OCR:直接读 PDF 文本层。
 
 适合开发与"文本 PDF"(非扫描件)。对扫描件(无文本层)返回空块——
-此时须切换 DC_OCR_BACKEND=paddle 走真实识别。
+此时须切换 DC_OCR_BACKEND=vllm 走多模态 LLM 识别。
 """
 from __future__ import annotations
 
@@ -13,6 +13,12 @@ from ..parsing.pdf import extract_text_blocks
 
 class TextLayerOCR:
     def recognize(
-        self, pdf_path: Path, page_metas: list[PageMeta]
+        self,
+        pdf_path: Path,
+        page_metas: list[PageMeta],
+        *,
+        on_progress=None,
     ) -> list[list[Block]]:
+        if on_progress:
+            on_progress("ocr", 0.40)
         return extract_text_blocks(pdf_path)

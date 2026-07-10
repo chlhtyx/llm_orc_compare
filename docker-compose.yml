@@ -13,7 +13,7 @@ services:
     environment:
       # —— 认证(逗号分隔多 Key;生产务必替换)——
       DC_API_KEYS: ${DC_API_KEYS:-dev-key-please-change}
-      # —— OCR 引擎:mock | vllm | paddle | llm ——
+      # —— OCR 引擎:mock | vllm | llm ——
       DC_OCR_BACKEND: ${DC_OCR_BACKEND:-mock}
       # —— 远端 LLM / VLM 推理(兼容 OpenAI Chat Completions 协议)——
       DC_LLM_API_BASE: ${DC_LLM_API_BASE:-https://dashscope.aliyuncs.com/compatible-mode/v1}

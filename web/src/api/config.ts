@@ -16,7 +16,7 @@ export interface LlmConfig {
 
 /** 更新请求(PUT)。全部可选;不传的字段不修改。 */
 export interface LlmConfigUpdate {
-  ocr_backend?: 'mock' | 'vllm' | 'paddle' | 'llm'
+  ocr_backend?: 'mock' | 'vllm' | 'llm'
   llm_api_base?: string
   /** 传空串清除已保存 key;传 "********" 表示不修改 */
   llm_api_key?: string

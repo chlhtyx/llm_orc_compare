@@ -37,12 +37,13 @@ class Settings:
       )
    )
 
-    # —— OCR 引擎选择:mock | vllm(paddle/llm 为别名)——
-    ocr_backend: str = field(default_factory=lambda: _env("DC_OCR_BACKEND", "mock"))
+    # —— OCR 引擎选择:mock | vllm(llm 为别名)——
+    ocr_backend: str = field(default_factory=lambda: _env("DC_OCR_BACKEND", "vllm"))
 
-    # —— 远端多模态推理(vllm backend 用,含 PaddleOCR-VL / 通义千问 VL 等)——
+    # —— 远端多模态推理(vllm backend 用)——
     # 兼容 OpenAI Chat Completions 协议(base_url 指向 vLLM / SGLang / 云端 API)。
-    # PaddleOCR-VL 与通用 LLM 共用此配置,按 model 路由到对应服务。
+    # 所有多模态模型(PaddleOCR-VL / 通义千问 VL / GPT-4o 等)共用此配置,
+    # 按 model 路由到对应服务;无需本地安装任何 OCR 引擎。
     llm_api_base: str = field(
         default_factory=lambda: _env("DC_LLM_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     )

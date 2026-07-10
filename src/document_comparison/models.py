@@ -21,7 +21,7 @@ BBoxShape = Literal["rect", "quad", "poly"]
 
 
 class Block(BaseModel):
-    """版面元素(PaddleOCR-VL 输出归一化)。"""
+    """版面元素(多模态 LLM OCR 输出)。"""
 
     block_id: str
     page_index: int

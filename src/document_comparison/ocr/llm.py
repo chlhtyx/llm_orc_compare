@@ -4,7 +4,7 @@
 - 无需本地 GPU / PaddlePaddle,任意可访问多模态 LLM 的环境即可部署。
 - 兼容 OpenAI 协议(base_url 可指向 OpenAI / Azure / 本地 vLLM / SGLang 等)。
 - 每页 PDF 渲染为 PNG,以 image_url 发多模态请求,要求 LLM 返回 JSON 版面块。
-- 输出统一为 Block(bbox 为 PDF 点坐标),与 paddle / mock 引擎一致。
+- 输出统一为 Block(bbox 为 PDF 点坐标),与 mock 引擎一致。
 
 配置(见 config.Settings):
 - DC_LLM_API_BASE        API 根地址(默认 https://api.openai.com/v1)
@@ -31,6 +31,7 @@ import httpx
 from ..config import settings
 from ..models import Block, PageMeta
 from ..parsing.pdf import render_pages
+from .base import ProgressCb
 
 # 要求 LLM 返回的 JSON 结构:
 # {"blocks": [{"label": ..., "content": ..., "bbox": [x1,y1,x2,y2]}, ...]}
@@ -50,7 +51,7 @@ class LLMOCREngine:
     """通过多模态 LLM API 识别 PDF 版面。
 
     坐标系约定:LLM 返回归一化 [0,1] bbox,本引擎按页面尺寸换算为
-    PDF 点坐标(pt,72 DPI),与 pdf.js viewport 对齐(同 mock / paddle)。
+    PDF 点坐标(pt,72 DPI),与 pdf.js viewport 对齐(同 mock 引擎)。
     """
 
     def __init__(
@@ -76,7 +77,11 @@ class LLMOCREngine:
 
     # —— 公共接口 ——
     def recognize(
-        self, pdf_path: Path, page_metas: list[PageMeta]
+        self,
+        pdf_path: Path,
+        page_metas: list[PageMeta],
+        *,
+        on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
         images = render_pages(pdf_path, dpi=self._dpi)
         if not images:
@@ -89,9 +94,16 @@ class LLMOCREngine:
 
         # 逐页识别(限并发)
         results: list[list[Block]] = [None] * len(images)  # type: ignore[list-item]
+        total = len(images)
+        done_count = [0]  # mutable counter for threads
+
         with _BoundedConcurrency(self.max_concurrency) as pool:
             for i, img in enumerate(images):
-                pool.submit(self._recognize_page, i, img, page_metas[i], results)
+                pool.submit(
+                    self._recognize_page,
+                    i, img, page_metas[i], results,
+                    on_progress, total, done_count,
+                )
 
         return results
 
@@ -102,11 +114,18 @@ class LLMOCREngine:
         png_bytes: bytes,
         meta: PageMeta,
         out: list[list[Block]],
+        on_progress: ProgressCb | None = None,
+        total_pages: int = 1,
+        done_count: list[int] | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
         content = self._chat(data_url)
         blocks = _parse_blocks(content, page_index, meta)
         out[page_index] = blocks
+        if on_progress:
+            done_count[0] += 1
+            frac = 0.10 + (done_count[0] / total_pages) * 0.60
+            on_progress("ocr", frac)
 
     def _chat(self, data_url: str) -> str:
         url = self.api_base.rstrip("/") + "/chat/completions"

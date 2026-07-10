@@ -63,11 +63,11 @@ class TaskManager:
         try:
             async with self._sem:
                 task.info.status = "running"
-                task.push_event("parsing", 0.1)
-                task.push_event("ocr", 0.3)
                 # pipeline 为同步阻塞(OCR/解析),放工作线程
+                # 进度回调从工作线程实时推送(stage, fraction)
                 report = await asyncio.to_thread(
-                    run_pipeline, word_path, pdf_path, settings
+                    run_pipeline, word_path, pdf_path, settings,
+                    on_progress=lambda stage, frac: task.push_event(stage, frac),
                 )
             task.report = report
             task.info.overall_risk = report.overall_risk
@@ -77,7 +77,7 @@ class TaskManager:
             await self._fire_callback(task_id, "done", {
                 "overall_risk": report.overall_risk,
                 "summary": report.summary,
-               "report_url": f"/api/v1/compare/{task_id}/report?format=json",
+                "report_url": f"/api/v1/compare/{task_id}/report?format=json",
             })
         except Exception as e:  # noqa: BLE001
             task.info.status = "failed"
