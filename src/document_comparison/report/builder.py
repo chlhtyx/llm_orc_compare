@@ -55,6 +55,21 @@ def _clean_bbox(bbox: list[float], page_w: float, page_h: float) -> list[float]:
     return [left, top, right, bottom]
 
 
+def _unmatched_risk(c: Clause) -> tuple[str, str]:
+    """未配对条款按来源分级(§8.3 调整)。
+
+    - 编号条款未配对(number 非空):高风险,疑似真实新增/缺失。
+    - 键值块未配对(field_key 非空):低风险,多为切分边界差异,待人工核对。
+    - 无编号无字段的散落文本:低风险(OCR 噪声/页眉页脚)。
+    返回 (risk_level, reason)。
+    """
+    if c.number:
+        return ("high", f"待核件缺失/独有条款:编号 {c.number} 无配对")
+    if c.field_key:
+        return ("low", "疑似切分边界差异,待人工核对")
+    return ("low", "疑似切分边界差异,待人工核对")
+
+
 def build_report(
     *,
     alignments: list[Alignment],
@@ -79,21 +94,23 @@ def build_report(
 
         if al.match_type == "unmatched":
             if pc and not wc:  # added
+                risk, reason = _unmatched_risk(pc)
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="added",
-                    risk_level="high",
-                    risk_reasons=["待核件独有条款"],
+                    risk_level=risk,
+                    risk_reasons=[reason],
                     number=pc.number,
                     title=pc.title,
                     page_regions=_normalize_regions(pc.blocks, pmeta),
                 )
             else:  # deleted
+                risk, reason = _unmatched_risk(wc) if wc else ("high", "待核件缺失条款")
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="deleted",
-                    risk_level="high",
-                    risk_reasons=["待核件缺失条款"],
+                    risk_level=risk,
+                    risk_reasons=[reason],
                     number=wc.number if wc else "",
                     title=wc.title if wc else "",
                 )

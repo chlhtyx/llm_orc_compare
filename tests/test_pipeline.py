@@ -1,5 +1,6 @@
 """端到端管线测试:Word(docx)→ PDF → 比对。"""
 import io
+from pathlib import Path
 
 from docx import Document  # type: ignore[import-untyped]
 
@@ -8,7 +9,17 @@ try:
 except ImportError:
     import fitz  # type: ignore
 
+from document_comparison.embed.mock import MockEmbedding
+from document_comparison.models import PageMeta
+from document_comparison.parsing.pdf import extract_text_blocks
 from document_comparison.pipeline import run_pipeline
+
+
+class _TextLayerOCR:
+    """用 PDF 文本层充当 mock OCR(避开真实 LLM 调用,测试稳定可复现)。"""
+
+    def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
+        return extract_text_blocks(pdf_path)
 
 
 def _make_word(parts):
@@ -83,3 +94,36 @@ def test_pipeline_detects_amount_tamper(tmp_path):
     assert report.overall_risk == "high"
     # 金额变化应体现在 key_elements
     assert any(e.kind == "amount" and e.changed for e in report.key_elements)
+
+
+def test_pipeline_header_field_alignment_no_false_positive(tmp_path):
+    """首部键值块按字段名配对,不应误报 added/deleted(注入 mock OCR/embed,不依赖网络)。"""
+    parts = [
+        ("p", "甲方(甲方主体):XX公司"),
+        ("p", "联系地址:上海市浦东新区"),
+        ("p", "联系电话:13800138000"),
+        ("p", "乙方(乙方主体):YY公司"),
+        ("p", "联系地址:上海市黄浦区"),
+        ("p", "联系电话:13900139000"),
+        ("h1", "第一条 合同标的"),
+        ("p", "甲方提供设备。"),
+    ]
+    word_buf = _make_word(parts)
+    # PDF 文本层内容与 Word 完全一致(逐行)
+    pdf_buf = _make_pdf_from_lines([
+        "甲方(甲方主体):XX公司",
+        "联系地址:上海市浦东新区",
+        "联系电话:13800138000",
+        "乙方(乙方主体):YY公司",
+        "联系地址:上海市黄浦区",
+        "联系电话:13900139000",
+        "第一条 合同标的",
+        "甲方提供设备。",
+    ])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    report = run_pipeline(wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding())
+    # 首部字段全部配对成功,无 added/deleted 误报
+    assert len(report.unmatched_clauses) == 0, (
+        f"expected no unmatched, got: {[d.status for d in report.unmatched_clauses]}"
+    )
+    assert report.overall_risk == "clean"

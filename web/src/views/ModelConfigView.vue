@@ -11,9 +11,16 @@ const form = reactive({
   llm_model: '',
   llm_timeout: 120,
   llm_max_concurrency: 4,
+  // —— 语义向量引擎 ——
+  embed_backend: 'mock',
+  embed_api_base: '',
+  embed_api_key: '',
+  embed_model: '',
+  embed_timeout: 60,
 })
 
 const keyDirty = ref(false)
+const embedKeyDirty = ref(false)
 const saved = ref(false)
 const saveError = ref<string | null>(null)
 
@@ -24,7 +31,13 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.llm_model = c.llm_model || ''
   form.llm_timeout = c.llm_timeout ?? 120
   form.llm_max_concurrency = c.llm_max_concurrency ?? 4
+  form.embed_backend = c.embed_backend || 'mock'
+  form.embed_api_base = c.embed_api_base || ''
+  form.embed_api_key = c.embed_api_key || ''
+  form.embed_model = c.embed_model || ''
+  form.embed_timeout = c.embed_timeout ?? 60
   keyDirty.value = false
+  embedKeyDirty.value = false
 }
 
 onMounted(async () => {
@@ -39,6 +52,10 @@ function onKeyInput(): void {
   keyDirty.value = true
 }
 
+function onEmbedKeyInput(): void {
+  embedKeyDirty.value = true
+}
+
 async function onSave(): Promise<void> {
   saveError.value = null
   saved.value = false
@@ -47,8 +64,17 @@ async function onSave(): Promise<void> {
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),
     llm_max_concurrency: Number(form.llm_max_concurrency),
+    embed_backend: form.embed_backend,
   }
   payload.llm_api_key = keyDirty.value ? form.llm_api_key : '********'
+
+  // qwen backend 才提交向量服务字段(mock 无需配置)
+  if (form.embed_backend === 'qwen') {
+    payload.embed_api_base = form.embed_api_base.trim()
+    payload.embed_model = form.embed_model.trim()
+    payload.embed_timeout = Number(form.embed_timeout)
+    payload.embed_api_key = embedKeyDirty.value ? form.embed_api_key : '********'
+  }
 
   const ok = await store.save(payload)
   if (ok) {
@@ -126,6 +152,66 @@ async function onReset(): Promise<void> {
       </div>
     </section>
 
+    <section class="card">
+      <h2 class="page-title">语义向量引擎</h2>
+      <p class="muted page-desc">
+        用于条款对齐(无编号时的语义匹配)与篡改判定的相似度计算。
+        mock 仅反映字面重叠(测试用);qwen 走 OpenAI 兼容的 /v1/embeddings,
+        适合生产环境自建 Qwen3-Embedding。
+      </p>
+
+      <div class="field backend-field">
+        <label>引擎</label>
+        <div class="radio-row">
+          <label class="radio">
+            <input type="radio" value="mock" v-model="form.embed_backend" />
+            <span>mock(字面相似度)</span>
+          </label>
+          <label class="radio">
+            <input type="radio" value="qwen" v-model="form.embed_backend" />
+            <span>qwen(语义嵌入 API)</span>
+          </label>
+        </div>
+      </div>
+
+      <div v-if="form.embed_backend === 'qwen'" class="form-grid">
+        <div class="field">
+          <label>API Base</label>
+          <input v-model="form.embed_api_base" class="input" placeholder="http://vllm-embed:8000/v1" />
+          <span class="hint">向量服务的 OpenAI 兼容根地址(独立于 OCR)</span>
+        </div>
+
+        <div class="field">
+          <label>模型名称</label>
+          <input v-model="form.embed_model" class="input" placeholder="Qwen3-Embedding-0.6B" />
+          <span class="hint">部署的 embedding 模型名</span>
+        </div>
+
+        <div class="field span-2">
+          <label>API Key</label>
+          <input
+            v-model="form.embed_api_key"
+            class="input"
+            type="password"
+            :placeholder="store.config?.embed_api_key_set ? '已设置(输入新值覆盖)' : '本地 vLLM 通常留空'"
+            @input="onEmbedKeyInput"
+          />
+          <span class="hint">
+            <template v-if="store.config?.embed_api_key_set">
+              当前: {{ store.config.embed_api_key || '****' }} · 留空不修改
+            </template>
+            <template v-else>本地 vLLM 一般无需 Key</template>
+          </span>
+        </div>
+
+        <div class="field">
+          <label>请求超时(秒)</label>
+          <input v-model.number="form.embed_timeout" class="input" type="number" min="5" max="300" />
+          <span class="hint">单次向量请求的超时上限</span>
+        </div>
+      </div>
+    </section>
+
     <section class="card actions-card">
       <div class="actions">
         <button class="btn btn-primary" :disabled="store.saving" @click="onSave">
@@ -175,6 +261,24 @@ async function onReset(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.backend-field {
+  margin-bottom: 16px;
+}
+.radio-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.radio input {
+  cursor: pointer;
 }
 .ok {
   color: var(--risk-clean);

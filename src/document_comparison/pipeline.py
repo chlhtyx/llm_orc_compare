@@ -11,7 +11,7 @@ from typing import Callable
 
 from .align import align_clauses
 from .config import Settings, settings
-from .embed import get_embed_engine
+from .embed import get_embed_engine, is_mock_engine
 from .models import TamperReport
 from .ocr import get_ocr_engine
 from .parsing import get_page_metas, parse_word
@@ -54,8 +54,10 @@ def run_pipeline(
     _progress("structure_done", 0.78)
 
     # —— ④ 对齐 ——
+    # 阈值自适应:mock 字符袋相似度系统性偏低,用较低阈值;语义后端用标准阈值。
+    align_threshold = cfg.align_similarity_mock if is_mock_engine(embed) else cfg.align_similarity
     alignments = align_clauses(
-        word_clauses, pdf_clauses, embed, cfg.align_similarity
+        word_clauses, pdf_clauses, embed, align_threshold
     )
     _progress("align_done", 0.88)
 

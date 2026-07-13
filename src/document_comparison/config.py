@@ -45,13 +45,23 @@ class Settings:
     # 单页瞬态失败(超时 / 429 / 5xx)重试次数
     llm_max_retries: int = 2
 
-    # —— 向量引擎选择:mock | bge ——
-    embed_backend: str = "mock"
+    # —— 向量引擎选择:mock | qwen | bge ——
+    # 默认 qwen;若未配置 embed_api_base/model,get_embed_engine 会自动回退 mock。
+    embed_backend: str = "qwen"
+
+    # —— 远端向量服务(qwen backend 用;vLLM / SGLang 自建 Qwen3-Embedding 等)——
+    # 与 OCR 服务独立配置(两者通常不在同一推理服务)。
+    embed_api_base: str = ""
+    embed_api_key: str = ""
+    embed_model: str = ""
+    embed_timeout: float = 60.0
 
     # —— 比对阈值(§9.1 双阈值)——
     similarity_identical: float = 0.98  # >= 视为一致
     similarity_modified: float = 0.85  # < 视为实质修改;之间为疑似
-    align_similarity: float = 0.85  # 对齐配对确认阈值
+    align_similarity: float = 0.85  # 对齐配对确认阈值(语义向量后端)
+    # mock 字符袋相似度系统性偏低(中文同义改写打不到 0.85),单独给一个较低阈值。
+    align_similarity_mock: float = 0.70
 
     # —— PDF 渲染 ——
     pdf_render_dpi: int = 300
@@ -89,6 +99,10 @@ _LLM_CONFIG_FIELDS = (
     "llm_max_concurrency",
     "llm_max_retries",
     "embed_backend",
+    "embed_api_base",
+    "embed_api_key",
+    "embed_model",
+    "embed_timeout",
 )
 
 # dataclass 字段默认值,供首次启动(无 json 文件)时写入种子配置。
@@ -99,7 +113,11 @@ _LLM_DEFAULTS: dict = {
     "llm_timeout": 120,
     "llm_max_concurrency": 4,
     "llm_max_retries": 2,
-    "embed_backend": "mock",
+    "embed_backend": "qwen",
+    "embed_api_base": "",
+    "embed_api_key": "",
+    "embed_model": "",
+    "embed_timeout": 60,
 }
 
 def llm_config_path() -> Path:
@@ -152,6 +170,14 @@ def apply_llm_overrides() -> None:
         settings.llm_max_retries = int(cfg["llm_max_retries"])
     if "embed_backend" in cfg:
         settings.embed_backend = cfg["embed_backend"]
+    if "embed_api_base" in cfg:
+        settings.embed_api_base = cfg["embed_api_base"]
+    if "embed_api_key" in cfg:
+        settings.embed_api_key = cfg["embed_api_key"]
+    if "embed_model" in cfg:
+        settings.embed_model = cfg["embed_model"]
+    if "embed_timeout" in cfg:
+        settings.embed_timeout = float(cfg["embed_timeout"])
 
 # 启动时应用一次持久化覆盖
 apply_llm_overrides()

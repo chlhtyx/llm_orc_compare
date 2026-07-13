@@ -4,8 +4,10 @@ from document_comparison.embed.mock import MockEmbedding
 from document_comparison.models import Clause
 
 
-def _clause(cid, number, text, doc_type="word"):
-    return Clause(clause_id=cid, doc_type=doc_type, number=number, text=text)
+def _clause(cid, number, text, doc_type="word", field_key=""):
+    return Clause(
+        clause_id=cid, doc_type=doc_type, number=number, text=text, field_key=field_key
+    )
 
 
 def test_align_by_number():
@@ -31,3 +33,45 @@ def test_align_added_deleted():
     al = align_clauses(word, pdf, MockEmbedding(), threshold=0.85)
     added = [a for a in al if a.word_clause_id is None and a.pdf_clause_id]
     assert len(added) == 1
+
+
+def test_align_by_field_key():
+    """无编号键值块(甲方/乙方/地址)按 field_key 配对。"""
+    word = [
+        _clause("w1", "", "XX公司", field_key="甲方"),
+        _clause("w2", "", "上海市", field_key="地址"),
+        _clause("w3", "", "YY公司", field_key="乙方"),
+    ]
+    pdf = [
+        _clause("p1", "", "XX公司", "pdf", field_key="甲方"),
+        _clause("p2", "", "上海市", "pdf", field_key="地址"),
+        _clause("p3", "", "YY公司", "pdf", field_key="乙方"),
+    ]
+    al = align_clauses(word, pdf, MockEmbedding(), threshold=0.85)
+    by_field = [a for a in al if a.match_type == "field"]
+    assert len(by_field) == 3
+    # 甲方配甲方、地址配地址
+    pairs = {(a.word_clause_id, a.pdf_clause_id) for a in by_field}
+    assert ("w1", "p1") in pairs
+    assert ("w2", "p2") in pairs
+    assert ("w3", "p3") in pairs
+
+
+def test_align_field_key_same_role_multiple():
+    """同 field_key 多条(甲方首部 + 甲方签字页)按出现顺序配对。"""
+    word = [
+        _clause("w1", "", "首部甲方信息", field_key="甲方"),
+        _clause("w2", "", "签字页甲方", field_key="甲方"),
+    ]
+    pdf = [
+        _clause("p1", "", "首部甲方信息", "pdf", field_key="甲方"),
+        _clause("p2", "", "签字页甲方", "pdf", field_key="甲方"),
+    ]
+    al = align_clauses(word, pdf, MockEmbedding(), threshold=0.85)
+    by_field = [a for a in al if a.match_type == "field"]
+    assert len(by_field) == 2
+    # 按顺序:w1-p1, w2-p2
+    assert by_field[0].word_clause_id == "w1"
+    assert by_field[0].pdf_clause_id == "p1"
+    assert by_field[1].word_clause_id == "w2"
+    assert by_field[1].pdf_clause_id == "p2"

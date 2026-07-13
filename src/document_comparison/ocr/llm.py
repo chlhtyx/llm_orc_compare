@@ -46,7 +46,12 @@ _SYSTEM_PROMPT = (
     "JSON 结构为:{\"blocks\": [{\"label\": str, \"content\": str, \"bbox\": [x1,y1,x2,y2]}]}。"
     "label 取值:text / doc_title / paragraph_title / table / list / seal。"
     "bbox 为该块在页面中的归一化边界框,坐标范围 [0,1],原点左上角。"
-    "content 为该块的完整文字内容(表格用 markdown 或 TSV 表达)。"
+    "content 为该块的完整文字内容(表格用 markdown 或 TSV 表达)。\n"
+    "切分粒度约定(重要):\n"
+    "- 同一编号条款(第X条 / X.X / (X) / 一、等)的全部内容合并为单个 block 输出,"
+    "不要按视觉换行或段落把一条编号条款拆成多个 block。\n"
+    "- 合同首部、签字页的甲乙方信息、联系方式等键值字段,每一行(每个字段名)作为独立 block 输出,"
+    '字段名带冒号,如 content="甲方(甲方主体):XX公司"、content="联系电话:138..."。'
 )
 
 

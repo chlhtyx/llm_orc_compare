@@ -93,6 +93,11 @@ def create_app() -> FastAPI:
             "llm_max_concurrency": settings.llm_max_concurrency,
             "llm_max_retries": settings.llm_max_retries,
             "embed_backend": settings.embed_backend,
+            "embed_api_base": settings.embed_api_base,
+            "embed_api_key": _mask_key(settings.embed_api_key),
+            "embed_api_key_set": bool(settings.embed_api_key),
+            "embed_model": settings.embed_model,
+            "embed_timeout": settings.embed_timeout,
             "persisted": load_llm_overrides(),
             "config_file": str(llm_config_path()),
         }
@@ -108,7 +113,8 @@ def create_app() -> FastAPI:
         allowed = {
             "llm_api_base", "llm_api_key", "llm_model",
             "llm_timeout", "llm_max_concurrency", "llm_max_retries",
-            "embed_backend",
+            "embed_backend", "embed_api_base", "embed_api_key",
+            "embed_model", "embed_timeout",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
@@ -130,13 +136,20 @@ def create_app() -> FastAPI:
                 int(body["llm_max_retries"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "llm_max_retries 必须为整数")
-        if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge"):
-            raise HTTPException(400, "embed_backend 仅支持 mock | bge")
+        if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge", "qwen"):
+            raise HTTPException(400, "embed_backend 仅支持 mock | bge | qwen")
+        if "embed_timeout" in body and body["embed_timeout"] is not None:
+            try:
+                float(body["embed_timeout"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "embed_timeout 必须为数字")
 
-        # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
+        # api_key 特殊处理:明文哨兵 "********" 表示"不修改"(OCR 与 embed 各一)
         overrides = dict(body)
         if overrides.get("llm_api_key") == "********":
             overrides.pop("llm_api_key")
+        if overrides.get("embed_api_key") == "********":
+            overrides.pop("embed_api_key")
 
         save_llm_overrides(overrides)
         return {
@@ -150,6 +163,11 @@ def create_app() -> FastAPI:
                 "llm_max_concurrency": settings.llm_max_concurrency,
                 "llm_max_retries": settings.llm_max_retries,
                 "embed_backend": settings.embed_backend,
+                "embed_api_base": settings.embed_api_base,
+                "embed_api_key": _mask_key(settings.embed_api_key),
+                "embed_api_key_set": bool(settings.embed_api_key),
+                "embed_model": settings.embed_model,
+                "embed_timeout": settings.embed_timeout,
             },
         }
 

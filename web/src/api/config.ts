@@ -9,6 +9,13 @@ export interface LlmConfig {
   llm_model: string
   llm_timeout: number
   llm_max_concurrency: number
+  // —— 语义向量引擎 ——
+  embed_backend: string // mock | qwen | bge
+  embed_api_base: string
+  embed_api_key: string // 脱敏
+  embed_api_key_set: boolean
+  embed_model: string
+  embed_timeout: number
   persisted: Record<string, unknown>
   config_file?: string
 }
@@ -21,6 +28,12 @@ export interface LlmConfigUpdate {
   llm_model?: string
   llm_timeout?: number
   llm_max_concurrency?: number
+  // —— 语义向量引擎 ——
+  embed_backend?: string
+  embed_api_base?: string
+  embed_api_key?: string
+  embed_model?: string
+  embed_timeout?: number
 }
 
 export function getLlmConfig(): Promise<LlmConfig> {

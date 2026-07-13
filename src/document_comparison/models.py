@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 # —— 枚举(用 Literal,JSON 友好)——
 DocType = Literal["word", "pdf"]
-MatchType = Literal["number", "semantic", "unmatched"]
+MatchType = Literal["number", "field", "semantic", "unmatched"]
 DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
 OverallRisk = Literal["high", "medium", "low", "clean"]
@@ -41,6 +41,7 @@ class RawItem(BaseModel):
     heading_level: int = 0
     page_index: int = 0
     bbox: list[float] = Field(default_factory=list)
+    field_key: str = ""
 
 
 class Clause(BaseModel):
@@ -53,6 +54,7 @@ class Clause(BaseModel):
     title: str = ""
     text: str = ""
     blocks: list[Block] = Field(default_factory=list)
+    field_key: str = Field(default="", description="键值块的字段名锚点(如甲方/乙方/地址/日期),供对齐层字段锚定;非键值块为空")
 
 
 class Alignment(BaseModel):

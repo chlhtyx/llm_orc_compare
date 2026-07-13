@@ -5,7 +5,8 @@ from document_comparison.compare.elements import (
     extract_key_elements,
 )
 from document_comparison.compare.risk import classify_diff, max_risk
-from document_comparison.models import KeyElement
+from document_comparison.models import Clause, KeyElement
+from document_comparison.report.builder import _unmatched_risk
 
 
 def test_char_diff_replace():
@@ -62,3 +63,26 @@ def test_classify_semantic_drop_is_medium():
 def test_max_risk():
     assert max_risk(["low", "high", "medium"]) == "high"
     assert max_risk([]) == "none"
+
+
+def test_unmatched_numbered_clause_is_high_risk():
+    """编号条款未配对 → 高风险(疑似真实新增/缺失)。"""
+    c = Clause(clause_id="x", doc_type="pdf", number="3.2", text="某条款")
+    risk, reason = _unmatched_risk(c)
+    assert risk == "high"
+    assert "3.2" in reason
+
+
+def test_unmatched_field_clause_is_low_risk():
+    """键值块未配对 → 低风险(切分边界差异,待人工核对)。"""
+    c = Clause(clause_id="x", doc_type="pdf", field_key="甲方", text="XX公司")
+    risk, reason = _unmatched_risk(c)
+    assert risk == "low"
+    assert "人工核对" in reason
+
+
+def test_unmatched_plain_clause_is_low_risk():
+    """无编号无字段的散落文本未配对 → 低风险。"""
+    c = Clause(clause_id="x", doc_type="pdf", text="(以下无正文)")
+    risk, _ = _unmatched_risk(c)
+    assert risk == "low"
