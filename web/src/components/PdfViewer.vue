@@ -84,15 +84,14 @@ function riskBorder(level: string): string {
   }
 }
 
-// ---- 归一化 bbox → 像素坐标 ----
-function rectFromBbox(bbox: number[], canvasW: number, canvasH: number, scale: number) {
+// ---- 归一化 bbox → CSS 显示坐标 ----
+function rectFromBbox(bbox: number[], pageW: number, pageH: number) {
   const [x1, y1, x2, y2] = bbox
-  const left = x1 * canvasW
-  const top = y1 * canvasH
-  const width = (x2 - x1) * canvasW
-  const height = (y2 - y1) * canvasH
-  const sw = 2 * scale
-  return { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`, strokeWidth: sw }
+  const left = x1 * pageW
+  const top = y1 * pageH
+  const width = (x2 - x1) * pageW
+  const height = (y2 - y1) * pageH
+  return { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` }
 }
 
 // ---- hover/tooltip ----
@@ -240,7 +239,7 @@ onBeforeUnmount(() => {
               'pv-highlight--hover': hoveredRegion === r,
             }"
             :style="{
-              ...rectFromBbox(r.bbox, p.width, p.height, zoom),
+              ...rectFromBbox(r.bbox, p.width, p.height),
               backgroundColor: riskColor(r.risk),
               borderColor: riskBorder(r.risk),
             }"

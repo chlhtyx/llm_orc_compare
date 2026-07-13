@@ -20,6 +20,10 @@ RUN npm run build
 # ── Stage 2: Python 运行时 ──
 FROM python:3.12-slim AS runtime
 
+# 国内 pip 镜像:避免构建隔离拉 setuptools 时 pypi.org SSL 超时
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com
+
 # 系统依赖:PyMuPDF 需要的运行库 + curl(健康检查用)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \

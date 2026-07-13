@@ -78,6 +78,33 @@ def _raw_to_block(item: RawItem) -> Block:
     )
 
 
+def _line_item(item: RawItem, text: str, line_index: int, line_count: int) -> RawItem:
+    if not item.bbox or line_count <= 1:
+        return RawItem(
+            text=text,
+            kind=item.kind,
+            heading_level=item.heading_level,
+            page_index=item.page_index,
+            bbox=list(item.bbox),
+        )
+    x1, y1, x2, y2 = item.bbox[:4]
+    line_h = (y2 - y1) / line_count
+    return RawItem(
+        text=text,
+        kind=item.kind,
+        heading_level=item.heading_level,
+        page_index=item.page_index,
+        bbox=[x1, y1 + line_h * line_index, x2, y1 + line_h * (line_index + 1)],
+    )
+
+
+def _split_lines_with_bbox(item: RawItem, norm: str) -> list[RawItem]:
+    lines = [line.strip() for line in norm.split("\n") if line.strip()]
+    if not lines:
+        return []
+    return [_line_item(item, line, idx, len(lines)) for idx, line in enumerate(lines)]
+
+
 def _split_body(line: str, prefix: str) -> str:
     """用编号前缀长度切片,去掉编号后清理分隔符。"""
     rest = line[len(prefix):]
@@ -137,23 +164,21 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
             continue
 
         # paragraph:按行拆分(单个 block 可能含多行/多编号)
-        for line in norm.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
+        for line_item in _split_lines_with_bbox(item, norm):
+            line = line_item.text
             num = detect_number(line)
             if num:
                 prefix, number, level = num
                 body = _split_body(line, prefix)
-                current = new_clause(number, level, body, body, item)
+                current = new_clause(number, level, body, body, line_item)
                 clauses.append(current)
             elif current is None:
-                current = new_clause("", 0, "", line, item)
+                current = new_clause("", 0, "", line, line_item)
                 clauses.append(current)
             else:
                 sep = "\n" if current.text else ""
                 current.text += sep + line
-                if item.bbox:
-                    current.blocks.append(_raw_to_block(item))
+                if line_item.bbox:
+                    current.blocks.append(_raw_to_block(line_item))
 
     return clauses

@@ -26,7 +26,7 @@ class Block(BaseModel):
     block_id: str
     page_index: int
     label: str = Field(..., description="text/table/doc_title/paragraph_title/seal ...")
-    bbox: list[float] = Field(default_factory=list, description="像素坐标 [x1,y1,x2,y2]")
+    bbox: list[float] = Field(default_factory=list, description="PDF 点坐标(pt) [x1,y1,x2,y2]")
     content: str = ""
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import random
 import re
 from collections import deque
@@ -27,6 +28,8 @@ import time
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from ..config import settings
 from ..models import Block, PageMeta
@@ -209,9 +212,15 @@ def _parse_blocks(
         if not text:
             continue
         label = item.get("label") or "text"
-        # bbox 可能是归一化 [0,1],也可能是绝对像素;做一次宽松归一化
+        # bbox 可能是归一化 [0,1],也可能是渲染图片像素坐标;统一转为 PDF pt
         bbox_norm = item.get("bbox") or item.get("box") or []
-        bbox_pt = _to_pt_bbox(bbox_norm, w_pt, h_pt)
+        bbox_pt = _to_pt_bbox(bbox_norm, w_pt, h_pt, meta.width_px, meta.height_px)
+        if idx == 0:
+            logger.debug(
+                "ocr bbox space probe page=%s raw=%s pt=%s meta_wxh_px=%s,%s pt=%s,%s",
+                page_index, bbox_norm, bbox_pt,
+                meta.width_px, meta.height_px, w_pt, h_pt,
+            )
         blocks.append(
             Block(
                 block_id=f"p{page_index}-b{idx}",
@@ -224,12 +233,42 @@ def _parse_blocks(
     return blocks
 
 
-def _to_pt_bbox(bbox: list[float], w_pt: float, h_pt: float) -> list[float]:
+def _to_pt_bbox(
+    bbox: list[float],
+    w_pt: float,
+    h_pt: float,
+    width_px: float,
+    height_px: float,
+) -> list[float]:
+    """把 LLM 返回的 bbox 换算为 PDF 点坐标(pt)。
+
+    支持三种坐标空间(按 max(|v|) 分段):
+    - <= 1.5      : 归一化 [0,1]
+    - <= 1000     : Qwen-VL 原生 [0,1000) 区间(prompt 要求 [0,1] 但模型训练约定如此)
+    - > 1000      : 渲染图绝对像素(300dpi),按 width_px/height_px 缩放
+    """
     if len(bbox) >= 4:
         x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
-        # 任一维度超过 1.5 视为绝对坐标,否则视为归一化
-        if max(abs(x1), abs(y1), abs(x2), abs(y2)) > 1.5:
-            return [float(x1), float(y1), float(x2), float(y2)]
+        vmax = max(abs(x1), abs(y1), abs(x2), abs(y2))
+        # 渲染图绝对像素坐标:按 DPI 比例换算
+        if vmax > 1000:
+            if width_px <= 0 or height_px <= 0:
+                return [float(x1), float(y1), float(x2), float(y2)]
+            return [
+                float(x1) * w_pt / width_px,
+                float(y1) * h_pt / height_px,
+                float(x2) * w_pt / width_px,
+                float(y2) * h_pt / height_px,
+            ]
+        # Qwen-VL 原生 [0,1000) 归一化:除以 1000
+        if vmax > 1.5:
+            return [
+                float(x1) * w_pt / 1000.0,
+                float(y1) * h_pt / 1000.0,
+                float(x2) * w_pt / 1000.0,
+                float(y2) * h_pt / 1000.0,
+            ]
+        # 归一化 [0,1]
         return [x1 * w_pt, y1 * h_pt, x2 * w_pt, y2 * h_pt]
     return []
 

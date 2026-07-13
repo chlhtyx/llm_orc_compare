@@ -41,6 +41,25 @@ def test_build_clauses_multiline_in_one_block():
     assert "第三条" in (clauses[0].title or clauses[0].text)
 
 
+def test_build_clauses_splits_multiline_bbox_by_line():
+    items = [
+        RawItem(
+            text="第三条 费用\n3.1 总额\n第四条 权利\n4.1 义务",
+            kind="paragraph",
+            page_index=0,
+            bbox=[10, 20, 210, 100],
+        ),
+    ]
+
+    clauses = build_clauses(items, "pdf")
+
+    assert len(clauses) == 4
+    assert clauses[0].blocks[0].bbox == [10, 20, 210, 40]
+    assert clauses[1].blocks[0].bbox == [10, 40, 210, 60]
+    assert clauses[2].blocks[0].bbox == [10, 60, 210, 80]
+    assert clauses[3].blocks[0].bbox == [10, 80, 210, 100]
+
+
 def test_blocks_to_raw_maps_labels():
     pages = [[
         Block(block_id="b1", page_index=0, label="doc_title", bbox=[0, 0, 1, 1], content="合同"),

@@ -31,7 +31,9 @@ def _normalize_regions(blocks, pmeta: dict[int, PageMeta]) -> list[PageRegion]:
         if not meta or not (meta.pdf_width_pt and meta.pdf_height_pt):
             continue
         w, h = meta.pdf_width_pt, meta.pdf_height_pt
-        x1, y1, x2, y2 = b.bbox[:4]
+        x1, y1, x2, y2 = _clean_bbox(b.bbox[:4], w, h)
+        if x2 <= x1 or y2 <= y1:
+            continue
         regions.append(
             PageRegion(
                 page_index=b.page_index,
@@ -40,6 +42,17 @@ def _normalize_regions(blocks, pmeta: dict[int, PageMeta]) -> list[PageRegion]:
             )
         )
     return regions
+
+
+def _clean_bbox(bbox: list[float], page_w: float, page_h: float) -> list[float]:
+    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    left, right = sorted((x1, x2))
+    top, bottom = sorted((y1, y2))
+    left = min(max(left, 0.0), page_w)
+    right = min(max(right, 0.0), page_w)
+    top = min(max(top, 0.0), page_h)
+    bottom = min(max(bottom, 0.0), page_h)
+    return [left, top, right, bottom]
 
 
 def build_report(
