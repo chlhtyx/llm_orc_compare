@@ -9,13 +9,19 @@ import pymupdf
 
 logger = logging.getLogger(__name__)
 
-from ..compare.diff import char_diff
-from ..compare.elements import elements_changed, extract_key_elements
+from ..compare.diff import char_diff, table_diff
+from ..compare.elements import (
+    elements_changed,
+    extract_key_elements,
+    table_elements_changed,
+)
+from ..compare.judge import llm_judge_diff
 from ..compare.risk import classify_diff, overall_risk_from_diffs
 from ..models import (
     Alignment,
     Clause,
     Diff,
+    DiffSegment,
     DiffStatus,
     KeyElement,
     PageMeta,
@@ -83,6 +89,7 @@ def build_report(
     thresholds: dict[str, float],
     source: str,
     target: str,
+    enable_llm_judge: bool = False,
 ) -> TamperReport:
     pmeta = {m.page_index: m for m in page_metas}
     diffs: list[Diff] = []
@@ -127,8 +134,18 @@ def build_report(
 
         wt, pt = wc.text, pc.text
         ke = elements_changed(extract_key_elements(wt), extract_key_elements(pt))
+        # 结构化表格要素:按单元格维度抽取并比对,补充到 key_elements
+        tbl_ke = table_elements_changed(wc.tables, pc.tables)
+        ke.extend(tbl_ke)
         all_key_elements.extend([e for e in ke if e.changed])
         segs = char_diff(wt, pt)
+        # 表格单元格级 diff:两端均有结构化表格时追加,定位到具体单元格
+        for tidx in range(min(len(wc.tables), len(pc.tables))):
+            wt_tbl = wc.tables[tidx]
+            pt_tbl = pc.tables[tidx]
+            if wt_tbl.headers == pt_tbl.headers and wt_tbl.rows == pt_tbl.rows:
+                continue  # 完全一致,不产生 diff
+            segs.extend(table_diff(wt_tbl, pt_tbl))
 
         # 编号配对的相似度需实算(number 配对 similarity=1.0 不代表文本一致)
         if al.match_type == "number":
@@ -149,12 +166,19 @@ def build_report(
             levels.append("none")
             continue  # 一致不入差异报告
 
+        # LLM 复核:仅对 modified 条款调用,可修正风险等级(规则+LLM 结合)
+        judged_by = "rule"
+        if enable_llm_judge and status == "modified":
+            risk, reasons = llm_judge_diff(wt, pt, segs, risk)
+            judged_by = "llm"
+
         d = Diff(
             alignment_id=f"al{idx}",
             status=status,
             segments=segs,
             risk_level=risk,
             risk_reasons=reasons,
+            judged_by=judged_by,
             page_regions=_normalize_regions(pc.blocks, pmeta),
             number=wc.number or pc.number,
             title=wc.title or pc.title,

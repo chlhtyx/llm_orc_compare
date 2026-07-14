@@ -20,6 +20,17 @@ KeyElementKind = Literal[
 BBoxShape = Literal["rect", "quad", "poly"]
 
 
+class TableStructure(BaseModel):
+    """结构化表格(用于单元格级比对)。
+
+    label=table 的 Block 在保留 content 纯文本(向后兼容)的同时,
+    额外携带结构化表头与行数据,使 Diff 引擎能定位到具体单元格。
+    """
+
+    headers: list[str] = Field(default_factory=list, description="表头各列名称")
+    rows: list[list[str]] = Field(default_factory=list, description="数据行,每行单元格数应与 headers 对齐")
+
+
 class Block(BaseModel):
     """版面元素(多模态 LLM OCR 输出)。"""
 
@@ -28,6 +39,7 @@ class Block(BaseModel):
     label: str = Field(..., description="text/table/doc_title/paragraph_title/seal ...")
     bbox: list[float] = Field(default_factory=list, description="PDF 点坐标(pt) [x1,y1,x2,y2]")
     content: str = ""
+    table: TableStructure | None = Field(default=None, description="label=table 时的结构化表头/行;None 表示非表格或未结构化")
 
 
 class RawItem(BaseModel):
@@ -42,6 +54,7 @@ class RawItem(BaseModel):
     page_index: int = 0
     bbox: list[float] = Field(default_factory=list)
     field_key: str = ""
+    table: TableStructure | None = Field(default=None, description="kind=table 时的结构化表头/行")
 
 
 class Clause(BaseModel):
@@ -54,6 +67,10 @@ class Clause(BaseModel):
     title: str = ""
     text: str = ""
     blocks: list[Block] = Field(default_factory=list)
+    tables: list[TableStructure] = Field(
+        default_factory=list,
+        description="条款内含的结构化表格(来自 table 块),供单元格级比对",
+    )
     field_key: str = Field(default="", description="键值块的字段名锚点(如甲方/乙方/地址/日期),供对齐层字段锚定;非键值块为空")
 
 
@@ -93,6 +110,10 @@ class KeyElement(BaseModel):
     word_value: str = ""
     pdf_value: str = ""
     changed: bool = False
+    # 表格要素定位:标识要素来自结构化表格的哪一行哪一列,便于前端高亮到具体单元格。
+    # 非表格要素为空/0,表示来自正文文本。
+    row_index: int = Field(default=-1, description="结构化表格中的行号(0基,-1 表示非表格)")
+    col_header: str = Field(default="", description="结构化表格中的列名(空表示非表格)")
 
 
 class Diff(BaseModel):
@@ -103,6 +124,9 @@ class Diff(BaseModel):
     segments: list[DiffSegment] = Field(default_factory=list)
     risk_level: RiskLevel = "none"
     risk_reasons: list[str] = Field(default_factory=list)
+    judged_by: Literal["rule", "llm"] = Field(
+        default="rule", description="风险判定来源:rule=规则初筛,llm=LLM 复核修正"
+    )
     page_regions: list[PageRegion] = Field(
         default_factory=list, description="该条款在 PDF 扫描件上的高亮区域"
     )

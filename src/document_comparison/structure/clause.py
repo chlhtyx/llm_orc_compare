@@ -117,7 +117,7 @@ _LABEL_KIND = {
 
 
 def blocks_to_raw(pages: list[list[Block]]) -> list[RawItem]:
-    """把 OCR 每页 Block 列表拍平为 RawItem 流(保留 bbox/page)。"""
+    """把 OCR 每页 Block 列表拍平为 RawItem 流(保留 bbox/page/table)。"""
     items: list[RawItem] = []
     for blocks in pages:
         for b in blocks:
@@ -128,6 +128,7 @@ def blocks_to_raw(pages: list[list[Block]]) -> list[RawItem]:
                     kind=kind,  # type: ignore[arg-type]
                     page_index=b.page_index,
                     bbox=list(b.bbox),
+                    table=b.table,
                 )
             )
     return items
@@ -216,6 +217,9 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
                 current.text += sep + norm
                 if item.bbox:
                     current.blocks.append(_raw_to_block(item))
+            # 透传结构化表格到条款,供单元格级比对
+            if item.table is not None:
+                current.tables.append(item.table)
             continue
 
         if item.kind in ("heading", "title"):

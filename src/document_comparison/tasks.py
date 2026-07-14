@@ -66,12 +66,13 @@ class TaskManager:
         return self._tasks.get(task_id)
 
     async def run(
-        self, task_id: str, word_path: str, pdf_path: str
+        self, task_id: str, word_path: str, pdf_path: str,
+        *, enable_llm_judge: bool = False,
     ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start task_id=%s word=%s pdf=%s", task_id, word_path, pdf_path)
+        logger.info("task start task_id=%s word=%s pdf=%s llm_judge=%s", task_id, word_path, pdf_path, enable_llm_judge)
         try:
             async with self._sem:
                 task.info.status = "running"
@@ -80,6 +81,7 @@ class TaskManager:
                 report = await asyncio.to_thread(
                     run_pipeline, word_path, pdf_path, settings,
                     on_progress=lambda stage, frac: task.push_event(stage, frac),
+                    enable_llm_judge=enable_llm_judge,
                 )
             task.report = report
             task.info.overall_risk = report.overall_risk

@@ -31,6 +31,7 @@ def run_pipeline(
     ocr=None,
     embed=None,
     on_progress: ProgressCb | None = None,
+    enable_llm_judge: bool = False,
 ) -> TamperReport:
     cfg = cfg or settings
     ocr = ocr or get_ocr_engine()
@@ -52,10 +53,19 @@ def run_pipeline(
     _progress("ocr", 0.10)
     page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
     pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
+    total_blocks = sum(len(b) for b in pages_blocks)
     logger.info(
         "ocr done pages=%s blocks=%s dpi=%s",
-        len(page_metas), sum(len(b) for b in pages_blocks), cfg.pdf_render_dpi,
+        len(page_metas), total_blocks, cfg.pdf_render_dpi,
     )
+    if len(page_metas) > 0 and total_blocks == 0:
+        logger.warning(
+            "ocr returned 0 blocks for %s pages — 模型可能未遵循 JSON 格式指令,"
+            "或返回了非 blocks 结构(如专用 OCR 模型 PaddleOCR-VL / DeepSeek-OCR)。"
+            "请确认 llm_model 是多模态对话模型(如 Qwen3-VL-32B-Instruct),"
+            "而非专用 OCR 模型。当前 ocr_backend=%s model=%s",
+            len(page_metas), cfg.ocr_backend, getattr(cfg, "llm_model", ""),
+        )
     _progress("ocr_done", 0.70)
     pdf_raw = blocks_to_raw(pages_blocks)
     pdf_clauses = build_clauses(pdf_raw, "pdf")
@@ -86,6 +96,7 @@ def run_pipeline(
         thresholds=thresholds,
         source=str(word_path),
         target=str(pdf_path),
+        enable_llm_judge=enable_llm_judge,
     )
     _progress("compare_done", 1.0)
 
