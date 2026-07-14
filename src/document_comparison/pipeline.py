@@ -75,4 +75,5 @@ def run_pipeline(
         target=str(pdf_path),
     )
     _progress("compare_done", 1.0)
+
     return report

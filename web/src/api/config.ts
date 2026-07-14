@@ -16,6 +16,8 @@ export interface LlmConfig {
   embed_api_key_set: boolean
   embed_model: string
   embed_timeout: number
+  /** PDF 渲染 DPI(OCR 用),200 为速度/质量甜点 */
+  pdf_render_dpi: number
   persisted: Record<string, unknown>
   config_file?: string
 }
@@ -34,6 +36,7 @@ export interface LlmConfigUpdate {
   embed_api_key?: string
   embed_model?: string
   embed_timeout?: number
+  pdf_render_dpi?: number
 }
 
 export function getLlmConfig(): Promise<LlmConfig> {

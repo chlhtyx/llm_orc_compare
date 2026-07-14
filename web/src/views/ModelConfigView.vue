@@ -17,6 +17,7 @@ const form = reactive({
   embed_api_key: '',
   embed_model: '',
   embed_timeout: 60,
+  pdf_render_dpi: 200,
 })
 
 const keyDirty = ref(false)
@@ -36,6 +37,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.embed_api_key = c.embed_api_key || ''
   form.embed_model = c.embed_model || ''
   form.embed_timeout = c.embed_timeout ?? 60
+  form.pdf_render_dpi = c.pdf_render_dpi ?? 200
   keyDirty.value = false
   embedKeyDirty.value = false
 }
@@ -64,6 +66,7 @@ async function onSave(): Promise<void> {
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),
     llm_max_concurrency: Number(form.llm_max_concurrency),
+    pdf_render_dpi: Number(form.pdf_render_dpi),
     embed_backend: form.embed_backend,
   }
   payload.llm_api_key = keyDirty.value ? form.llm_api_key : '********'
@@ -148,6 +151,12 @@ async function onReset(): Promise<void> {
           <label>最大并发</label>
           <input v-model.number="form.llm_max_concurrency" class="input" type="number" min="1" max="32" />
           <span class="hint">逐页并行数,受推理服务限流</span>
+        </div>
+
+        <div class="field">
+          <label>渲染 DPI</label>
+          <input v-model.number="form.pdf_render_dpi" class="input" type="number" min="72" max="600" />
+          <span class="hint">PDF 渲染为图片的分辨率;200 为速度/质量甜点(默认),过高会显著变慢</span>
         </div>
       </div>
     </section>

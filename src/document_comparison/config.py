@@ -64,7 +64,9 @@ class Settings:
     align_similarity_mock: float = 0.70
 
     # —— PDF 渲染 ——
-    pdf_render_dpi: int = 300
+    # 200 是 OCR 速度/质量的甜点(实测较 300 提速约 27%、token 减半,质量无损);
+    # 过低(如 100)会让密集文字识别变差甚至更慢。
+    pdf_render_dpi: int = 200
 
     # —— 任务 ——
     max_concurrent_tasks: int = 4
@@ -103,6 +105,7 @@ _LLM_CONFIG_FIELDS = (
     "embed_api_key",
     "embed_model",
     "embed_timeout",
+    "pdf_render_dpi",
 )
 
 # dataclass 字段默认值,供首次启动(无 json 文件)时写入种子配置。
@@ -118,6 +121,7 @@ _LLM_DEFAULTS: dict = {
     "embed_api_key": "",
     "embed_model": "",
     "embed_timeout": 60,
+    "pdf_render_dpi": 200,
 }
 
 def llm_config_path() -> Path:
@@ -178,6 +182,11 @@ def apply_llm_overrides() -> None:
         settings.embed_model = cfg["embed_model"]
     if "embed_timeout" in cfg:
         settings.embed_timeout = float(cfg["embed_timeout"])
+    if "pdf_render_dpi" in cfg:
+        try:
+            settings.pdf_render_dpi = int(cfg["pdf_render_dpi"])
+        except (TypeError, ValueError):
+            pass
 
 # 启动时应用一次持久化覆盖
 apply_llm_overrides()

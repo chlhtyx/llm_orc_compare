@@ -98,6 +98,7 @@ def create_app() -> FastAPI:
             "embed_api_key_set": bool(settings.embed_api_key),
             "embed_model": settings.embed_model,
             "embed_timeout": settings.embed_timeout,
+            "pdf_render_dpi": settings.pdf_render_dpi,
             "persisted": load_llm_overrides(),
             "config_file": str(llm_config_path()),
         }
@@ -114,7 +115,7 @@ def create_app() -> FastAPI:
             "llm_api_base", "llm_api_key", "llm_model",
             "llm_timeout", "llm_max_concurrency", "llm_max_retries",
             "embed_backend", "embed_api_base", "embed_api_key",
-            "embed_model", "embed_timeout",
+            "embed_model", "embed_timeout", "pdf_render_dpi",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
@@ -143,6 +144,13 @@ def create_app() -> FastAPI:
                 float(body["embed_timeout"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "embed_timeout 必须为数字")
+        if "pdf_render_dpi" in body and body["pdf_render_dpi"] is not None:
+            try:
+                dpi = int(body["pdf_render_dpi"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "pdf_render_dpi 必须为整数")
+            if not 72 <= dpi <= 600:
+                raise HTTPException(400, "pdf_render_dpi 取值范围 72-600")
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"(OCR 与 embed 各一)
         overrides = dict(body)
@@ -168,6 +176,7 @@ def create_app() -> FastAPI:
                 "embed_api_key_set": bool(settings.embed_api_key),
                 "embed_model": settings.embed_model,
                 "embed_timeout": settings.embed_timeout,
+                "pdf_render_dpi": settings.pdf_render_dpi,
             },
         }
 
