@@ -3,12 +3,19 @@ import { request } from './client'
 
 /** 后端返回的生效配置(GET)。api_key 已脱敏。 */
 export interface LlmConfig {
+  ocr_backend: string // llm | paddleocr
   llm_api_base: string
   llm_api_key: string // 脱敏,如 ****5678
   llm_api_key_set: boolean
   llm_model: string
   llm_timeout: number
   llm_max_concurrency: number
+  // —— LLM 复核服务(规则+LLM 结合,纯文本 LLM)——
+  judge_api_base: string
+  judge_api_key: string // 脱敏
+  judge_api_key_set: boolean
+  judge_model: string
+  judge_timeout: number
   // —— 语义向量引擎 ——
   embed_backend: string // mock | qwen | bge
   embed_api_base: string
@@ -24,12 +31,18 @@ export interface LlmConfig {
 
 /** 更新请求(PUT)。全部可选;不传的字段不修改。 */
 export interface LlmConfigUpdate {
+  ocr_backend?: string
   llm_api_base?: string
   /** 传空串清除已保存 key;传 "********" 表示不修改 */
   llm_api_key?: string
   llm_model?: string
   llm_timeout?: number
   llm_max_concurrency?: number
+  // —— LLM 复核服务 ——
+  judge_api_base?: string
+  judge_api_key?: string
+  judge_model?: string
+  judge_timeout?: number
   // —— 语义向量引擎 ——
   embed_backend?: string
   embed_api_base?: string

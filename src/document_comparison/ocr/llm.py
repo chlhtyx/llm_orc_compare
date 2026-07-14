@@ -32,26 +32,32 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from ..config import settings
-from ..models import Block, PageMeta
+from ..models import Block, PageMeta, TableStructure
 from ..parsing.pdf import render_pages
 from .base import ProgressCb
 
 # 要求 LLM 返回的 JSON 结构:
-# {"blocks": [{"label": ..., "content": ..., "bbox": [x1,y1,x2,y2]}, ...]}
+# {"blocks": [{"label": ..., "content": ..., "bbox": [x1,y1,x2,y2], "table": {"headers":[...], "rows":[...]}}]}
 # bbox 用归一化 [0,1] 坐标(相对页面),再由本引擎换算回 PDF 点坐标。
+# table 字段仅 label=table 时出现,提供结构化表头/行供单元格级比对;
+# content 仍保留为表格纯文本(向后兼容)。
 _SYSTEM_PROMPT = (
     "你是一个文档版面分析助手。给定一页文档图片,识别其中所有可读的版面块,"
     "包括标题、段落、表格、列表、印章等。"
     "严格只输出 JSON,不要解释、不要 markdown 代码块。"
-    "JSON 结构为:{\"blocks\": [{\"label\": str, \"content\": str, \"bbox\": [x1,y1,x2,y2]}]}。"
+    "JSON 结构为:{\"blocks\": [{\"label\": str, \"content\": str, \"bbox\": [x1,y1,x2,y2], \"table\": {\"headers\": [str,...], \"rows\": [[str,...],...]}]}。"
     "label 取值:text / doc_title / paragraph_title / table / list / seal。"
     "bbox 为该块在页面中的归一化边界框,坐标范围 [0,1],原点左上角。"
     "content 为该块的完整文字内容。\n"
     "表格格式约定(重要,用于后续逐行比对):\n"
-    "- 表格每行输出为一条记录,单元格之间用「 | 」(竖线两侧各一个空格)分隔,"
-    "不要输出 Markdown 表格语法。\n"
-    "- 禁止输出分隔行(如 |---|---|),禁止在行首/行尾包裹额外的 |。\n"
-    "- 示例:content=\"阶段 | 比例 | 金额\\n预付款 | 30% | 30000\\n尾款 | 70% | 70000\"。\n"
+    "- 表格块必须同时提供 content(纯文本)和 table(结构化)两个字段。\n"
+    "- content 中每行单元格用「 | 」(竖线两侧各一个空格)分隔,首行是表头,"
+    "不要输出 Markdown 表格语法,禁止分隔行(如 |---|---|),禁止行首/行尾额外 |。\n"
+    "- table.headers 是表头各列名称数组;table.rows 是数据行数组,每行是单元格数组,"
+    "每行单元格数应与 headers 对齐。\n"
+    "- 示例:content=\"阶段 | 比例 | 金额\\n预付款 | 30% | 30000\\n尾款 | 70% | 70000\","
+    "table={\"headers\":[\"阶段\",\"比例\",\"金额\"],\"rows\":[[\"预付款\",\"30%\",\"30000\"],[\"尾款\",\"70%\",\"70000\"]]}。\n"
+    "- 非表格块(text/doc_title/paragraph_title/list/seal)不要输出 table 字段。\n"
     "切分粒度约定(重要):\n"
     "- 同一编号条款(第X条 / X.X / (X) / 一、等)的全部内容合并为单个 block 输出,"
     "不要按视觉换行或段落把一条编号条款拆成多个 block。\n"
@@ -247,6 +253,28 @@ def _parse_blocks(
                 page_index, bbox_norm, bbox_pt,
                 meta.width_px, meta.height_px, w_pt, h_pt,
             )
+        # 结构化表格:label=table 时解析 table 字段(headers/rows)
+        table_obj: TableStructure | None = None
+        if label == "table":
+            tbl = item.get("table")
+            if isinstance(tbl, dict):
+                headers = tbl.get("headers") or []
+                rows = tbl.get("rows") or []
+                if isinstance(headers, list) and isinstance(rows, list):
+                    # 拍平单元格内换行(与 Word 侧 _table_rows 对称):VL 模型偶尔
+                    # 会在表头/单元格内返回换行,如「数\\n量」,会破坏列对齐。
+                    headers_str = [
+                        str(h).replace("\n", " ").replace("\r", " ").strip()
+                        for h in headers
+                        if str(h).replace("\n", " ").strip()
+                    ]
+                    rows_str = [
+                        [str(c).replace("\n", " ").replace("\r", " ").strip() for c in row]
+                        for row in rows
+                        if isinstance(row, list)
+                    ]
+                    if headers_str or rows_str:
+                        table_obj = TableStructure(headers=headers_str, rows=rows_str)
         blocks.append(
             Block(
                 block_id=f"p{page_index}-b{idx}",
@@ -254,6 +282,7 @@ def _parse_blocks(
                 label=label,
                 bbox=bbox_pt,
                 content=text,
+                table=table_obj,
             )
         )
     return blocks
