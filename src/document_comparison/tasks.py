@@ -11,8 +11,9 @@ import time
 from dataclasses import dataclass, field
 
 from .config import settings
-from .models import TaskInfo, TamperReport
+from .models import TaskInfo, TamperReport, TextDiffReport
 from .pipeline import run_pipeline
+from .raw_pipeline import run_raw_pipeline
 from . import storage, webhook
 
 
@@ -20,6 +21,7 @@ from . import storage, webhook
 class Task:
     info: TaskInfo
     report: TamperReport | None = None
+    raw_report: TextDiffReport | None = None  # 无标注版报告(与 report 互斥)
     events: list[dict] = field(default_factory=list)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
@@ -56,7 +58,9 @@ class TaskManager:
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
 
-    async def run(self, task_id: str, word_path: str, pdf_path: str) -> None:
+    async def run(
+        self, task_id: str, word_path: str, pdf_path: str
+    ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
@@ -78,6 +82,38 @@ class TaskManager:
                 "overall_risk": report.overall_risk,
                 "summary": report.summary,
                 "report_url": f"/api/v1/compare/{task_id}/report?format=json",
+            })
+        except Exception as e:  # noqa: BLE001
+            task.info.status = "failed"
+            task.info.error = str(e)
+            task.push_event("failed", task.info.progress)
+            await self._fire_callback(task_id, "failed", {"error": str(e)})
+        finally:
+            task.done.set()
+            task.finalize_elapsed()
+
+    async def run_raw(
+        self, task_id: str, word_path: str, pdf_path: str, *, char_level: bool = True
+    ) -> None:
+        """无标注版任务:纯文本 difflib 流程,产出 TextDiffReport。"""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        try:
+            async with self._sem:
+                task.info.status = "running"
+                report = await asyncio.to_thread(
+                    run_raw_pipeline, word_path, pdf_path,
+                    on_progress=lambda stage, frac: task.push_event(stage, frac),
+                    char_level=char_level,
+                )
+            task.raw_report = report
+            task.info.status = "done"
+            task.push_event("done", 1.0)
+            storage.save_raw_report(task_id, report)
+            await self._fire_callback(task_id, "done", {
+                "stats": report.stats,
+                "report_url": f"/api/v1/raw-compare/{task_id}/report",
             })
         except Exception as e:  # noqa: BLE001
             task.info.status = "failed"

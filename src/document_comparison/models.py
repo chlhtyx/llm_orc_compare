@@ -133,11 +133,51 @@ class TamperReport(BaseModel):
     page_meta: list[PageMeta] = Field(default_factory=list)
 
 
+# —— 无标注版(纯文本 difflib 比对)数据结构 ——
+# 与上面的 TamperReport 体系完全独立,不经过条款对齐/风险分级,
+# 仅做 Word→纯文本、PDF→纯文本、difflib 行级比对。
+class TextDiffHunk(BaseModel):
+    """一段差异(含少量上下文)。
+
+    tag 来自 difflib 的 opcode,equal 不入库(只在 context_* 里作上下文)。
+    """
+
+    tag: Literal["replace", "delete", "insert"]
+    word_lines: list[str] = Field(default_factory=list, description="Word 侧差异行(delete/replace)")
+    pdf_lines: list[str] = Field(default_factory=list, description="PDF 侧差异行(insert/replace)")
+    char_segments: list[DiffSegment] = Field(
+        default_factory=list,
+        description="仅 tag=replace 时:行内字符级 diff(复用 DiffSegment)",
+    )
+    context_before: list[str] = Field(default_factory=list, description="差异前的上下文行(equal)")
+    context_after: list[str] = Field(default_factory=list, description="差异后的上下文行(equal)")
+
+
+class TextDiffReport(BaseModel):
+    """纯文本 difflib 比对报告(与 TamperReport 完全独立)。"""
+
+    source: str
+    target: str
+    word_text: str = ""
+    pdf_text: str = ""
+    hunks: list[TextDiffHunk] = Field(default_factory=list)
+    stats: dict = Field(default_factory=dict)
+
+
 # —— API 层 DTO ——
 class CompareOptions(BaseModel):
     similarity_identical: float | None = None
     similarity_modified: float | None = None
     enable_llm_judge: bool = False
+
+
+class RawCompareOptions(BaseModel):
+    """无标注版提交选项(纯文本 difflib 流程)。"""
+
+    char_level: bool = Field(
+        default=True,
+        description="replace 行是否做字符级细化(红/绿标记)",
+    )
 
 
 TaskStatus = Literal["pending", "running", "done", "failed"]

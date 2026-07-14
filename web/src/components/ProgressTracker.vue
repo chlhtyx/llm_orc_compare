@@ -14,11 +14,19 @@ const props = defineProps<{
 
 const STAGE_TEXT: Record<string, string> = {
   parse_word: '解析 Word',
+  word_parsing: '解析 Word',
+  word_done: '解析 Word',
   ocr_pdf: 'PDF OCR',
+  ocr: 'PDF OCR',
+  ocr_done: 'PDF OCR',
   structure: '条款切分',
+  structure_done: '条款切分',
   align: '条款对齐',
+  align_done: '条款对齐',
   compare: '比对检测',
+  compare_done: '比对检测',
   report: '生成报告',
+  done: '完成',
 }
 
 const stageText = computed(() => STAGE_TEXT[props.stage] ?? props.stage ?? '排队中')

@@ -3,9 +3,21 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { computed } from 'vue'
 
 const route = useRoute()
-const activeName = computed(() =>
-  route.name === 'report' ? 'report' : route.name === 'settings' ? 'settings' : 'submit',
-)
+const activeName = computed(() => {
+  const name = String(route.name ?? '')
+  if (name === 'report' || name === 'raw-report') return name
+  if (name === 'settings') return 'settings'
+  if (name === 'raw-submit') return 'raw-submit'
+  return 'submit'
+})
+// 「报告」链接按当前流程指向对应报告页。
+const reportHref = computed(() => {
+  const tid = route.params.taskId
+  if (!tid) return null
+  const name = String(route.name)
+  if (name.startsWith('raw')) return `/raw/report/${tid}`
+  return `/report/${tid}`
+})
 </script>
 
 <template>
@@ -16,11 +28,12 @@ const activeName = computed(() =>
         <span class="app-title">文档比对系统</span>
       </div>
       <nav class="app-nav">
-        <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对</RouterLink>
+        <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对-标记</RouterLink>
+        <RouterLink to="/raw" :class="{ active: activeName === 'raw-submit' }">无标注比对</RouterLink>
         <RouterLink
-          v-if="route.params.taskId"
-          :to="`/report/${route.params.taskId}`"
-          :class="{ active: activeName === 'report' }"
+          v-if="reportHref"
+          :to="reportHref"
+          :class="{ active: activeName === 'report' || activeName === 'raw-report' }"
         >
           报告
         </RouterLink>

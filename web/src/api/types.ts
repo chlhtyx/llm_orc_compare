@@ -100,3 +100,31 @@ export interface ProgressEvent {
   error?: string | null
   [key: string]: unknown
 }
+
+// —— 无标注版(纯文本 difflib)数据结构,与后端 raw_pipeline 对应 ——
+export interface TextDiffHunk {
+  tag: 'replace' | 'delete' | 'insert'
+  word_lines: string[]
+  pdf_lines: string[]
+  char_segments: DiffSegment[]
+  context_before: string[]
+  context_after: string[]
+}
+
+export interface TextDiffReport {
+  source: string
+  target: string
+  word_text: string
+  pdf_text: string
+  hunks: TextDiffHunk[]
+  stats: Record<string, number>
+}
+
+export interface RawCompareOptions {
+  char_level?: boolean
+}
+
+/** 无标注版任务信息(GET /api/v1/raw-compare/{id}),done 时附加 raw_report。 */
+export interface RawTaskInfo extends TaskInfo {
+  raw_report?: TextDiffReport
+}

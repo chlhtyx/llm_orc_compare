@@ -25,8 +25,8 @@ from ..config import (
     save_llm_overrides,
     settings,
 )
-from ..models import CompareOptions
-from ..storage import load_report, report_path, save_upload, upload_path
+from ..models import CompareOptions, RawCompareOptions
+from ..storage import load_report, load_raw_report, report_path, save_upload, upload_path
 from ..report.builder import burn_pdf
 from ..tasks import task_manager
 
@@ -194,7 +194,7 @@ def create_app() -> FastAPI:
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
-        # 解析 options(可选)
+        # 解析 options(可选;校验通过即丢弃,阈值类选项暂未透传到 pipeline)
         if options:
             try:
                 CompareOptions.model_validate_json(options)
@@ -294,6 +294,82 @@ def create_app() -> FastAPI:
             media_type="application/pdf",
             headers={"Content-Disposition": f'inline; filename="{task_id}-target.pdf"'},
         )
+
+    # —— 无标注版(纯文本 difflib 比对)端点:与 /api/v1/compare 完全独立 ——
+    @app.post("/api/v1/raw-compare")
+    async def raw_compare(
+        source: UploadFile = File(..., description="原始 Word(.docx)"),
+        target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
+        options: str | None = Form(default=None),
+        callback_url: str | None = Form(default=None),
+        callback_secret: str | None = Form(default=None),
+    ):
+        if not (source.filename or "").lower().endswith(".docx"):
+            raise HTTPException(400, "source 必须为 .docx")
+        if not (target.filename or "").lower().endswith(".pdf"):
+            raise HTTPException(400, "target 必须为 .pdf")
+
+        opts = RawCompareOptions()
+        if options:
+            try:
+                opts = RawCompareOptions.model_validate_json(options)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"options 解析失败: {exc}")
+
+        running = sum(
+            1
+            for t in task_manager._tasks.values()
+            if t.info.status in ("pending", "running")
+        )
+        if running >= settings.max_concurrent_tasks:
+            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        task_id = task_manager.create(callback_url, callback_secret)
+        word_path = save_upload(source, task_id, "source")
+        pdf_path = save_upload(target, task_id, "target")
+        asyncio.create_task(
+            task_manager.run_raw(
+                task_id, str(word_path), str(pdf_path), char_level=opts.char_level
+            )
+        )
+        return {"task_id": task_id, "status": "pending"}
+
+    @app.get("/api/v1/raw-compare/{task_id}")
+    async def raw_get_result(task_id: str):
+        task = task_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+        resp = task.info.model_dump()
+        if task.info.status == "done" and task.raw_report is not None:
+            resp["raw_report"] = task.raw_report.model_dump()
+        elif task.info.status == "done":
+            report = load_raw_report(task_id)
+            if report is not None:
+                resp["raw_report"] = report.model_dump()
+        return resp
+
+    @app.get("/api/v1/raw-compare/{task_id}/events")
+    async def raw_events(task_id: str):
+        task = task_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+
+        async def gen():
+            async for ev in task_manager.event_stream(task_id):
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': task.info.status}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/v1/raw-compare/{task_id}/report")
+    async def raw_download_report(task_id: str):
+        task = task_manager.get(task_id)
+        report = task.raw_report if task else None
+        if report is None:
+            report = load_raw_report(task_id)
+        if report is None:
+            raise HTTPException(404, "report not ready")
+        return JSONResponse(content=report.model_dump())
 
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。

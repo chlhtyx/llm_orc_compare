@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import UploadFile
 
 from .config import settings
-from .models import TamperReport
+from .models import TamperReport, TextDiffReport
 
 
 def save_upload(upload: UploadFile, task_id: str, role: str) -> Path:
@@ -35,6 +35,21 @@ def load_report(task_id: str) -> TamperReport | None:
     if not path.exists():
         return None
     return TamperReport.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+# —— 无标注版(纯文本 difflib)报告存取,文件名隔离 ——
+def save_raw_report(task_id: str, report: TextDiffReport) -> Path:
+    settings.ensure_dirs()
+    path = settings.reports_dir / f"{task_id}.raw.json"
+    path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+def load_raw_report(task_id: str) -> TextDiffReport | None:
+    path = settings.reports_dir / f"{task_id}.raw.json"
+    if not path.exists():
+        return None
+    return TextDiffReport.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def report_path(task_id: str, fmt: str) -> Path:
