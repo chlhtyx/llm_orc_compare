@@ -1,10 +1,13 @@
 """比对报告组装:字符 diff + 风险分级 + 坐标归一化(§5.6、§6)。"""
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from pathlib import Path
 
 import pymupdf
+
+logger = logging.getLogger(__name__)
 
 from ..compare.diff import char_diff
 from ..compare.elements import elements_changed, extract_key_elements
@@ -167,6 +170,11 @@ def build_report(
         "risk_distribution": dict(Counter(levels)),
         "key_element_changes": len(changed_elems),
     }
+    logger.info(
+        "report built diffs=%s unmatched=%s overall=%s status=%s risk_dist=%s",
+        len(diffs), len(unmatched), overall,
+        dict(status_counts), dict(Counter(levels)),
+    )
     return TamperReport(
         source=source,
         target=target,

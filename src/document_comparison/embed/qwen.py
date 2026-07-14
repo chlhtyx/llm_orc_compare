@@ -110,6 +110,10 @@ class QwenEmbedding:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
                     last_exc = exc
+                    logger.warning(
+                        "embed transport error attempt=%s/%s reason=%s inputs=%s",
+                        attempt + 1, self.max_retries + 1, exc, len(inputs),
+                    )
                 else:
                     if resp.status_code == 429 or resp.status_code >= 500:
                         last_exc = httpx.HTTPStatusError(
@@ -117,10 +121,20 @@ class QwenEmbedding:
                             request=resp.request,
                             response=resp,
                         )
+                        logger.warning(
+                            "embed transient http status=%s attempt=%s/%s",
+                            resp.status_code, attempt + 1, self.max_retries + 1,
+                        )
                     else:
                         resp.raise_for_status()
                         return resp.json()["data"]
                 if attempt < self.max_retries:
-                    time.sleep(min(2 ** attempt, 8) + random.random())
+                    backoff = min(2 ** attempt, 8) + random.random()
+                    logger.info("embed retry after %.1fs", backoff)
+                    time.sleep(backoff)
         assert last_exc is not None
+        logger.error(
+            "embed give up after %s attempts inputs=%s: %s",
+            self.max_retries + 1, len(inputs), last_exc,
+        )
         raise last_exc

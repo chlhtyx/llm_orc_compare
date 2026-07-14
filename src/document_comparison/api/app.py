@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -25,10 +26,13 @@ from ..config import (
     save_llm_overrides,
     settings,
 )
+from ..logging_config import setup_logging
 from ..models import CompareOptions, RawCompareOptions
 from ..storage import load_report, load_raw_report, report_path, save_upload, upload_path
 from ..report.builder import burn_pdf
 from ..tasks import task_manager
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -42,6 +46,7 @@ def _mask_key(key: str) -> str:
 
 
 def create_app() -> FastAPI:
+    setup_logging()  # 控制台 + 滚动文件,幂等
     app = FastAPI(
        title="文档比对 API",
         description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",

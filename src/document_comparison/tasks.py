@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 import time
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from .models import TaskInfo, TamperReport, TextDiffReport
 from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
 from . import storage, webhook
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -53,6 +56,10 @@ class TaskManager:
             callback_url=callback_url,
             callback_secret=callback_secret,
         )
+        logger.info(
+            "task created task_id=%s callback=%s",
+            task_id, "yes" if callback_url else "no",
+        )
         return task_id
 
     def get(self, task_id: str) -> Task | None:
@@ -64,6 +71,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
+        logger.info("task start task_id=%s word=%s pdf=%s", task_id, word_path, pdf_path)
         try:
             async with self._sem:
                 task.info.status = "running"
@@ -78,6 +86,11 @@ class TaskManager:
             task.info.status = "done"
             task.push_event("done", 1.0)
             storage.save_report(task_id, report)
+            logger.info(
+                "task done task_id=%s risk=%s diffs=%s unmatched=%s",
+                task_id, report.overall_risk,
+                len(report.diffs), len(report.unmatched_clauses),
+            )
             await self._fire_callback(task_id, "done", {
                 "overall_risk": report.overall_risk,
                 "summary": report.summary,
@@ -87,10 +100,15 @@ class TaskManager:
             task.info.status = "failed"
             task.info.error = str(e)
             task.push_event("failed", task.info.progress)
+            logger.exception("task failed task_id=%s", task_id)
             await self._fire_callback(task_id, "failed", {"error": str(e)})
         finally:
             task.done.set()
             task.finalize_elapsed()
+            logger.info(
+                "task finished task_id=%s status=%s elapsed=%ss",
+                task_id, task.info.status, task.info.elapsed,
+            )
 
     async def run_raw(
         self, task_id: str, word_path: str, pdf_path: str, *, char_level: bool = True
@@ -99,6 +117,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
+        logger.info("task start(raw) task_id=%s word=%s pdf=%s", task_id, word_path, pdf_path)
         try:
             async with self._sem:
                 task.info.status = "running"
@@ -111,6 +130,10 @@ class TaskManager:
             task.info.status = "done"
             task.push_event("done", 1.0)
             storage.save_raw_report(task_id, report)
+            logger.info(
+                "task done(raw) task_id=%s hunks=%s similarity=%s",
+                task_id, len(report.hunks), report.stats.get("similarity"),
+            )
             await self._fire_callback(task_id, "done", {
                 "stats": report.stats,
                 "report_url": f"/api/v1/raw-compare/{task_id}/report",
@@ -119,10 +142,15 @@ class TaskManager:
             task.info.status = "failed"
             task.info.error = str(e)
             task.push_event("failed", task.info.progress)
+            logger.exception("task failed(raw) task_id=%s", task_id)
             await self._fire_callback(task_id, "failed", {"error": str(e)})
         finally:
             task.done.set()
             task.finalize_elapsed()
+            logger.info(
+                "task finished(raw) task_id=%s status=%s elapsed=%ss",
+                task_id, task.info.status, task.info.elapsed,
+            )
 
     async def _fire_callback(self, task_id: str, status: str, payload: dict) -> None:
         task = self._tasks.get(task_id)

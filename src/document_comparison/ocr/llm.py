@@ -93,7 +93,12 @@ class LLMOCREngine:
     ) -> list[list[Block]]:
         images = render_pages(pdf_path, dpi=self._dpi)
         if not images:
+            logger.info("ocr recognize pages=0 (empty pdf)")
             return []
+        logger.info(
+            "ocr recognize pages=%s dpi=%s concurrency=%s model=%s",
+            len(images), self._dpi, self.max_concurrency, self.model,
+        )
 
         # Pre-warm certifi CA bundle before spawning threads — certifi.where()
         # uses an unlocked global guard that races under concurrent access.
@@ -172,6 +177,10 @@ class LLMOCREngine:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
                     last_exc = exc
+                    logger.warning(
+                        "ocr transport error attempt=%s/%s reason=%s",
+                        attempt + 1, self.max_retries + 1, exc,
+                    )
                 else:
                     if resp.status_code == 429 or resp.status_code >= 500:
                         last_exc = httpx.HTTPStatusError(
@@ -179,13 +188,20 @@ class LLMOCREngine:
                             request=resp.request,
                             response=resp,
                         )
+                        logger.warning(
+                            "ocr transient http status=%s attempt=%s/%s",
+                            resp.status_code, attempt + 1, self.max_retries + 1,
+                        )
                     else:
                         resp.raise_for_status()  # 4xx:不可重试,直接抛
                         data = resp.json()
                         return data["choices"][0]["message"]["content"]
                 if attempt < self.max_retries:
-                    time.sleep(min(2 ** attempt, 8) + random.random())
+                    backoff = min(2 ** attempt, 8) + random.random()
+                    logger.info("ocr retry after %.1fs", backoff)
+                    time.sleep(backoff)
         assert last_exc is not None
+        logger.error("ocr give up after %s attempts: %s", self.max_retries + 1, last_exc)
         raise last_exc
 
 
@@ -297,6 +313,7 @@ def _extract_json(text: str) -> Any:
                 return json.loads(m.group(0))
             except json.JSONDecodeError:
                 continue
+    logger.warning("ocr json parse failed, treating as empty; raw=%s", text[:200])
     return {}
 
 

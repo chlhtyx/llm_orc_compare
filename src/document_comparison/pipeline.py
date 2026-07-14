@@ -6,6 +6,7 @@ Word 解析 → 条款切分;PDF 渲染 → OCR → 条款切分;对齐;比对;�
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +18,8 @@ from .ocr import get_ocr_engine
 from .parsing import get_page_metas, parse_word
 from .report import build_report
 from .structure import blocks_to_raw, build_clauses
+
+logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str, float], None]
 
@@ -42,15 +45,21 @@ def run_pipeline(
     _progress("word_parsing", 0.02)
     word_raw = parse_word(word_path)
     word_clauses = build_clauses(word_raw, "word")
+    logger.info("word parsed items=%s clauses=%s", len(word_raw), len(word_clauses))
     _progress("word_done", 0.08)
 
     # —— ① PDF + ② OCR + ③ 切分 ——
     _progress("ocr", 0.10)
     page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
     pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
+    logger.info(
+        "ocr done pages=%s blocks=%s dpi=%s",
+        len(page_metas), sum(len(b) for b in pages_blocks), cfg.pdf_render_dpi,
+    )
     _progress("ocr_done", 0.70)
     pdf_raw = blocks_to_raw(pages_blocks)
     pdf_clauses = build_clauses(pdf_raw, "pdf")
+    logger.info("pdf structured clauses=%s", len(pdf_clauses))
     _progress("structure_done", 0.78)
 
     # —— ④ 对齐 ——
@@ -58,6 +67,10 @@ def run_pipeline(
     align_threshold = cfg.align_similarity_mock if is_mock_engine(embed) else cfg.align_similarity
     alignments = align_clauses(
         word_clauses, pdf_clauses, embed, align_threshold
+    )
+    logger.info(
+        "aligned word=%s pdf=%s total=%s threshold=%.2f",
+        len(word_clauses), len(pdf_clauses), len(alignments), align_threshold,
     )
     _progress("align_done", 0.88)
 

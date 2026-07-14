@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from fastapi import UploadFile
 
 from .config import settings
 from .models import TamperReport, TextDiffReport
+
+logger = logging.getLogger(__name__)
 
 
 def save_upload(upload: UploadFile, task_id: str, role: str) -> Path:
@@ -27,6 +30,7 @@ def save_report(task_id: str, report: TamperReport) -> Path:
     settings.ensure_dirs()
     path = settings.reports_dir / f"{task_id}.json"
     path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    logger.debug("report saved task_id=%s path=%s", task_id, path)
     return path
 
 
@@ -34,6 +38,7 @@ def load_report(task_id: str) -> TamperReport | None:
     path = settings.reports_dir / f"{task_id}.json"
     if not path.exists():
         return None
+    logger.debug("report loaded task_id=%s path=%s", task_id, path)
     return TamperReport.model_validate_json(path.read_text(encoding="utf-8"))
 
 

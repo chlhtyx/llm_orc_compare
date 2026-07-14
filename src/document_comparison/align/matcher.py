@@ -12,7 +12,12 @@
 """
 from __future__ import annotations
 
+import logging
+from collections import Counter
+
 from ..models import Alignment, Clause
+
+logger = logging.getLogger(__name__)
 
 # 语义匹配的邻域窗口(按阅读顺序 ±N 条内优先搜索)
 _NEIGHBORHOOD = 5
@@ -139,6 +144,21 @@ def align_clauses(
                     similarity=0.0,
                 )
             )
+
+    # —— 对齐结果统计(诊断「疑似切分边界差异」unmatched 多寡的关键信号)——
+    type_counts = Counter(a.match_type for a in alignments)
+    unmatched = type_counts.get("unmatched", 0)
+    # 区分 added(pdf 独有)与 deleted(word 缺失)
+    added = sum(1 for a in alignments if a.match_type == "unmatched" and not a.word_clause_id)
+    deleted = unmatched - added
+    logger.info(
+        "align result number=%s field=%s semantic=%s unmatched=%s (added=%s deleted=%s) threshold=%.2f",
+        type_counts.get("number", 0),
+        type_counts.get("field", 0),
+        type_counts.get("semantic", 0),
+        unmatched, added, deleted,
+        threshold,
+    )
 
     return alignments
 

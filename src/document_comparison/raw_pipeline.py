@@ -5,6 +5,7 @@ OCR 复用现有 LLMOCREngine,只多一步 flatten blocks→纯文本。
 """
 from __future__ import annotations
 
+import logging
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
@@ -15,6 +16,8 @@ from .models import TextDiffHunk, TextDiffReport
 from .ocr import get_ocr_engine
 from .parsing import get_page_metas, parse_word
 from .structure.normalize import normalize_text
+
+logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str, float], None]
 
@@ -42,12 +45,17 @@ def run_raw_pipeline(
     _progress("word_parsing", 0.02)
     word_raw = parse_word(word_path)
     word_text = "\n".join(item.text for item in word_raw if item.text)
+    logger.info("word parsed items=%s chars=%s", len(word_raw), len(word_text))
     _progress("word_done", 0.10)
 
     # —— ② PDF → 纯文本(OCR 复用现有引擎,flatten blocks)——
     _progress("ocr", 0.12)
     page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
     pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
+    logger.info(
+        "ocr done pages=%s blocks=%s dpi=%s",
+        len(page_metas), sum(len(b) for b in pages_blocks), cfg.pdf_render_dpi,
+    )
     _progress("ocr_done", 0.90)
     # 每页块的 content 用换行拼接,页间再换行
     page_texts = ["\n".join(b.content for b in blocks if b.content) for blocks in pages_blocks]
@@ -62,6 +70,11 @@ def run_raw_pipeline(
     _progress("diff", 0.95)
     report = _diff_texts(word_text, pdf_text, char_level=char_level,
                          source=str(word_path), target=str(pdf_path))
+    logger.info(
+        "diff done hunks=%s similarity=%s word_lines=%s pdf_lines=%s",
+        len(report.hunks), report.stats.get("similarity"),
+        report.stats.get("word_total_lines"), report.stats.get("pdf_total_lines"),
+    )
     _progress("done", 1.0)
     return report
 

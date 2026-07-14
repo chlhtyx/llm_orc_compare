@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 try:  # PyMuPDF 新版包名 pymupdf,旧版为 fitz
@@ -15,6 +16,8 @@ except ImportError:  # pragma: no cover
     import fitz  # type: ignore[no-redef]
 
 from ..models import Block, PageMeta
+
+logger = logging.getLogger(__name__)
 
 
 def get_page_metas(path: str | Path, dpi: int = 300) -> list[PageMeta]:
@@ -73,4 +76,7 @@ def extract_text_blocks(path: str | Path) -> list[list[Block]]:
                     )
                 )
             pages.append(blocks)
+    # 全部页都无文本块 → 多半是扫描件,提示须走真实 OCR
+    if not any(pages):
+        logger.info("pdf text layer empty (scanned?), need real OCR path=%s", path)
     return pages
