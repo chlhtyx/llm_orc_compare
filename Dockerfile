@@ -24,9 +24,9 @@ FROM python:3.12-slim AS runtime
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_TRUSTED_HOST=mirrors.aliyun.com
 
-# 系统依赖:PyMuPDF 需要的运行库 + curl(健康检查用)
+# 系统依赖:PyMuPDF 运行库 + curl(健康检查)+ tzdata(时区,日志/时间戳用本地时区)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -56,7 +56,8 @@ VOLUME ["/app/.dc_data"]
 ENV DC_HOST=0.0.0.0 \
     DC_PORT=8000 \
     DC_STORAGE_DIR=/app/.dc_data \
-    DC_STATIC_DIR=/app/static
+    DC_STATIC_DIR=/app/static \
+    TZ=Asia/Shanghai
 
 EXPOSE 8000
 

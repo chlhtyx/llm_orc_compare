@@ -13,6 +13,7 @@ from docx.table import Table  # type: ignore[import-untyped]
 from docx.text.paragraph import Paragraph  # type: ignore[import-untyped]
 
 from ..models import RawItem
+from ..structure.normalize import normalize_table_text
 
 _HEADING_RE = re.compile(r"heading\s*(\d+)", re.IGNORECASE)
 
@@ -39,7 +40,10 @@ def _table_to_text(table: Table) -> str:
     for row in table.rows:
         cells = [c.text.strip() for c in row.cells]
         rows.append(" | ".join(cells))
-    return "\n".join(rows)
+    # 过一遍表格规范化,与 OCR 侧(label=table 的 block)统一为同一格式,
+    # 消除两端表达同一张表时的文本差异(否则 difflib 会产生大量伪差异)。
+    # 对此处产出的「 | 」格式是幂等 no-op,但锁定格式契约、保证两端对称。
+    return normalize_table_text("\n".join(rows))
 
 
 def parse_word(path: str | Path) -> list[RawItem]:

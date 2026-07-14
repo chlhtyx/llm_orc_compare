@@ -12,9 +12,10 @@ try:
 except ImportError:
     import fitz  # type: ignore
 
-from document_comparison.models import PageMeta
+from document_comparison.models import Block, PageMeta
 from document_comparison.parsing.pdf import extract_text_blocks
 from document_comparison.raw_pipeline import run_raw_pipeline
+from document_comparison.structure.normalize import normalize_table_text
 
 
 class _TextLayerOCR:
@@ -25,12 +26,25 @@ class _TextLayerOCR:
 
 
 def _make_word(parts):
+    """构造 Word 文档。parts 元素:
+    - ("h1", text)  标题
+    - ("p", text)   段落
+    - ("table", rows)  rows 为二维 list,每行一组单元格
+    """
     doc = Document()
     for kind, text in parts:
         if kind == "h1":
             doc.add_heading(text, level=1)
         elif kind == "p":
             doc.add_paragraph(text)
+        elif kind == "table":
+            rows = text
+            n_cols = max(len(r) for r in rows)
+            tbl = doc.add_table(rows=len(rows), cols=n_cols)
+            tbl.style = "Table Grid"
+            for r, row in enumerate(rows):
+                for c, val in enumerate(row):
+                    tbl.cell(r, c).text = val
     buf = io.BytesIO()
     doc.save(buf)
     return buf
@@ -150,3 +164,133 @@ def test_raw_report_carries_full_text(tmp_path):
     report = run_raw_pipeline(wpath, ppath, ocr=_TextLayerOCR())
     assert "测试条款A" in report.word_text
     assert "测试条款A" in report.pdf_text
+
+
+# —— 表格规范化 ——
+
+
+def test_normalize_table_text_canonical_is_idempotent():
+    """已是规范「cell | cell」格式时原样返回(幂等)。"""
+    src = "阶段 | 比例 | 金额\n预付款 | 30% | 30000"
+    assert normalize_table_text(src) == src
+
+
+def test_normalize_table_text_strips_markdown_pipes():
+    """Markdown 首尾包裹的 | 去掉,单元格仍按 | 分隔。"""
+    md = "| 阶段 | 比例 | 金额 |\n| 预付款 | 30% | 30000 |"
+    assert normalize_table_text(md) == "阶段 | 比例 | 金额\n预付款 | 30% | 30000"
+
+
+def test_normalize_table_text_drops_separator_row():
+    """Markdown 分隔行(|---|---|)被丢弃。"""
+    md = "| 阶段 | 比例 | 金额 |\n|---|---|---|\n| 预付款 | 30% | 30000 |"
+    out = normalize_table_text(md)
+    assert "---" not in out
+    assert out == "阶段 | 比例 | 金额\n预付款 | 30% | 30000"
+
+
+def test_normalize_table_text_align_row_variants():
+    """带对齐标记的分隔行(:---: / :---)同样丢弃。"""
+    md = "阶段 | 比例 | 金额\n:---:|:---|---:\n预付款 | 30% | 30000"
+    out = normalize_table_text(md)
+    assert out == "阶段 | 比例 | 金额\n预付款 | 30% | 30000"
+
+
+def test_normalize_table_text_tsv():
+    """TSV 制表符分隔 → 规范「 | 」格式。"""
+    tsv = "阶段\t比例\t金额\n预付款\t30%\t30000"
+    assert normalize_table_text(tsv) == "阶段 | 比例 | 金额\n预付款 | 30% | 30000"
+
+
+def test_normalize_table_text_collapses_cell_whitespace():
+    """单元格内多空白折叠为单空格。"""
+    src = "a   b |  c  d"
+    assert normalize_table_text(src) == "a b | c d"
+
+
+# —— 表格流水线:Word 表格 vs OCR 返回不同格式 ——
+
+
+class _FixedBlockOCR:
+    """固定返回预设 block 列表的 mock OCR(模拟 LLM 识别结果)。
+
+    用于验证 raw_pipeline 对 label=table 的 block 套用表格规范化。
+    """
+
+    def __init__(self, blocks_per_page):
+        self._blocks = blocks_per_page
+
+    def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
+        return self._blocks
+
+
+def _table_block(content, page_index=0):
+    return Block(
+        block_id=f"p{page_index}-b0",
+        page_index=page_index,
+        label="table",
+        bbox=[0, 0, 100, 100],
+        content=content,
+    )
+
+
+def _text_block(content, page_index=0):
+    return Block(
+        block_id=f"p{page_index}-b0",
+        page_index=page_index,
+        label="text",
+        bbox=[0, 0, 100, 100],
+        content=content,
+    )
+
+
+def test_raw_table_markdown_no_false_diff(tmp_path):
+    """Word 表格 vs OCR 返回 Markdown 表格(带分隔行):规范化后无伪差异。"""
+    rows = [["阶段", "比例", "金额"], ["预付款", "30%", "30000"], ["尾款", "70%", "70000"]]
+    word_buf = _make_word([("table", rows)])
+    # PDF 文件本身不影响(用空页占位),OCR 结果由 mock 决定
+    pdf_buf = _make_pdf_from_lines(["占位"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+
+    ocr_md = _FixedBlockOCR([[_table_block(
+        "| 阶段 | 比例 | 金额 |\n|---|---|---|\n| 预付款 | 30% | 30000 |\n| 尾款 | 70% | 70000 |"
+    )]])
+    report = run_raw_pipeline(wpath, ppath, ocr=ocr_md)
+    assert len(report.hunks) == 0
+    assert report.stats["similarity"] >= 0.99
+
+
+def test_raw_table_tsv_no_false_diff(tmp_path):
+    """Word 表格 vs OCR 返回 TSV 制表符格式:规范化后无伪差异。"""
+    rows = [["阶段", "比例", "金额"], ["预付款", "30%", "30000"], ["尾款", "70%", "70000"]]
+    word_buf = _make_word([("table", rows)])
+    pdf_buf = _make_pdf_from_lines(["占位"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+
+    ocr_tsv = _FixedBlockOCR([[_table_block(
+        "阶段\t比例\t金额\n预付款\t30%\t30000\n尾款\t70%\t70000"
+    )]])
+    report = run_raw_pipeline(wpath, ppath, ocr=ocr_tsv)
+    assert len(report.hunks) == 0
+    assert report.stats["similarity"] >= 0.99
+
+
+def test_raw_table_real_change_detected(tmp_path):
+    """表格内真实改动仍被检出:Word 30000 vs OCR 40000。"""
+    rows = [["阶段", "比例", "金额"], ["预付款", "30%", "30000"], ["尾款", "70%", "70000"]]
+    word_buf = _make_word([("table", rows)])
+    pdf_buf = _make_pdf_from_lines(["占位"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+
+    ocr_changed = _FixedBlockOCR([[_table_block(
+        "阶段 | 比例 | 金额\n预付款 | 30% | 40000\n尾款 | 70% | 70000"
+    )]])
+    report = run_raw_pipeline(wpath, ppath, ocr=ocr_changed)
+    # 应检出差异
+    assert len(report.hunks) >= 1
+    assert report.stats["similarity"] < 0.99
+    # 差异应落在金额行:Word 侧含 30000,PDF 侧含 40000
+    w_lines = [ln for h in report.hunks for ln in h.word_lines]
+    p_lines = [ln for h in report.hunks for ln in h.pdf_lines]
+    assert any("30000" in ln for ln in w_lines)
+    assert any("40000" in ln for ln in p_lines)
