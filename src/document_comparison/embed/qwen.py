@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from ..config import settings
+from ..observability import log_model_request, log_model_response
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class QwenEmbedding:
         last_exc: Exception | None = None
         with httpx.Client(timeout=timeout) as client:
             for attempt in range(self.max_retries + 1):
+                request_started = log_model_request(logger, "embedding", url, payload, attempt + 1)
                 try:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
@@ -127,7 +129,9 @@ class QwenEmbedding:
                         )
                     else:
                         resp.raise_for_status()
-                        return resp.json()["data"]
+                        response_data = resp.json()
+                        log_model_response(logger, "embedding", resp.status_code, response_data, request_started)
+                        return response_data["data"]
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
                     logger.info("embed retry after %.1fs", backoff)

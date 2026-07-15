@@ -87,8 +87,10 @@ def align_clauses(
     rem_p = [c for c in pdf_clauses if c.clause_id not in matched_p]
     consumed_w: set[str] = set()
     if rem_w and rem_p:
-        w_vecs = _embed_clauses(rem_w, embed)
-        p_vecs = _embed_clauses(rem_p, embed)
+        # 两端合并为一次批量 embedding RPC，远程引擎下由 2 次降为 1 次。
+        all_vecs = _embed_clauses(rem_w + rem_p, embed)
+        w_vecs = all_vecs[:len(rem_w)]
+        p_vecs = all_vecs[len(rem_w):]
 
         for pi, pc in enumerate(rem_p):
             pv = p_vecs[pi]

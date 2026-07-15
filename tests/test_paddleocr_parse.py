@@ -14,6 +14,7 @@ from document_comparison.ocr.paddleocr_http import (
     _parse_plain_content,
     _plain_text_to_table,
 )
+from document_comparison.report.builder import _normalize_regions
 
 
 def _meta() -> PageMeta:
@@ -102,6 +103,75 @@ def test_loc_fallback_branch():
     # bbox 换算为 PDF pt(LOC 0-1000 空间)
     assert len(blocks[0].bbox) == 4
     assert blocks[0].bbox[0] > 0  # x1
+
+
+def test_loc_markdown_table_keeps_structure_and_bbox():
+    """LOC 坐标与 Markdown 表格同时出现时不能把表格降级为普通文本。"""
+    loc = "<|LOC_10|><|LOC_20|><|LOC_900|><|LOC_20|><|LOC_900|><|LOC_80|><|LOC_10|><|LOC_80|>"
+    content = "\n".join([
+        f"名称 | 数量 | 金额{loc}",
+        f"--- | --- | ---{loc}",
+        f"商品A | 2 | 100{loc}",
+    ])
+    blocks = _parse_loc_content(content, 0, _meta())
+    tables = [block for block in blocks if block.label == "table"]
+    assert len(tables) == 1
+    assert tables[0].table.headers == ["名称", "数量", "金额"]
+    assert tables[0].table.rows == [["商品A", "2", "100"]]
+    assert len(tables[0].bbox) == 4
+    regions = _normalize_regions(tables, {0: _meta()})
+    assert len(regions) == 1
+    assert all(0 <= value <= 1 for value in regions[0].bbox)
+
+
+def test_plain_parses_tab_separated_table():
+    content = "名称\t数量\t金额\n商品A\t2\t100\n商品B\t3\t200"
+    blocks = _parse_plain_content(content, 0, _meta())
+    tables = [block for block in blocks if block.label == "table"]
+    assert len(tables) == 1
+    assert tables[0].table.rows[1] == ["商品B", "3", "200"]
+
+
+def test_plain_parses_html_table_and_preserves_surrounding_text():
+    content = "合同标题\n<table><tr><th>名称</th><th>金额</th></tr><tr><td>A</td><td>100</td></tr></table>\n合同尾部"
+    blocks = _parse_plain_content(content, 0, _meta())
+    tables = [block for block in blocks if block.label == "table"]
+    texts = [block.content for block in blocks if block.label == "text"]
+    assert len(tables) == 1
+    assert tables[0].table.headers == ["名称", "金额"]
+    assert tables[0].table.rows == [["A", "100"]]
+    assert texts == ["合同标题", "合同尾部"]
+
+
+def test_plain_table_allows_blank_lines_between_rows():
+    content = "名称 | 金额\n\n--- | ---\n\nA | 100"
+    blocks = _parse_plain_content(content, 0, _meta())
+    tables = [block for block in blocks if block.label == "table"]
+    assert len(tables) == 1
+    assert tables[0].table.rows == [["A", "100"]]
+
+
+def test_plain_table_pads_uneven_rows():
+    table = _plain_text_to_table("名称 | 数量 | 金额\nA | 2")
+    assert table.rows == [["A", "2", ""]]
+
+
+def test_plain_collapses_hallucinated_repeated_table_tail():
+    """真实 PaddleOCR 输出会重复同一续行直到 token 上限，应清除重复尾部。"""
+    repeated = " | | JL-B 军绿色薄型内径 6mm | | "
+    content = "\n".join([
+        "序号 | 物料编码 | 产品名称 | 数量 | 金额",
+        "--- | --- | --- | --- | ---",
+        "1 | YA030000 | 绵纶丝编织套管 | 200 | 250.00",
+        *([repeated] * 12),
+        " |",
+    ])
+    blocks = _parse_plain_content(content, 0, _meta())
+    table = next(block.table for block in blocks if block.label == "table")
+    assert table.rows == [
+        ["1", "YA030000", "绵纶丝编织套管", "200", "250.00"],
+        ["", "", "JL-B 军绿色薄型内径 6mm", "", ""],
+    ]
 
 
 def test_plain_text_to_table():

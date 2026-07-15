@@ -21,6 +21,7 @@ import httpx
 
 from ..config import settings
 from ..models import DiffSegment, RiskLevel
+from ..observability import log_model_request, log_model_response
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ def llm_judge_diff(
     max_retries = settings.llm_max_retries
     with httpx.Client(timeout=timeout) as client:
         for attempt in range(max_retries + 1):
+            request_started = log_model_request(logger, "judge", url, payload, attempt + 1)
             try:
                 resp = client.post(url, json=payload, headers=headers)
             except httpx.TransportError as exc:
@@ -129,6 +131,7 @@ def llm_judge_diff(
                 else:
                     resp.raise_for_status()
                     data = resp.json()
+                    log_model_response(logger, "judge", resp.status_code, data, request_started)
                     content = data["choices"][0]["message"]["content"]
                     parsed = _extract_json(content)
                     risk = parsed.get("risk_level", "").strip().lower()

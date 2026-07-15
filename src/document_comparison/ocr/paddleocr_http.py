@@ -35,6 +35,7 @@ import re
 import threading
 import time
 from collections import deque
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +43,8 @@ import httpx
 
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
+from ..observability import log_model_request, log_model_response
 from ..parsing.pdf import render_pages
-from ..structure.normalize import normalize_table_text
 from .base import ProgressCb
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,10 @@ _LOC_SPACE = 1000.0
 _MAX_TOKENS = 2000
 
 # 表格行:含至少一个 |(Markdown 表格的单元格分隔)。用于识别连续表格行。
-_TABLE_LINE_RE = re.compile(r"\|")
+_TABLE_LINE_RE = re.compile(r"\||\t")
+_HTML_TABLE_RE = re.compile(r"<table\b[\s\S]*?</table\s*>", re.IGNORECASE)
+_MD_SEPARATOR_RE = re.compile(r"^[\s:|\-]+$")
+_REPEATED_ROW_THRESHOLD = 4
 
 
 class PaddleOCREngine:
@@ -187,6 +191,7 @@ class PaddleOCREngine:
         last_exc: Exception | None = None
         with httpx.Client(timeout=timeout) as client:
             for attempt in range(self.max_retries + 1):
+                request_started = log_model_request(logger, "paddleocr", url, payload, attempt + 1)
                 try:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
@@ -209,7 +214,17 @@ class PaddleOCREngine:
                     else:
                         resp.raise_for_status()
                         data = resp.json()
-                        return data["choices"][0]["message"]["content"]
+                        log_model_response(logger, "paddleocr", resp.status_code, data, request_started)
+                        choice = data["choices"][0]
+                        content = choice["message"]["content"]
+                        if choice.get("finish_reason") == "length":
+                            logger.warning(
+                                "paddleocr response truncated at max_tokens=%s chars=%s; "
+                                "parser will remove repeated/empty table tail but omitted "
+                                "source content cannot be recovered",
+                                _MAX_TOKENS, len(content),
+                            )
+                        return content
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
                     logger.info("paddleocr retry after %.1fs", backoff)
@@ -241,13 +256,10 @@ def _parse_loc_content(
     w_pt = meta.pdf_width_pt or (meta.width_px * 72.0 / settings.pdf_render_dpi)
     h_pt = meta.pdf_height_pt or (meta.height_px * 72.0 / settings.pdf_render_dpi)
 
-    blocks: list[Block] = []
+    lines: list[tuple[str, list[float]]] = []
     for line in content.splitlines():
         locs = _LOC_RE.findall(line)
         text = _LOC_RE.sub("", line).strip()
-        if not text:
-            continue
-
         bbox_pt: list[float] = []
         if len(locs) >= 8:
             # 四角点:[x1,y1, x2,y1, x2,y2, x1,y2] → 取 [x1,y1,x2,y2]
@@ -263,21 +275,10 @@ def _parse_loc_content(
                 y2 * h_pt / _LOC_SPACE,
             ]
 
-        blocks.append(
-            Block(
-                block_id=f"p{page_index}-b{len(blocks)}",
-                page_index=page_index,
-                label="text",
-                bbox=bbox_pt,
-                content=text,
-            )
-        )
+        lines.append((text, bbox_pt))
 
-    if blocks:
-        logger.debug(
-            "paddleocr parsed page=%s blocks=%s first=%s",
-            page_index, len(blocks), blocks[0].content[:40],
-        )
+    blocks = _lines_to_blocks(lines, page_index)
+    _log_parse_stats("loc", page_index, blocks)
     return blocks
 
 
@@ -286,98 +287,246 @@ def _parse_plain_content(
 ) -> list[Block]:
     """解析 PaddleOCR-VL 的纯文本/Markdown 输出为 Block 列表。
 
-    PaddleOCR-VL-1.5 在 SiliconFlow 等平台上返回带行结构的纯文本:
-    - 表格以 Markdown ``|`` 分隔(首行表头,可能有 ``---`` 分隔行,每行单元格数对齐)
+    PaddleOCR-VL-1.5 在不同服务上可能返回多种带行结构的文本:
+    - 表格以 Markdown ``|``、Tab 分隔，或使用 HTML ``<table>``
     - 段落/字段为普通文本行,段落间以空行分隔
 
     解析策略:
-    - 连续的 ``|`` 分隔行(≥2 行,含表头 + 至少 1 数据行)归为一个
-      ``label=table`` 的 Block,用 normalize_table_text 归一化后构造
-      TableStructure(首行 headers,其余 rows)。
+    - 连续的 ``|`` / Tab 分隔行(≥2 行,含表头 + 至少 1 数据行)归为一个
+      ``label=table`` 的 Block，并构造 TableStructure(首行 headers,其余 rows)。
+    - HTML table 解析为同一 TableStructure，保留表格前后的普通文本。
     - 其余非空文本行,每行一个 ``label=text`` 的 Block。
       (PaddleOCR-VL 的段落通常已是完整的一行,无需跨行合并。)
 
     bbox 无法从纯文本恢复(无坐标信息),留空 []。这不阻塞比对——
     对齐与 diff 走文本语义,不强依赖 bbox;仅影响 PDF 高亮定位精度。
     """
-    lines = content.splitlines()
     blocks: list[Block] = []
-    bid = 0
+    cursor = 0
+    for match in _HTML_TABLE_RE.finditer(content):
+        before = content[cursor:match.start()]
+        blocks.extend(_lines_to_blocks(
+            [(line.strip(), []) for line in before.splitlines()], page_index
+        ))
+        html_table = _parse_html_table(match.group(0))
+        if html_table is not None:
+            blocks.append(_table_block(page_index, html_table, []))
+        else:
+            blocks.extend(_lines_to_blocks([(match.group(0).strip(), [])], page_index))
+        cursor = match.end()
+    blocks.extend(_lines_to_blocks(
+        [(line.strip(), []) for line in content[cursor:].splitlines()], page_index
+    ))
 
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-            i += 1
-            continue
-
-        # 收集连续的表格行(含 | 分隔)
-        if _TABLE_LINE_RE.search(line):
-            table_lines: list[str] = []
-            while i < len(lines) and _TABLE_LINE_RE.search(lines[i].strip()):
-                tl = lines[i].strip()
-                if tl:
-                    table_lines.append(tl)
-                i += 1
-            # 至少 2 行(表头 + 1 数据行)才算表格,否则当普通文本
-            if len(table_lines) >= 2:
-                norm = normalize_table_text("\n".join(table_lines))
-                if norm.strip():
-                    tbl = _plain_text_to_table(norm)
-                    blocks.append(
-                        Block(
-                            block_id=f"p{page_index}-b{bid}",
-                            page_index=page_index,
-                            label="table",
-                            bbox=[],
-                            content=norm,
-                            table=tbl,
-                        )
-                    )
-                    bid += 1
-                    continue
-            # 不足 2 行或归一化后为空,回退当普通文本处理
-            for tl in table_lines:
-                if tl.strip():
-                    blocks.append(_text_block(page_index, bid, tl.strip()))
-                    bid += 1
-            continue
-
-        # 普通文本行
-        blocks.append(_text_block(page_index, bid, line))
-        bid += 1
-        i += 1
-
-    if blocks:
-        logger.debug(
-            "paddleocr parsed(plain) page=%s blocks=%s first=%s",
-            page_index, len(blocks), blocks[0].content[:40],
-        )
+    # 分段解析时各段从 0 编号，最终按页面顺序统一编号。
+    for bid, block in enumerate(blocks):
+        block.block_id = f"p{page_index}-b{bid}"
+    _log_parse_stats("plain", page_index, blocks)
     return blocks
 
 
-def _text_block(page_index: int, bid: int, text: str) -> Block:
+def _text_block(
+    page_index: int, bid: int, text: str, bbox: list[float] | None = None
+) -> Block:
     return Block(
         block_id=f"p{page_index}-b{bid}",
         page_index=page_index,
         label="text",
-        bbox=[],
+        bbox=bbox or [],
         content=text,
     )
 
 
-def _plain_text_to_table(norm_text: str) -> TableStructure | None:
-    """把已归一化的 ``cell | cell`` 多行文本转为 TableStructure。
+def _plain_text_to_table(table_text: str) -> TableStructure | None:
+    """把 Markdown / ``cell | cell`` / TSV 文本转为 TableStructure。
 
-    首行为 headers,其余为 rows。空文本返回 None。
+    根据表头判断是否使用 Markdown 外层包裹管线，保留数据行开头和结尾的
+    空单元格，避免合并单元格续行发生列左移。空文本返回 None。
     """
-    if not norm_text.strip():
+    if not table_text.strip():
         return None
-    rows = [line.split(" | ") for line in norm_text.splitlines() if line.strip()]
+    lines = [line.strip() for line in table_text.splitlines() if line.strip()]
+    lines = [
+        line for line in lines
+        if not (_MD_SEPARATOR_RE.fullmatch(line) and "-" in line)
+    ]
+    if not lines:
+        return None
+
+    header = lines[0]
+    wrapped_pipes = (
+        "\t" not in header and header.startswith("|") and header.endswith("|")
+    )
+    rows: list[list[str]] = []
+    for line in lines:
+        if "\t" in line and "|" not in line:
+            cells = [cell.strip() for cell in line.split("\t")]
+        else:
+            cells = [cell.strip() for cell in line.split("|")]
+            if wrapped_pipes:
+                if cells and cells[0] == "":
+                    cells.pop(0)
+                if cells and cells[-1] == "":
+                    cells.pop()
+        if any(cells):
+            rows.append(cells)
+    return _rows_to_table(_collapse_repeated_rows(rows))
+
+
+def _collapse_repeated_rows(rows: list[list[str]]) -> list[list[str]]:
+    """清除模型退化时连续重复到 token 上限的表格尾部。"""
+    if len(rows) < 2:
+        return rows
+    result = [rows[0]]
+    dropped = 0
+    i = 1
+    while i < len(rows):
+        j = i + 1
+        while j < len(rows) and rows[j] == rows[i]:
+            j += 1
+        count = j - i
+        if count >= _REPEATED_ROW_THRESHOLD:
+            result.append(rows[i])
+            dropped += count - 1
+        else:
+            result.extend(rows[i:j])
+        i = j
+    if dropped:
+        logger.warning("paddleocr collapsed repeated table rows dropped=%s", dropped)
+    return result
+
+
+def _lines_to_blocks(
+    lines: list[tuple[str, list[float]]], page_index: int
+) -> list[Block]:
+    """将带可选坐标的 OCR 行聚合为普通文本块或结构化表格块。"""
+    blocks: list[Block] = []
+    i = 0
+    while i < len(lines):
+        text, bbox = lines[i]
+        text = text.strip()
+        if not text:
+            i += 1
+            continue
+
+        if _TABLE_LINE_RE.search(text):
+            run: list[tuple[str, list[float]]] = []
+            j = i
+            while j < len(lines):
+                candidate, candidate_bbox = lines[j]
+                candidate = candidate.strip()
+                if not candidate:  # PaddleOCR 常在表格行之间插入空行
+                    j += 1
+                    continue
+                if not _TABLE_LINE_RE.search(candidate):
+                    break
+                run.append((candidate, candidate_bbox))
+                j += 1
+
+            # 至少两条分隔行，且去掉 Markdown 分隔线后仍有表头和数据行。
+            raw_table = "\n".join(row for row, _ in run)
+            table = _plain_text_to_table(raw_table) if len(run) >= 2 else None
+            if table is not None and table.rows:
+                blocks.append(_table_block(
+                    page_index, table, _union_bbox([box for _, box in run])
+                ))
+            else:
+                for row, row_bbox in run:
+                    blocks.append(_text_block(page_index, len(blocks), row, row_bbox))
+            i = max(j, i + 1)
+            continue
+
+        blocks.append(_text_block(page_index, len(blocks), text, bbox))
+        i += 1
+
+    for bid, block in enumerate(blocks):
+        block.block_id = f"p{page_index}-b{bid}"
+    return blocks
+
+
+def _table_block(
+    page_index: int, table: TableStructure, bbox: list[float]
+) -> Block:
+    rows = [table.headers, *table.rows]
+    content = "\n".join(" | ".join(row) for row in rows)
+    return Block(
+        block_id="",
+        page_index=page_index,
+        label="table",
+        bbox=bbox,
+        content=content,
+        table=table,
+    )
+
+
+def _rows_to_table(rows: list[list[str]]) -> TableStructure | None:
     if not rows:
         return None
-    headers = rows[0]
-    return TableStructure(headers=headers, rows=rows[1:])
+    width = max(len(row) for row in rows)
+    if width < 2:
+        return None
+    padded = [row + [""] * (width - len(row)) for row in rows]
+    return TableStructure(headers=padded[0], rows=padded[1:])
+
+
+def _union_bbox(boxes: list[list[float]]) -> list[float]:
+    valid = [box for box in boxes if len(box) >= 4]
+    if not valid:
+        return []
+    return [
+        min(box[0] for box in valid),
+        min(box[1] for box in valid),
+        max(box[2] for box in valid),
+        max(box[3] for box in valid),
+    ]
+
+
+class _HTMLTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag == "tr":
+            self._row = []
+        elif tag in {"td", "th"} and self._row is not None:
+            self._cell = []
+        elif tag == "br" and self._cell is not None:
+            self._cell.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if self._row:
+                self.rows.append(self._row)
+            self._row = None
+
+
+def _parse_html_table(fragment: str) -> TableStructure | None:
+    parser = _HTMLTableParser()
+    parser.feed(fragment)
+    parser.close()
+    return _rows_to_table(parser.rows)
+
+
+def _log_parse_stats(fmt: str, page_index: int, blocks: list[Block]) -> None:
+    tables = sum(block.label == "table" for block in blocks)
+    with_bbox = sum(len(block.bbox) >= 4 for block in blocks)
+    logger.info(
+        "paddleocr parsed format=%s page=%s blocks=%s table_blocks=%s "
+        "blocks_with_bbox=%s blocks_without_bbox=%s",
+        fmt, page_index, len(blocks), tables, with_bbox, len(blocks) - with_bbox,
+    )
 
 
 class _BoundedConcurrency:

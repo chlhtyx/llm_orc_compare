@@ -75,3 +75,19 @@ def test_align_field_key_same_role_multiple():
     assert by_field[0].pdf_clause_id == "p1"
     assert by_field[1].word_clause_id == "w2"
     assert by_field[1].pdf_clause_id == "p2"
+
+
+def test_semantic_alignment_embeds_both_sides_in_one_batch():
+    class CountingEmbedding(MockEmbedding):
+        def __init__(self):
+            self.calls = []
+
+        def embed_batch(self, texts):
+            self.calls.append(list(texts))
+            return [self.embed(text) for text in texts]
+
+    embed = CountingEmbedding()
+    word = [_clause("w1", "", "甲方应按时交付货物")]
+    pdf = [_clause("p1", "", "甲方应按时交付货物", "pdf")]
+    align_clauses(word, pdf, embed, threshold=0.5)
+    assert embed.calls == [["甲方应按时交付货物", "甲方应按时交付货物"]]

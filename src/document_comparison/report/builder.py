@@ -98,6 +98,26 @@ def build_report(
     levels: list[str] = []
     status_counts: Counter[str] = Counter()
 
+    # number 锚定时 Alignment.similarity=1 仅代表编号匹配，仍需计算正文相似度。
+    # 将原来的每条两次 embed 合并为一次批量调用，避免远程服务产生 2N 次 RPC。
+    number_pairs: list[tuple[int, Clause, Clause]] = []
+    for idx, al in enumerate(alignments):
+        if al.match_type != "number" or not al.word_clause_id or not al.pdf_clause_id:
+            continue
+        wc = word_by.get(al.word_clause_id)
+        pc = pdf_by.get(al.pdf_clause_id)
+        if wc and pc and wc.text != pc.text:
+            number_pairs.append((idx, wc, pc))
+    number_similarities: dict[int, float] = {}
+    if number_pairs:
+        texts = [text for _, wc, pc in number_pairs for text in (wc.text, pc.text)]
+        batch = getattr(embed, "embed_batch", None)
+        vectors = batch(texts) if callable(batch) else [embed.embed(text) for text in texts]
+        for pair_pos, (alignment_idx, _wc, _pc) in enumerate(number_pairs):
+            number_similarities[alignment_idx] = embed.similarity(
+                vectors[pair_pos * 2], vectors[pair_pos * 2 + 1]
+            )
+
     for idx, al in enumerate(alignments):
         wc = word_by.get(al.word_clause_id) if al.word_clause_id else None
         pc = pdf_by.get(al.pdf_clause_id) if al.pdf_clause_id else None
@@ -149,7 +169,8 @@ def build_report(
 
         # 编号配对的相似度需实算(number 配对 similarity=1.0 不代表文本一致)
         if al.match_type == "number":
-            sim = embed.similarity(embed.embed(wt), embed.embed(pt))
+            # 完全相同文本无需调用 embedding；差异文本已在循环前批量计算。
+            sim = 1.0 if wt == pt else number_similarities[idx]
         else:
             sim = al.similarity
 

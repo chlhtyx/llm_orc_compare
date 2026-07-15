@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.10
+    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.11
     container_name: llm-ocr-compare
     platform: linux/amd64
     restart: unless-stopped

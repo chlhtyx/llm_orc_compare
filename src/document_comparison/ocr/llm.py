@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
+from ..observability import log_model_request, log_model_response
 from ..parsing.pdf import render_pages
 from .base import ProgressCb
 
@@ -82,9 +83,9 @@ class LLMOCREngine:
         max_concurrency: int | None = None,
         max_retries: int | None = None,
     ) -> None:
-        self.api_base = api_base or settings.llm_api_base
+        self.api_base = api_base if api_base is not None else settings.llm_api_base
         self.api_key = api_key if api_key is not None else settings.llm_api_key
-        self.model = model or settings.llm_model
+        self.model = model if model is not None else settings.llm_model
         self.timeout = timeout if timeout is not None else settings.llm_timeout
         self.max_concurrency = (
             max_concurrency if max_concurrency is not None else settings.llm_max_concurrency
@@ -102,6 +103,7 @@ class LLMOCREngine:
         *,
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
+        self._validate_config()
         images = render_pages(pdf_path, dpi=self._dpi)
         if not images:
             logger.info("ocr recognize pages=0 (empty pdf)")
@@ -121,13 +123,21 @@ class LLMOCREngine:
         total = len(images)
         done_count = [0]  # mutable counter for threads
 
-        with _BoundedConcurrency(self.max_concurrency) as pool:
-            for i, img in enumerate(images):
-                pool.submit(
-                    self._recognize_page,
-                    i, img, page_metas[i], results,
-                    on_progress, total, done_count,
-                )
+        # 一个任务内的所有页面共享连接池。httpx.Client 可跨线程使用，能够
+        # 复用 TCP/TLS 连接，避免每页重新握手；任务结束后统一关闭。
+        timeout = httpx.Timeout(self.timeout, connect=10.0)
+        limits = httpx.Limits(
+            max_connections=max(1, self.max_concurrency),
+            max_keepalive_connections=max(1, self.max_concurrency),
+        )
+        with httpx.Client(timeout=timeout, limits=limits) as client:
+            with _BoundedConcurrency(self.max_concurrency) as pool:
+                for i, img in enumerate(images):
+                    pool.submit(
+                        self._recognize_page,
+                        i, img, page_metas[i], results,
+                        on_progress, total, done_count, client,
+                    )
 
         return results
 
@@ -141,9 +151,10 @@ class LLMOCREngine:
         on_progress: ProgressCb | None = None,
         total_pages: int = 1,
         done_count: list[int] | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
-        content = self._chat(data_url)
+        content = self._chat(data_url, client=client)
         blocks = _parse_blocks(content, page_index, meta)
         out[page_index] = blocks
         if on_progress:
@@ -151,7 +162,18 @@ class LLMOCREngine:
             frac = 0.10 + (done_count[0] / total_pages) * 0.60
             on_progress("ocr", frac)
 
-    def _chat(self, data_url: str) -> str:
+    def _validate_config(self) -> None:
+        """在渲染和重试前识别永久配置错误，避免无意义等待。"""
+        if not self.api_base or not self.api_base.strip():
+            raise ValueError("OCR 未配置 llm_api_base")
+        if not self.model or not self.model.strip():
+            raise ValueError("OCR 未配置 llm_model")
+        if self.max_concurrency < 1:
+            raise ValueError("llm_max_concurrency 必须大于 0")
+        if self.max_retries < 0:
+            raise ValueError("llm_max_retries 不能小于 0")
+
+    def _chat(self, data_url: str, *, client: httpx.Client | None = None) -> str:
         url = self.api_base.rstrip("/") + "/chat/completions"
         payload: dict[str, Any] = {
             "model": self.model,
@@ -175,15 +197,19 @@ class LLMOCREngine:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        # 本地 OpenAI 兼容服务可能无需 key；空 key 时不要构造非法 Bearer 头。
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         # 多模态 OCR 单页推理可能很慢:连接快速失败,读取给予充分时间。
-        timeout = httpx.Timeout(self.timeout, connect=10.0)
         # 可重试的瞬态故障:超时 / 网络传输错误 / 429 / 5xx。
         # (httpx.TransportError 覆盖 ConnectError / ReadTimeout / NetworkError 等)
         # 4xx(鉴权、参数错误等)不可重试,立即抛出。
         last_exc: Exception | None = None
-        with httpx.Client(timeout=timeout) as client:
+        owns_client = client is None
+        if client is None:
+            client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=10.0))
+        try:
             for attempt in range(self.max_retries + 1):
+                request_started = log_model_request(logger, "ocr", url, payload, attempt + 1)
                 try:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
@@ -206,14 +232,18 @@ class LLMOCREngine:
                     else:
                         resp.raise_for_status()  # 4xx:不可重试,直接抛
                         data = resp.json()
+                        log_model_response(logger, "ocr", resp.status_code, data, request_started)
                         return data["choices"][0]["message"]["content"]
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
                     logger.info("ocr retry after %.1fs", backoff)
                     time.sleep(backoff)
-        assert last_exc is not None
-        logger.error("ocr give up after %s attempts: %s", self.max_retries + 1, last_exc)
-        raise last_exc
+            assert last_exc is not None
+            logger.error("ocr give up after %s attempts: %s", self.max_retries + 1, last_exc)
+            raise last_exc
+        finally:
+            if owns_client:
+                client.close()
 
 
 # —— 工具函数 ——

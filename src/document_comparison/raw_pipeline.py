@@ -16,6 +16,7 @@ from .compare.diff import char_diff
 from .config import Settings, settings
 from .models import TextDiffHunk, TextDiffReport
 from .ocr import get_ocr_engine
+from .observability import timed_stage
 from .parsing import get_page_metas, parse_word
 from .structure.normalize import normalize_table_text, normalize_text
 
@@ -45,15 +46,18 @@ def run_raw_pipeline(
 
     # —— ① Word → 纯文本(不走 build_clauses)——
     _progress("word_parsing", 0.02)
-    word_raw = parse_word(word_path)
-    word_text = "\n".join(item.text for item in word_raw if item.text)
-    logger.info("word parsed items=%s chars=%s", len(word_raw), len(word_text))
+    with timed_stage(logger, "raw_word_parse"):
+        word_raw = parse_word(word_path)
+        word_text = "\n".join(item.text for item in word_raw if item.text)
+    logger.info("word flattened items=%s chars=%s", len(word_raw), len(word_text))
     _progress("word_done", 0.10)
 
     # —— ② PDF → 纯文本(OCR 复用现有引擎,flatten blocks)——
     _progress("ocr", 0.12)
-    page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
-    pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
+    with timed_stage(logger, "raw_pdf_metadata"):
+        page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
+    with timed_stage(logger, "raw_pdf_ocr", pages=len(page_metas)):
+        pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
     logger.info(
         "ocr done pages=%s blocks=%s dpi=%s",
         len(page_metas), sum(len(b) for b in pages_blocks), cfg.pdf_render_dpi,
@@ -73,14 +77,16 @@ def run_raw_pipeline(
 
     # —— ③ 标准化(NFKC、空白归一)——
     _progress("normalize", 0.92)
-    word_text = normalize_text(word_text)
-    pdf_text = normalize_text(pdf_text)
+    with timed_stage(logger, "raw_normalize"):
+        word_text = normalize_text(word_text)
+        pdf_text = normalize_text(pdf_text)
 
     # —— ④ difflib 行级比对 → hunks ——
     _progress("diff", 0.95)
     t0 = time.perf_counter()
-    report = _diff_texts(word_text, pdf_text, char_level=char_level,
-                         source=str(word_path), target=str(pdf_path))
+    with timed_stage(logger, "raw_diff"):
+        report = _diff_texts(word_text, pdf_text, char_level=char_level,
+                             source=str(word_path), target=str(pdf_path))
     logger.info(
         "diff stage cost=%.3fs word_lines=%s pdf_lines=%s hunks=%s similarity=%s",
         time.perf_counter() - t0,

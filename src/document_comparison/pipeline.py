@@ -15,6 +15,7 @@ from .config import Settings, settings
 from .embed import get_embed_engine, is_mock_engine
 from .models import TamperReport
 from .ocr import get_ocr_engine
+from .observability import timed_stage
 from .parsing import get_page_metas, parse_word
 from .report import build_report
 from .structure import blocks_to_raw, build_clauses
@@ -44,15 +45,18 @@ def run_pipeline(
 
     # —— ① Word 解析 + ③ 切分 ——
     _progress("word_parsing", 0.02)
-    word_raw = parse_word(word_path)
-    word_clauses = build_clauses(word_raw, "word")
-    logger.info("word parsed items=%s clauses=%s", len(word_raw), len(word_clauses))
+    with timed_stage(logger, "word_parse_and_structure"):
+        word_raw = parse_word(word_path)
+        word_clauses = build_clauses(word_raw, "word")
+    logger.info("word structured items=%s clauses=%s", len(word_raw), len(word_clauses))
     _progress("word_done", 0.08)
 
     # —— ① PDF + ② OCR + ③ 切分 ——
     _progress("ocr", 0.10)
-    page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
-    pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
+    with timed_stage(logger, "pdf_metadata"):
+        page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
+    with timed_stage(logger, "pdf_ocr", pages=len(page_metas)):
+        pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
     total_blocks = sum(len(b) for b in pages_blocks)
     logger.info(
         "ocr done pages=%s blocks=%s dpi=%s",
@@ -67,17 +71,19 @@ def run_pipeline(
             len(page_metas), cfg.ocr_backend, getattr(cfg, "llm_model", ""),
         )
     _progress("ocr_done", 0.70)
-    pdf_raw = blocks_to_raw(pages_blocks)
-    pdf_clauses = build_clauses(pdf_raw, "pdf")
+    with timed_stage(logger, "pdf_structure"):
+        pdf_raw = blocks_to_raw(pages_blocks)
+        pdf_clauses = build_clauses(pdf_raw, "pdf")
     logger.info("pdf structured clauses=%s", len(pdf_clauses))
     _progress("structure_done", 0.78)
 
     # —— ④ 对齐 ——
     # 阈值自适应:mock 字符袋相似度系统性偏低,用较低阈值;语义后端用标准阈值。
     align_threshold = cfg.align_similarity_mock if is_mock_engine(embed) else cfg.align_similarity
-    alignments = align_clauses(
-        word_clauses, pdf_clauses, embed, align_threshold
-    )
+    with timed_stage(logger, "clause_alignment"):
+        alignments = align_clauses(
+            word_clauses, pdf_clauses, embed, align_threshold
+        )
     logger.info(
         "aligned word=%s pdf=%s total=%s threshold=%.2f",
         len(word_clauses), len(pdf_clauses), len(alignments), align_threshold,
@@ -87,17 +93,18 @@ def run_pipeline(
     # —— ⑤⑥ 比对 + 报告 ——
     word_by = {c.clause_id: c for c in word_clauses}
     pdf_by = {c.clause_id: c for c in pdf_clauses}
-    report = build_report(
-        alignments=alignments,
-        word_by=word_by,
-        pdf_by=pdf_by,
-        embed=embed,
-        page_metas=page_metas,
-        thresholds=thresholds,
-        source=str(word_path),
-        target=str(pdf_path),
-        enable_llm_judge=enable_llm_judge,
-    )
+    with timed_stage(logger, "compare_and_report"):
+        report = build_report(
+            alignments=alignments,
+            word_by=word_by,
+            pdf_by=pdf_by,
+            embed=embed,
+            page_metas=page_metas,
+            thresholds=thresholds,
+            source=str(word_path),
+            target=str(pdf_path),
+            enable_llm_judge=enable_llm_judge,
+        )
     _progress("compare_done", 1.0)
 
     return report

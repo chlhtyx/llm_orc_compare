@@ -4,7 +4,10 @@
 """
 from __future__ import annotations
 
+import logging
 import re
+import time
+from collections import Counter
 from pathlib import Path
 
 from docx import Document  # type: ignore[import-untyped]
@@ -14,6 +17,8 @@ from docx.text.paragraph import Paragraph  # type: ignore[import-untyped]
 
 from ..models import RawItem, TableStructure
 from ..structure.normalize import normalize_table_text
+
+logger = logging.getLogger(__name__)
 
 _HEADING_RE = re.compile(r"heading\s*(\d+)", re.IGNORECASE)
 
@@ -91,12 +96,15 @@ def _table_to_structure(table: Table) -> TableStructure | None:
 
 def parse_word(path: str | Path) -> list[RawItem]:
     """把 Word 文档解析为 RawItem 列表(文档流顺序即阅读顺序)。"""
+    started_at = time.perf_counter()
     doc = Document(str(path))
     items: list[RawItem] = []
+    skipped_empty = 0
     for block in _iter_block_items(doc):
         if isinstance(block, Paragraph):
             text = block.text.strip()
             if not text:
+                skipped_empty += 1
                 continue
             style = (block.style.name or "") if block.style else ""
             if "heading" in style.lower() or "title" in style.lower():
@@ -115,4 +123,53 @@ def parse_word(path: str | Path) -> list[RawItem]:
                 items.append(
                     RawItem(text=txt, kind="table", table=_table_to_structure(block))
                 )
+    _log_parse_summary(path, doc, items, skipped_empty, started_at)
     return items
+
+
+def _log_parse_summary(
+    path: str | Path,
+    doc: _Doc,
+    items: list[RawItem],
+    skipped_empty: int,
+    started_at: float,
+) -> None:
+    """记录 docx 解析摘要:文档体量、各类块计数、表格规模、总字符数、耗时。
+
+    排查对齐/比对异常时,先看这条日志确认 Word 侧解析输入是否正常
+    (块数是否为 0、标题层级是否丢失、表格是否被空跳过等)。
+    """
+    kind_counts = Counter(item.kind for item in items)
+    total_chars = sum(len(item.text) for item in items)
+    # 标题层级分布:level → 数量,便于核对编号切分前的原始层级
+    heading_levels = Counter(
+        item.heading_level for item in items if item.kind == "heading"
+    )
+    table_dims = [
+        f"{len(t.rows)}x{len(t.headers)}"
+        for item in items
+        if item.kind == "table" and (t := item.table) is not None
+    ]
+    n_tables = kind_counts.get("table", 0)
+    doc_paragraphs = len(doc.paragraphs)
+    doc_tables = len(doc.tables)
+    logger.info(
+        "word parsed path=%s items=%s paragraphs=%s tables=%s headings=%s "
+        "heading_levels=%s table_dims=%s total_chars=%s skipped_empty=%s "
+        "elapsed=%.3fs",
+        Path(path).name,
+        len(items),
+        doc_paragraphs,
+        n_tables,
+        kind_counts.get("heading", 0),
+        dict(heading_levels) if heading_levels else "{}",
+        ",".join(table_dims) if table_dims else "-",
+        total_chars,
+        skipped_empty,
+        time.perf_counter() - started_at,
+    )
+    if doc_tables and n_tables == 0:
+        logger.warning(
+            "word 文档含 %s 张表格但解析后 0 张入库,可能全部为空表格 path=%s",
+            doc_tables, Path(path).name,
+        )
