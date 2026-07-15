@@ -6,7 +6,8 @@ import OverallBadge from '@/components/OverallBadge.vue'
 import DiffList from '@/components/DiffList.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
-import { ApiError, getSourcePdfUrl } from '@/api/compare'
+import DocxPreview from '@/components/DocxPreview.vue'
+import { ApiError, getAnnotatedDocxUrl, getSourcePdfUrl } from '@/api/compare'
 import { useTaskStore } from '@/stores/task'
 import { useReportStore } from '@/stores/report'
 import type { Diff, TamperReport } from '@/api/types'
@@ -45,6 +46,7 @@ taskStore.dispose()
 })
 
 const showPdf = ref(false)
+const showDocx = ref(true)
 const filter = ref<'all' | 'risk' | 'modified'>('all')
 const selectedClauseId = ref<string | null>(null)
 
@@ -58,6 +60,8 @@ return list
 const pdfUrl = computed(() => {
 return getSourcePdfUrl(props.taskId)
 })
+
+const annotatedDocxUrl = computed(() => getAnnotatedDocxUrl(props.taskId))
 
 /** 点击条款 → 选中 + 展开 PDF 预览 + 滚动到对应页 */
 function onSelectClause(id: string) {
@@ -86,6 +90,14 @@ function onSelectClause(id: string) {
         />
         </div>
         <div class="head-actions">
+        <a
+          v-if="reportStore.diffs.length || reportStore.unmatched.length"
+          class="btn btn-primary"
+          :href="annotatedDocxUrl"
+          download
+        >
+          下载高亮 Word
+        </a>
         <button class="btn" type="button" @click="router.push('/')">新建比对</button>
         </div>
     </header>
@@ -165,6 +177,19 @@ function onSelectClause(id: string) {
         </section>
 
         <section class="card">
+        <div class="list-head">
+        <h3 class="section-title" style="margin: 0">原文高亮预览</h3>
+        <button class="chip" @click="showDocx = !showDocx">{{ showDocx ? '收起' : '展开' }}</button>
+        </div>
+        <p v-if="!showDocx" class="muted">展开查看整篇合同，被篡改条款整段高亮（扫描件 PDF 无坐标时仍可在此看到改动位置）。</p>
+        <DocxPreview
+          v-else
+          :task-id="taskId"
+          @select="onSelectClause"
+        />
+        </section>
+
+        <section v-if="reportStore.hasPdfHighlights" class="card">
         <div class="list-head">
         <h3 class="section-title" style="margin: 0">PDF 预览</h3>
         <button class="chip" @click="showPdf = !showPdf">{{ showPdf ? '收起' : '展开' }}</button>

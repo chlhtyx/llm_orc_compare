@@ -30,6 +30,7 @@ from ..logging_config import setup_logging
 from ..models import CompareOptions, RawCompareOptions
 from ..storage import load_report, load_raw_report, report_path, save_upload, upload_path
 from ..report.builder import burn_pdf
+from ..report.docx_burn import build_docx_preview, burn_docx
 from ..tasks import task_manager
 
 logger = logging.getLogger(__name__)
@@ -312,6 +313,21 @@ def create_app() -> FastAPI:
                     "Content-Disposition": f'attachment; filename="report-{task_id}.pdf"'
                 },
             )
+        if format == "docx":
+            # 在源 docx 上烧录差异高亮（整段黄底标注被篡改条款位置）。
+            # 扫描件 PDF 无文本层、OCR 无坐标时无法画 PDF 框，docx 侧始终可标。
+            source_path = upload_path(task_id, "source")
+            if source_path is None:
+                raise HTTPException(404, "源 Word 文件已过期,无法生成标注报告")
+            out = settings.reports_dir / f"{task_id}_annotated.docx"
+            burn_docx(source_path, report, out)
+            return FileResponse(
+                out,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f'attachment; filename="report-{task_id}.docx"'
+                },
+            )
 
     @app.get(
         "/api/v1/compare/{task_id}/source",
@@ -330,6 +346,27 @@ def create_app() -> FastAPI:
             media_type="application/pdf",
             headers={"Content-Disposition": f'inline; filename="{task_id}-target.pdf"'},
         )
+
+    @app.get(
+        "/api/v1/compare/{task_id}/docx-preview",
+    )
+    async def get_docx_preview(task_id: str):
+        """返回源 docx 的全段落列表 + 差异标记，供前端 HTML 渲染在线高亮预览。
+
+        扫描件 PDF 无文本层/坐标时，PDF 预览画不了高亮框，此接口改从源 docx
+        侧渲染整篇合同，被篡改条款整段上底色，让用户在页面上直接看到改动位置。
+        返回 [{text, highlight, status, risk_level, number}, ...]。
+        """
+        source_path = upload_path(task_id, "source")
+        if source_path is None:
+            raise HTTPException(404, "源 Word 文件已过期,无法生成预览")
+        report = (task_manager.get(task_id).report
+                  if task_manager.get(task_id) is not None else None)
+        if report is None:
+            report = load_report(task_id)
+        if report is None:
+            raise HTTPException(404, "report not ready")
+        return JSONResponse(content={"paragraphs": build_docx_preview(source_path, report)})
 
     # —— 无标注版(纯文本 difflib 比对)端点:与 /api/v1/compare 完全独立 ——
     @app.post("/api/v1/raw-compare")

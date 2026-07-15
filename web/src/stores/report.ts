@@ -34,6 +34,11 @@ export const useReportStore = defineStore('report', () => {
     keyElements.value.filter((k) => k.changed),
   )
 
+  /** 是否存在可在 PDF 上绘制的高亮区域（扫描件无坐标时为 false）。 */
+  const hasPdfHighlights = computed<boolean>(() =>
+    diffs.value.some((d) => d.page_regions.length > 0),
+  )
+
  const counts = computed(() => {
    const total = diffs.value.length
    const modified = diffs.value.filter((d) => d.status === 'modified').length
@@ -52,6 +57,7 @@ export const useReportStore = defineStore('report', () => {
     diffsBySeverity,
     highRiskDiffs,
     changedKeyElements,
+    hasPdfHighlights,
     counts,
     overallRisk,
     set,
