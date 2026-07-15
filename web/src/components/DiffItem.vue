@@ -18,6 +18,11 @@ const heading = computed(() => {
 })
 
 const hasInlineDiff = computed(() => props.diff.segments.length > 0)
+const verdictText = computed(() => ({
+  clean: '一致',
+  changed: '确认变化',
+  needs_review: '待复核',
+}[props.diff.verdict] ?? props.diff.verdict))
 </script>
 
 <template>
@@ -33,6 +38,7 @@ const hasInlineDiff = computed(() => props.diff.segments.length > 0)
       <span class="diff-title">{{ heading }}</span>
       <div class="diff-tags">
         <OverallBadge :level="diff.risk_level" />
+        <span :class="['verdict-pill', `verdict-${diff.verdict}`]">{{ verdictText }}</span>
         <span class="status-pill">{{ diff.status }}</span>
       </div>
     </header>
@@ -108,6 +114,24 @@ const hasInlineDiff = computed(() => props.diff.segments.length > 0)
   border-radius: 4px;
   padding: 1px 6px;
   text-transform: uppercase;
+}
+.verdict-pill {
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-weight: 600;
+}
+.verdict-changed {
+  color: var(--risk-high);
+  background: var(--risk-high-bg);
+}
+.verdict-needs_review {
+  color: var(--risk-medium);
+  background: var(--risk-medium-bg);
+}
+.verdict-clean {
+  color: var(--risk-clean);
+  background: var(--risk-clean-bg);
 }
 .reasons {
   margin: 0 0 8px;

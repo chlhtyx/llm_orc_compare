@@ -2,11 +2,13 @@
 // 后端字段命名若变更,需同步此处。
 
 export type DocType = 'word' | 'pdf'
-export type MatchType = 'number' | 'semantic' | 'unmatched'
+export type MatchType = 'number' | 'field' | 'normalized_exact' | 'semantic' | 'unmatched'
 export type DiffStatus = 'identical' | 'modified' | 'added' | 'deleted'
 export type RiskLevel = 'high' | 'medium' | 'low' | 'none'
 export type OverallRisk = 'high' | 'medium' | 'low' | 'clean' | 'needs_review'
 export type RecognitionStatus = 'reliable' | 'needs_review'
+export type ChangeVerdict = 'clean' | 'changed' | 'needs_review'
+export type EvidenceConfidence = 'high' | 'medium' | 'low'
 export type KeyElementKind =
   | 'amount'
   | 'date'
@@ -16,6 +18,10 @@ export type KeyElementKind =
   | 'jurisdiction'
   | 'effective'
   | 'seal'
+  | 'party'
+  | 'account'
+  | 'identifier'
+  | 'negation'
 export type BBoxShape = 'rect' | 'quad' | 'poly'
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed'
 
@@ -37,6 +43,9 @@ export interface Diff {
   segments: DiffSegment[]
   risk_level: RiskLevel
   risk_reasons: string[]
+  verdict: ChangeVerdict
+  confidence: EvidenceConfidence
+  judged_by: 'rule' | 'llm'
   page_regions: PageRegion[]
   number: string
   title: string
@@ -47,6 +56,8 @@ export interface KeyElement {
   word_value: string
   pdf_value: string
   changed: boolean
+  row_index: number
+  col_header: string
 }
 
 export interface PageMeta {
@@ -70,6 +81,7 @@ export interface TamperReport {
   source: string
   target: string
   overall_risk: OverallRisk
+  change_status: ChangeVerdict
   summary: Record<string, unknown>
   diffs: Diff[]
   key_elements: KeyElement[]
@@ -80,8 +92,6 @@ export interface TamperReport {
 }
 
 export interface CompareOptions {
-  similarity_identical?: number
-  similarity_modified?: number
   enable_llm_judge?: boolean
 }
 

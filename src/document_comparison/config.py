@@ -50,8 +50,8 @@ class Settings:
     # 单页瞬态失败(超时 / 429 / 5xx)重试次数
     llm_max_retries: int = 2
 
-    # —— LLM 复核服务(规则+LLM 结合,对 modified 条款做语义复核)——
-    # 与 OCR 服务独立配置:OCR 需多模态 VL 模型(看图),复核需纯文本 LLM(判语义)。
+    # —— LLM 辅助说明服务(对 modified 条款补充严重度建议)——
+    # 与 OCR 服务独立配置:OCR 需多模态 VL 模型(看图),说明需纯文本 LLM。
     # 走 OpenAI 兼容 Chat Completions 协议。未配置时复核自动回退规则判定。
     judge_api_base: str = ""
     judge_api_key: str = ""
@@ -69,9 +69,11 @@ class Settings:
     embed_model: str = ""
     embed_timeout: float = 60.0
 
-    # —— 比对阈值(§9.1 双阈值)——
-    similarity_identical: float = 0.98  # >= 视为一致
-    similarity_modified: float = 0.85  # < 视为实质修改;之间为疑似
+    # —— 相似度配置 ——
+    # identical 保留供旧调用方兼容，零容忍裁决不再用相似度产生 clean。
+    # modified 仅用于非关键变化的严重度排序，不决定是否变化。
+    similarity_identical: float = 0.98
+    similarity_modified: float = 0.85
     align_similarity: float = 0.85  # 对齐配对确认阈值(语义向量后端)
     # mock 字符袋相似度系统性偏低(中文同义改写打不到 0.85),单独给一个较低阈值。
     align_similarity_mock: float = 0.70

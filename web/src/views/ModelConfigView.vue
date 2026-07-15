@@ -12,7 +12,7 @@ const form = reactive({
   llm_model: '',
   llm_timeout: 120,
   llm_max_concurrency: 4,
-  // —— LLM 复核服务 ——
+  // —— LLM 辅助说明服务 ——
   judge_api_base: '',
   judge_api_key: '',
   judge_model: '',
@@ -89,7 +89,7 @@ async function onSave(): Promise<void> {
   }
   payload.llm_api_key = keyDirty.value ? form.llm_api_key : '********'
 
-  // LLM 复核服务(独立于 OCR,填了才提交)
+  // LLM 辅助说明服务(独立于 OCR,填了才提交)
   if (form.judge_api_base.trim() || form.judge_model.trim()) {
     payload.judge_api_base = form.judge_api_base.trim()
     payload.judge_model = form.judge_model.trim()
@@ -202,11 +202,11 @@ async function onReset(): Promise<void> {
     </section>
 
     <section class="card">
-      <h2 class="page-title">LLM 复核服务</h2>
+      <h2 class="page-title">LLM 辅助说明服务</h2>
       <p class="muted page-desc">
-        规则+LLM 结合:对规则判为「modified」的条款调 LLM 复核,可升级或降级风险。
+        对已确认「modified」的条款调用 LLM 补充严重度建议和解释；LLM 不得撤销变化或降低规则下限。
         需<b>纯文本 LLM</b>(如 Qwen3.5),与 OCR 的多模态 VL 模型分开配置。
-        比对提交页勾选「启用 LLM 判定」后生效;未配置则自动回退规则判定。
+        比对提交页勾选「启用 LLM 辅助说明」后生效；未配置则沿用规则说明。
       </p>
 
       <div class="form-grid">
@@ -235,7 +235,7 @@ async function onReset(): Promise<void> {
             <template v-if="store.config?.judge_api_key_set">
               当前: {{ store.config.judge_api_key || '****' }} · 留空不修改
             </template>
-            <template v-else>未配置则 LLM 复核自动回退规则判定</template>
+            <template v-else>未配置则沿用规则结论</template>
           </span>
         </div>
 

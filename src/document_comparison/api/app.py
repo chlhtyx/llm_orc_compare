@@ -16,6 +16,7 @@ import logging
 import uuid
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,6 +69,17 @@ def create_app() -> FastAPI:
             content={
                 "code": exc.status_code,
                 "message": exc.detail,
+                "request_id": uuid.uuid4().hex[:12],
+            },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exc_handler(_request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": 422,
+                "message": str(exc),
                 "request_id": uuid.uuid4().hex[:12],
             },
         )
@@ -232,6 +244,13 @@ def create_app() -> FastAPI:
             try:
                 opts = CompareOptions.model_validate_json(options)
                 enable_llm_judge = opts.enable_llm_judge
+                if (
+                    opts.similarity_identical is not None
+                    or opts.similarity_modified is not None
+                ):
+                    logger.warning(
+                        "deprecated similarity decision thresholds ignored in zero-tolerance mode"
+                    )
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"options 解析失败: {exc}")
 

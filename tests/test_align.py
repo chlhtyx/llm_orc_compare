@@ -19,12 +19,12 @@ def test_align_by_number():
 
 
 def test_align_semantic_fallback():
-    # pdf 编号 OCR 错(2→缺失),靠语义匹配
+    # pdf 编号 OCR 错(2→缺失),正文精确一致时无需调用语义模型
     word = [_clause("w1", "1", "甲方应按时交付货物并保证质量")]
     pdf = [_clause("p1", "", "甲方应按时交付货物并保证质量", "pdf")]
     al = align_clauses(word, pdf, MockEmbedding(), threshold=0.5)
-    sem = [a for a in al if a.match_type == "semantic"]
-    assert len(sem) == 1
+    exact = [a for a in al if a.match_type == "normalized_exact"]
+    assert len(exact) == 1
 
 
 def test_align_added_deleted():
@@ -77,6 +77,53 @@ def test_align_field_key_same_role_multiple():
     assert by_field[1].pdf_clause_id == "p2"
 
 
+def test_aligns_layout_whitespace_variants_without_embedding():
+    """OCR 字间空格只是版式噪声，不应生成一条 added 和一条 deleted。"""
+    class RejectingEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, _left, _right):
+            return 0.0
+
+    word = [_clause(
+        "w1",
+        "",
+        "采购合同(简易版)\n申购单编号:QGSC2607080010合同编号:SSC2607130114",
+    )]
+    pdf = [_clause(
+        "p1",
+        "",
+        "采 购 合 同(简易版)\n申购单编号: QGSC2607080010 合同编号: SSC2607130114",
+        "pdf",
+    )]
+
+    alignments = align_clauses(word, pdf, RejectingEmbedding(), threshold=0.85)
+
+    assert len(alignments) == 1
+    assert alignments[0].word_clause_id == "w1"
+    assert alignments[0].pdf_clause_id == "p1"
+    assert alignments[0].match_type == "normalized_exact"
+
+
+def test_normalized_exact_does_not_hide_identifier_change():
+    """去空白匹配仍须保留字符差异，合同编号变化不能被配对为完全一致。"""
+    class RejectingEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, _left, _right):
+            return 0.0
+
+    word = [_clause("w1", "", "合同编号: SSC2607130114")]
+    pdf = [_clause("p1", "", "合同编号: SSC2607130115", "pdf")]
+
+    alignments = align_clauses(word, pdf, RejectingEmbedding(), threshold=0.85)
+
+    assert all(a.match_type != "normalized_exact" for a in alignments)
+    assert len([a for a in alignments if a.match_type == "unmatched"]) == 2
+
+
 def test_semantic_alignment_embeds_both_sides_in_one_batch():
     class CountingEmbedding(MockEmbedding):
         def __init__(self):
@@ -88,6 +135,35 @@ def test_semantic_alignment_embeds_both_sides_in_one_batch():
 
     embed = CountingEmbedding()
     word = [_clause("w1", "", "甲方应按时交付货物")]
-    pdf = [_clause("p1", "", "甲方应按时交付货物", "pdf")]
+    pdf = [_clause("p1", "", "甲方应按期交付货物", "pdf")]
     align_clauses(word, pdf, embed, threshold=0.5)
-    assert embed.calls == [["甲方应按时交付货物", "甲方应按时交付货物"]]
+    assert embed.calls == [["甲方应按时交付货物", "甲方应按期交付货物"]]
+
+
+def test_semantic_alignment_uses_global_monotonic_optimum():
+    """首个 PDF 的局部最佳会抢占后项时，应选择总分更高的单调配对。"""
+    class MatrixEmbedding:
+        matrix = {
+            ("p1", "w1"): 0.89,
+            ("p1", "w2"): 0.90,
+            ("p2", "w1"): 0.10,
+            ("p2", "w2"): 0.88,
+        }
+
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, left, right):
+            return self.matrix.get((left, right), self.matrix.get((right, left), 0.0))
+
+    word = [_clause("w1", "", "w1"), _clause("w2", "", "w2")]
+    pdf = [_clause("p1", "", "p1", "pdf"), _clause("p2", "", "p2", "pdf")]
+
+    alignments = align_clauses(word, pdf, MatrixEmbedding(), threshold=0.85)
+    semantic = [item for item in alignments if item.match_type == "semantic"]
+
+    assert [(item.word_clause_id, item.pdf_clause_id) for item in semantic] == [
+        ("w1", "p1"),
+        ("w2", "p2"),
+    ]
+    assert not [item for item in alignments if item.match_type == "unmatched"]

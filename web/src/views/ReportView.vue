@@ -50,6 +50,12 @@ const showDocx = ref(true)
 const filter = ref<'all' | 'risk' | 'modified'>('all')
 const selectedClauseId = ref<string | null>(null)
 
+const changeStatusText = computed(() => ({
+  clean: '未发现内容变化',
+  changed: '发现确认内容变化',
+  needs_review: '存在待人工复核内容',
+}[reportStore.report?.change_status ?? 'clean']))
+
 const visibleDiffs = computed<Diff[]>(() => {
 const list = reportStore.diffsBySeverity
 if (filter.value === 'risk') return list.filter((d) => d.risk_level !== 'none')
@@ -109,8 +115,8 @@ function onSelectClause(id: string) {
           v-if="reportStore.report.recognition_status === 'needs_review'"
           class="card recognition-warning"
         >
-          <h3 class="section-title">识别质量不足，已暂停自动高风险结论</h3>
-          <p>以下差异仅供人工复核。请优先检查识别异常页面，确认文字后再判断合同风险。</p>
+          <h3 class="section-title">部分页面识别质量不足</h3>
+          <p>仅关联异常页面的差异会标记为待复核；其他可靠页面上的确认变化保持原结论。</p>
           <ul>
             <li
               v-for="item in reportStore.report.recognition_diagnostics.filter((d) => !d.reliable)"
@@ -125,6 +131,7 @@ function onSelectClause(id: string) {
         <div class="summary">
         <div class="sum-item">
             <OverallBadge :level="reportStore.overallRisk" />
+            <span class="muted verdict-summary">{{ changeStatusText }}</span>
         </div>
         <div class="sum-item">
             <span class="sum-num">{{ reportStore.counts.total }}</span>
@@ -246,6 +253,10 @@ align-items: center;
 display: flex;
 flex-direction: column;
 align-items: flex-start;
+}
+.verdict-summary {
+  margin-top: 4px;
+  font-size: 12px;
 }
 .sum-num {
 font-size: 22px;

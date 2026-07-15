@@ -6,17 +6,30 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # —— 枚举(用 Literal,JSON 友好)——
 DocType = Literal["word", "pdf"]
-MatchType = Literal["number", "field", "semantic", "unmatched"]
+MatchType = Literal["number", "field", "normalized_exact", "semantic", "unmatched"]
 DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
 OverallRisk = Literal["high", "medium", "low", "clean", "needs_review"]
 RecognitionStatus = Literal["reliable", "needs_review"]
+ChangeVerdict = Literal["clean", "changed", "needs_review"]
+EvidenceConfidence = Literal["high", "medium", "low"]
 KeyElementKind = Literal[
-    "amount", "date", "ratio", "term", "breach", "jurisdiction", "effective", "seal"
+    "amount",
+    "date",
+    "ratio",
+    "term",
+    "breach",
+    "jurisdiction",
+    "effective",
+    "seal",
+    "party",
+    "account",
+    "identifier",
+    "negation",
 ]
 BBoxShape = Literal["rect", "quad", "poly"]
 
@@ -125,8 +138,16 @@ class Diff(BaseModel):
     segments: list[DiffSegment] = Field(default_factory=list)
     risk_level: RiskLevel = "none"
     risk_reasons: list[str] = Field(default_factory=list)
+    verdict: ChangeVerdict = Field(
+        default="changed",
+        description="变化裁决；与业务严重度 risk_level、证据可信度 confidence 分离",
+    )
+    confidence: EvidenceConfidence = Field(
+        default="high",
+        description="当前差异证据的可信度；低可信差异必须人工复核",
+    )
     judged_by: Literal["rule", "llm"] = Field(
-        default="rule", description="风险判定来源:rule=规则初筛,llm=LLM 复核修正"
+        default="rule", description="严重度说明来源:rule=确定性规则,llm=LLM 辅助说明"
     )
     page_regions: list[PageRegion] = Field(
         default_factory=list, description="该条款在 PDF 扫描件上的高亮区域"
@@ -166,6 +187,10 @@ class TamperReport(BaseModel):
     source: str
     target: str
     overall_risk: OverallRisk = "clean"
+    change_status: ChangeVerdict = Field(
+        default="clean",
+        description="整份文档裁决；changed 与 needs_review 均不允许自动通过",
+    )
     summary: dict = Field(default_factory=dict)
     diffs: list[Diff] = Field(default_factory=list)
     key_elements: list[KeyElement] = Field(default_factory=list)
@@ -173,6 +198,21 @@ class TamperReport(BaseModel):
     page_meta: list[PageMeta] = Field(default_factory=list)
     recognition_status: RecognitionStatus = "reliable"
     recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_legacy_change_status(cls, data):
+        """旧报告没有 change_status；加载时从已有差异和识别状态安全推断。"""
+        if not isinstance(data, dict) or "change_status" in data:
+            return data
+        inferred = dict(data)
+        if inferred.get("recognition_status") == "needs_review":
+            inferred["change_status"] = "needs_review"
+        elif inferred.get("diffs") or inferred.get("unmatched_clauses"):
+            inferred["change_status"] = "changed"
+        else:
+            inferred["change_status"] = "clean"
+        return inferred
 
 
 # —— 无标注版(纯文本 difflib 比对)数据结构 ——
@@ -210,8 +250,9 @@ class TextDiffReport(BaseModel):
 
 # —— API 层 DTO ——
 class CompareOptions(BaseModel):
-    similarity_identical: float | None = None
-    similarity_modified: float | None = None
+    # 兼容旧客户端；零容忍模式中不再参与变化裁决，前端已移除。
+    similarity_identical: float | None = Field(default=None, deprecated=True)
+    similarity_modified: float | None = Field(default=None, deprecated=True)
     enable_llm_judge: bool = False
 
 

@@ -10,20 +10,14 @@ import pymupdf
 
 logger = logging.getLogger(__name__)
 
-from ..compare.diff import char_diff, describe_table_change, table_diff
-from ..compare.elements import (
-    elements_changed,
-    extract_key_elements,
-    table_elements_changed,
-)
+from ..compare.adjudication import adjudicate_clause_pair, apply_judge_advice
 from ..compare.judge import llm_judge_diff
-from ..compare.risk import classify_diff, overall_risk_from_diffs
+from ..compare.risk import overall_risk_from_diffs
 from ..models import (
     Alignment,
     Clause,
     Diff,
     DiffSegment,
-    DiffStatus,
     KeyElement,
     PageMeta,
     PageRegion,
@@ -79,6 +73,21 @@ def _unmatched_risk(c: Clause) -> tuple[str, str]:
     if c.field_key:
         return ("low", "疑似切分边界差异,待人工核对")
     return ("low", "疑似切分边界差异,待人工核对")
+
+
+def _unmatched_verdict(c: Clause) -> tuple[str, str]:
+    """未配对编号条款视为变化；弱锚点未配对只能进入人工复核。"""
+    if c.number:
+        return "changed", "medium"
+    return "needs_review", "medium"
+
+
+def _report_change_status(diffs: list[Diff]) -> str:
+    if any(diff.verdict == "changed" for diff in diffs):
+        return "changed"
+    if any(diff.verdict == "needs_review" for diff in diffs):
+        return "needs_review"
+    return "clean"
 
 
 def _compact_clause_text(text: str) -> str:
@@ -155,23 +164,24 @@ def build_report(
         alignments, word_by, pdf_by
     )
 
-    # number 锚定时 Alignment.similarity=1 仅代表编号匹配，仍需计算正文相似度。
-    # 将原来的每条两次 embed 合并为一次批量调用，避免远程服务产生 2N 次 RPC。
-    number_pairs: list[tuple[int, Clause, Clause]] = []
+    # number/field 锚定时 Alignment.similarity=1 只代表锚点匹配，不能代表正文一致。
+    # 例如 field=甲方配对成功后，公司名称仍可能被修改。将正文不同的锚定对
+    # 合并为一次批量 embedding 调用，避免远程服务产生 2N 次 RPC。
+    anchored_pairs: list[tuple[int, Clause, Clause]] = []
     for idx, al in enumerate(alignments):
-        if al.match_type != "number" or not al.word_clause_id or not al.pdf_clause_id:
+        if al.match_type not in ("number", "field") or not al.word_clause_id or not al.pdf_clause_id:
             continue
         wc = word_by.get(al.word_clause_id)
         pc = pdf_by.get(al.pdf_clause_id)
         if wc and pc and wc.text != pc.text:
-            number_pairs.append((idx, wc, pc))
-    number_similarities: dict[int, float] = {}
-    if number_pairs:
-        texts = [text for _, wc, pc in number_pairs for text in (wc.text, pc.text)]
+            anchored_pairs.append((idx, wc, pc))
+    anchored_similarities: dict[int, float] = {}
+    if anchored_pairs:
+        texts = [text for _, wc, pc in anchored_pairs for text in (wc.text, pc.text)]
         batch = getattr(embed, "embed_batch", None)
         vectors = batch(texts) if callable(batch) else [embed.embed(text) for text in texts]
-        for pair_pos, (alignment_idx, _wc, _pc) in enumerate(number_pairs):
-            number_similarities[alignment_idx] = embed.similarity(
+        for pair_pos, (alignment_idx, _wc, _pc) in enumerate(anchored_pairs):
+            anchored_similarities[alignment_idx] = embed.similarity(
                 vectors[pair_pos * 2], vectors[pair_pos * 2 + 1]
             )
 
@@ -185,11 +195,14 @@ def build_report(
         if al.match_type == "unmatched":
             if pc and not wc:  # added
                 risk, reason = _unmatched_risk(pc)
+                verdict, confidence = _unmatched_verdict(pc)
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="added",
                     risk_level=risk,
                     risk_reasons=[reason],
+                    verdict=verdict,
+                    confidence=confidence,
                     segments=[DiffSegment(op="insert", text=pc.text)],
                     number=pc.number,
                     title=pc.title,
@@ -197,11 +210,14 @@ def build_report(
                 )
             else:  # deleted
                 risk, reason = _unmatched_risk(wc) if wc else ("high", "待核件缺失条款")
+                verdict, confidence = _unmatched_verdict(wc) if wc else ("needs_review", "low")
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="deleted",
                     risk_level=risk,
                     risk_reasons=[reason],
+                    verdict=verdict,
+                    confidence=confidence,
                     segments=[DiffSegment(op="delete", text=wc.text)] if wc else [],
                     number=wc.number if wc else "",
                     title=wc.title if wc else "",
@@ -215,46 +231,38 @@ def build_report(
             continue
 
         wt, pt = wc.text, pc.text
-        ke = elements_changed(extract_key_elements(wt), extract_key_elements(pt))
-        # 结构化表格要素:按单元格维度抽取并比对,补充到 key_elements
-        tbl_ke = table_elements_changed(wc.tables, pc.tables)
-        ke.extend(tbl_ke)
-        all_key_elements.extend([e for e in ke if e.changed])
-        segs = char_diff(wt, pt)
-        table_change_reason = describe_table_change(wc.tables, pc.tables)
-        # 表格单元格级 diff:两端均有结构化表格时追加,定位到具体单元格
-        for tidx in range(min(len(wc.tables), len(pc.tables))):
-            wt_tbl = wc.tables[tidx]
-            pt_tbl = pc.tables[tidx]
-            if wt_tbl.headers == pt_tbl.headers and wt_tbl.rows == pt_tbl.rows:
-                continue  # 完全一致,不产生 diff
-            segs.extend(table_diff(wt_tbl, pt_tbl))
 
-        # 编号配对的相似度需实算(number 配对 similarity=1.0 不代表文本一致)
-        if al.match_type == "number":
+        # 锚点配对的相似度需实算：编号/字段相同不代表正文一致。
+        if al.match_type in ("number", "field"):
             # 完全相同文本无需调用 embedding；差异文本已在循环前批量计算。
-            sim = 1.0 if wt == pt else number_similarities[idx]
+            sim = 1.0 if wt == pt else anchored_similarities[idx]
         else:
             sim = al.similarity
 
-        status, risk, reasons = classify_diff(
-            word_text=wt,
-            pdf_text=pt,
+        decision = adjudicate_clause_pair(
+            wc,
+            pc,
             similarity=sim,
-            key_elements=ke,
             sim_identical=thresholds["identical"],
             sim_modified=thresholds["modified"],
-            table_change_reason=table_change_reason,
         )
+        status = decision.status
+        risk = decision.risk_level
+        reasons = decision.reasons
+        segs = decision.segments
+        all_key_elements.extend([e for e in decision.key_elements if e.changed])
         status_counts[status] += 1
         if status == "identical":
             levels.append("none")
             continue  # 一致不入差异报告
 
-        # LLM 复核:仅对 modified 条款调用,可修正风险等级(规则+LLM 结合)
+        # LLM 仅对 modified 条款补充说明；确定性规则是严重度下限。
         judged_by = "rule"
         if enable_llm_judge and status == "modified":
-            risk, reasons = llm_judge_diff(wt, pt, segs, risk)
+            judge_risk, judge_reasons = llm_judge_diff(wt, pt, segs, risk)
+            risk, reasons = apply_judge_advice(
+                risk, reasons, judge_risk, judge_reasons
+            )
             judged_by = "llm"
 
         d = Diff(
@@ -263,6 +271,8 @@ def build_report(
             segments=segs,
             risk_level=risk,
             risk_reasons=reasons,
+            verdict=decision.verdict,
+            confidence=decision.confidence,
             judged_by=judged_by,
             page_regions=_normalize_regions(pc.blocks, pmeta),
             number=wc.number or pc.number,
@@ -273,11 +283,14 @@ def build_report(
 
     overall = overall_risk_from_diffs(bool(alignments), levels)
     changed_elems = [e for e in all_key_elements if e.changed]
+    all_report_diffs = [*diffs, *unmatched]
+    change_status = _report_change_status(all_report_diffs)
     summary = {
         "total_alignments": len(alignments) - len(covered_boundary_alignments),
         "status_counts": dict(status_counts),
         "risk_distribution": dict(Counter(levels)),
         "key_element_changes": len(changed_elems),
+        "verdict_distribution": dict(Counter(d.verdict for d in all_report_diffs)),
     }
     logger.info(
         "report built diffs=%s unmatched=%s overall=%s status=%s risk_dist=%s",
@@ -288,6 +301,7 @@ def build_report(
         source=source,
         target=target,
         overall_risk=overall,
+        change_status=change_status,
         summary=summary,
         diffs=diffs,
         key_elements=changed_elems,

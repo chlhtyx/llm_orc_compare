@@ -5,10 +5,9 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
-import re
 
 from ..models import DiffSegment, TableStructure
-from ..structure.normalize import normalize_text
+from .elements import canonicalize_contract_text, reviewable_formatting_change
 
 
 def char_diff(a: str, b: str) -> list[DiffSegment]:
@@ -30,8 +29,11 @@ def char_diff(a: str, b: str) -> list[DiffSegment]:
 
 
 def is_only_whitespace_or_punct(a: str, b: str) -> bool:
-    """归一化后字符是否一致(用于判格式噪声)。"""
-    return a == b
+    """两端是否仅有可安全消噪、或必须复核的空格/标点差异。"""
+    return (
+        canonicalize_contract_text(a) == canonicalize_contract_text(b)
+        or reviewable_formatting_change(a, b) is not None
+    )
 
 
 def table_diff(a: TableStructure, b: TableStructure) -> list[DiffSegment]:
@@ -127,5 +129,5 @@ def describe_table_change(
 
 
 def _table_cell_key(cell: str) -> str:
-    """表格确定性比较键：忽略排版空白，保留实际文字。"""
-    return re.sub(r"\s+", "", normalize_text(cell))
+    """表格确定性比较键：与正文使用同一套安全排版归一化。"""
+    return canonicalize_contract_text(cell)

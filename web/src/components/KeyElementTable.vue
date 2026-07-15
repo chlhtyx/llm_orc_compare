@@ -13,6 +13,10 @@ const KIND_TEXT: Record<KeyElementKind, string> = {
   jurisdiction: '管辖法院',
   effective: '生效条件',
   seal: '印章',
+  party: '合同主体',
+  account: '银行账号',
+  identifier: '身份/业务标识',
+  negation: '否定约束',
 }
 
 const rows = computed(() => props.elements)

@@ -1,7 +1,7 @@
-"""LLM 篡改复核判决(规则+LLM 结合)。
+"""LLM 差异解释顾问(规则+LLM 结合)。
 
-规则引擎(`classify_diff`)做初筛,对 `modified` 条款调 LLM 复核:
-判断是"实质篡改"还是"OCR 噪声/同义改写",可升级或降级风险等级。
+规则引擎(`classify_diff`)确认字符变化,对 `modified` 条款调 LLM 补充解释和
+严重度建议。LLM 无权撤销变化裁决，也不能降低确定性规则的严重度下限。
 
 使用独立的 judge_* 配置(judge_api_base / judge_api_key / judge_model),
 与 OCR 服务分开:OCR 需多模态 VL 模型(看图),复核需纯文本 LLM(判语义)。
@@ -26,18 +26,16 @@ from ..observability import log_model_request, log_model_response
 logger = logging.getLogger(__name__)
 
 _JUDGE_SYSTEM_PROMPT = (
-    "你是合同条款篡改检测的复核助手。下面给你一对条款:Word 原文与 PDF OCR 识别文本,"
-    "以及字符级差异片段和规则引擎的初步风险判定。\n"
-    "请判断这对条款的差异是「实质篡改」(故意修改关键内容)还是"
-    "「OCR 噪声/同义改写」(识别误差或无害的表述调整)。\n"
+    "你是合同差异的辅助说明助手。系统已经确认 Word 与 PDF OCR 文本存在字符差异。"
+    "你只能评估差异的业务严重度并解释理由，不能判断两端完全一致，也不能撤销差异。\n"
     "严格只输出 JSON,不要解释、不要 markdown 代码块。\n"
-    "JSON 结构为:{\"risk_level\": \"high|medium|low|none\", \"reason\": \"一句话理由\"}。\n"
+    "JSON 结构为:{\"risk_level\": \"high|medium|low\", \"reason\": \"一句话理由\"}。\n"
     "判定指引:\n"
     "- high:金额、日期、违约责任、管辖法院等高风险要素被实质性修改。\n"
     "- medium:条款内容有实质性改动,但不涉及上述极高要素。\n"
-    "- low:仅措辞/标点/排版差异,无实质影响(OCR 噪声归此类)。\n"
-    "- none:无实质差异(OCR 噪声导致的误报)。\n"
-    "注意:OCR 可能将数字误识(如 0→O、多字少字),若差异仅源于此应判 low/none。"
+    "- low:措辞、标点或排版差异。\n"
+    "注意:OCR 可能将数字误识(如 0→O、多字少字)。这种情况只能指出需要核对图像，"
+    "不能声称两端一致。"
 )
 
 _VALID_RISK_LEVELS = {"high", "medium", "low", "none"}
@@ -82,7 +80,7 @@ def llm_judge_diff(
     segments: list[DiffSegment],
     rule_risk: RiskLevel,
 ) -> tuple[RiskLevel, list[str]]:
-    """对 modified 条款做 LLM 复核,返回(修正后风险级,理由列表)。
+    """对 modified 条款取得 LLM 严重度建议,返回(建议风险级,理由列表)。
 
     使用独立的 judge_* 配置(judge_api_base / judge_api_key / judge_model),
     与 OCR(llm_*)分开——OCR 需多模态 VL 模型,复核需纯文本 LLM。
@@ -90,7 +88,7 @@ def llm_judge_diff(
     """
     if not settings.judge_api_base or not settings.judge_model:
         logger.info("llm judge skipped: no judge config, fallback to rule")
-        return rule_risk, ["LLM 复核未配置,沿用规则判定"]
+        return rule_risk, ["LLM 辅助说明未配置,沿用规则结论"]
 
     diff_text = _format_segments(segments)
     user_content = (
@@ -138,12 +136,12 @@ def llm_judge_diff(
                     reason = (parsed.get("reason") or "").strip()
                     if risk not in _VALID_RISK_LEVELS:
                         logger.warning("llm judge invalid risk_level=%s, fallback to rule", risk)
-                        return rule_risk, ["LLM 复核返回无效风险级,沿用规则判定"]
-                    reasons = [f"LLM 复核:{reason}"] if reason else ["LLM 复核判定"]
+                        return rule_risk, ["LLM 辅助说明返回无效风险级,沿用规则结论"]
+                    reasons = [f"LLM 辅助说明:{reason}"] if reason else ["LLM 辅助说明"]
                     return risk, reasons  # type: ignore[return-value]
             if attempt < max_retries:
                 backoff = min(2 ** attempt, 8) + random.random()
                 time.sleep(backoff)
 
     logger.warning("llm judge failed after retries: %s, fallback to rule", last_exc)
-    return rule_risk, ["LLM 复核失败,沿用规则判定"]
+    return rule_risk, ["LLM 辅助说明失败,沿用规则结论"]

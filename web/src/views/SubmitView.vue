@@ -13,8 +13,6 @@ const targetFile = ref<File | null>(null)
 
 const opts = reactive({
   enableLlmJudge: false,
-  similarityIdentical: '',
-  similarityModified: '',
 })
 const callbackUrl = ref('')
 
@@ -37,8 +35,6 @@ async function onSubmit(): Promise<void> {
       target: targetFile.value,
       options: {
         enable_llm_judge: opts.enableLlmJudge,
-        similarity_identical: opts.similarityIdentical ? Number(opts.similarityIdentical) : undefined,
-        similarity_modified: opts.similarityModified ? Number(opts.similarityModified) : undefined,
       },
       callbackUrl: callbackUrl.value.trim() || undefined,
     })
@@ -88,20 +84,11 @@ async function onSubmit(): Promise<void> {
       <div class="opts">
         <label class="check">
           <input v-model="opts.enableLlmJudge" type="checkbox" />
-          <span>启用 LLM 判定(对疑似修改做语义复核)</span>
+          <span>启用 LLM 辅助说明(不会撤销已确认变化)</span>
         </label>
-        <div class="grid-2 thresh">
-          <div class="field">
-            <label>一致阈值</label>
-            <input v-model="opts.similarityIdentical" class="input" placeholder="默认 0.98" />
-            <span class="hint">相似度 ≥ 该值视为一致</span>
-          </div>
-          <div class="field">
-            <label>修改阈值</label>
-            <input v-model="opts.similarityModified" class="input" placeholder="默认 0.85" />
-            <span class="hint">低于该值视为实质修改</span>
-          </div>
-        </div>
+        <p class="hint zero-tolerance">
+          零容忍模式：语义相似度仅用于条款对齐，任何确认的内容变化都会报告；识别证据不足时进入人工复核。
+        </p>
         <div class="field">
           <label>回调地址(可选)</label>
           <input v-model="callbackUrl" class="input" placeholder="https://your/cb · 完成后回调" />
@@ -139,8 +126,11 @@ async function onSubmit(): Promise<void> {
   gap: 8px;
   cursor: pointer;
 }
-.thresh {
-  margin-top: 4px;
+.zero-tolerance {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--primary);
+  background: var(--surface-2);
 }
 .actions {
   display: flex;

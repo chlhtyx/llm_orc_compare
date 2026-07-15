@@ -1,27 +1,26 @@
-"""条款对齐:四层兜底策略(§5.4)。
+"""条款对齐:五层兜底策略(§5.4)。
 
 1. 编号锚定:按 number 精确匹配(篡改通常改内容不改编号)。
 2. 字段名锚定:首部/签字页等无编号键值块(甲方/乙方/地址/电话/日期 等)
    按 field_key 配对,解决两端切分边界不一致导致的误判 added/deleted。
    同一 field_key 多条时按出现顺序配对(甲方首部信息 + 甲方签字页是两条)。
-3. 语义向量匹配:对未配对条款用相似度最近邻 + 邻域窗口约束,阈值确认。
-4. 仍未配对 → added(pdf 独有)/ deleted(word 缺失)。
+3. 规范文本精确匹配:忽略排版空白后完全一致的条款直接配对。
+4. 语义向量匹配:对未配对条款做全局单调最优匹配,阈值确认。
+5. 仍未配对 → added(pdf 独有)/ deleted(word 缺失)。
 
-> 顺序敏感:合同条款顺序稳定,语义匹配采用「邻域窗口优先(±N 条),
-> 窗口内无匹配再回退全局」,降低远距离误配。
+> 顺序敏感:合同条款顺序稳定,语义匹配使用全局单调动态规划，避免逐条
+> 贪心抢占后续候选，也禁止产生交叉配对。
 """
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 
 from ..models import Alignment, Clause
+from ..structure.normalize import normalize_text
 
 logger = logging.getLogger(__name__)
-
-# 语义匹配的邻域窗口(按阅读顺序 ±N 条内优先搜索)
-_NEIGHBORHOOD = 5
-
 
 def align_clauses(
     word_clauses: list[Clause],
@@ -82,7 +81,31 @@ def align_clauses(
             matched_w.add(wc.clause_id)
             matched_p.add(pc.clause_id)
 
-    # —— 3. 语义向量匹配(邻域窗口优先 + 全局回退)——
+    # —— 3. 规范文本精确匹配 ——
+    # OCR/PDF 文本层可能把标题识别为「采 购 合 同」并在冒号后插入空格。
+    # 这些排版空白不应依赖 embedding 阈值来消除。重复文本按文档顺序配对，
+    # 与字段锚定一致，避免远处重复页眉导致不稳定匹配。
+    w_exact = _group_by_text_key(
+        [c for c in word_clauses if c.clause_id not in matched_w]
+    )
+    p_exact = _group_by_text_key(
+        [c for c in pdf_clauses if c.clause_id not in matched_p]
+    )
+    for key, w_list in w_exact.items():
+        p_list = p_exact.get(key, [])
+        for wc, pc in zip(w_list, p_list):
+            alignments.append(
+                Alignment(
+                    word_clause_id=wc.clause_id,
+                    pdf_clause_id=pc.clause_id,
+                    match_type="normalized_exact",
+                    similarity=1.0,
+                )
+            )
+            matched_w.add(wc.clause_id)
+            matched_p.add(pc.clause_id)
+
+    # —— 4. 语义向量匹配(全局单调最优)——
     rem_w = [c for c in word_clauses if c.clause_id not in matched_w]
     rem_p = [c for c in pdf_clauses if c.clause_id not in matched_p]
     consumed_w: set[str] = set()
@@ -92,19 +115,21 @@ def align_clauses(
         w_vecs = all_vecs[:len(rem_w)]
         p_vecs = all_vecs[len(rem_w):]
 
-        for pi, pc in enumerate(rem_p):
-            pv = p_vecs[pi]
-            # 第一轮:邻域窗口内找最佳
-            best, best_sim = _best_in_window(
-                rem_w, w_vecs, pv, consumed_w, embed, pi, _NEIGHBORHOOD
-            )
-            # 第二轮:窗口内无达标,回退全局
-            if best is None or best_sim < threshold:
-                g_best, g_sim = _best_global(rem_w, w_vecs, pv, consumed_w, embed)
-                if g_best is not None and g_sim > best_sim:
-                    best, best_sim = g_best, g_sim
+        similarities = [
+            [embed.similarity(p_vec, w_vec) for p_vec in p_vecs]
+            for w_vec in w_vecs
+        ]
+        matches = _global_monotonic_matches(similarities, threshold)
+        by_pdf = {
+            pdf_index: (word_index, sim)
+            for word_index, pdf_index, sim in matches
+        }
 
-            if best is not None and best_sim >= threshold:
+        for pdf_index, pc in enumerate(rem_p):
+            matched = by_pdf.get(pdf_index)
+            if matched is not None:
+                word_index, best_sim = matched
+                best = rem_w[word_index]
                 alignments.append(
                     Alignment(
                         word_clause_id=best.clause_id,
@@ -115,6 +140,10 @@ def align_clauses(
                 )
                 consumed_w.add(best.clause_id)
             else:
+                best_sim = max(
+                    (similarities[word_index][pdf_index] for word_index in range(len(rem_w))),
+                    default=0.0,
+                )
                 alignments.append(
                     Alignment(
                         word_clause_id=None,
@@ -135,7 +164,7 @@ def align_clauses(
                 )
             )
 
-    # —— 4. word 剩余 → deleted ——
+    # —— 5. word 剩余 → deleted ——
     for wc in rem_w:
         if wc.clause_id not in consumed_w:
             alignments.append(
@@ -154,9 +183,10 @@ def align_clauses(
     added = sum(1 for a in alignments if a.match_type == "unmatched" and not a.word_clause_id)
     deleted = unmatched - added
     logger.info(
-        "align result number=%s field=%s semantic=%s unmatched=%s (added=%s deleted=%s) threshold=%.2f",
+        "align result number=%s field=%s normalized_exact=%s semantic=%s unmatched=%s (added=%s deleted=%s) threshold=%.2f",
         type_counts.get("number", 0),
         type_counts.get("field", 0),
+        type_counts.get("normalized_exact", 0),
         type_counts.get("semantic", 0),
         unmatched, added, deleted,
         threshold,
@@ -174,6 +204,21 @@ def _group_by_field(clauses: list[Clause]) -> dict[str, list[Clause]]:
     return groups
 
 
+def _text_alignment_key(text: str) -> str:
+    """生成仅供条款对齐使用的键：统一 Unicode 并忽略所有排版空白。"""
+    return re.sub(r"\s+", "", normalize_text(text))
+
+
+def _group_by_text_key(clauses: list[Clause]) -> dict[str, list[Clause]]:
+    """按规范文本分组；空文本不参与精确对齐。"""
+    groups: dict[str, list[Clause]] = {}
+    for clause in clauses:
+        key = _text_alignment_key(clause.text)
+        if key:
+            groups.setdefault(key, []).append(clause)
+    return groups
+
+
 def _embed_clauses(clauses: list[Clause], embed) -> list:
     """批量 embed(若引擎支持 embed_batch),否则逐条。返回与 clauses 对齐的向量列表。"""
     texts = [c.text for c in clauses]
@@ -183,39 +228,75 @@ def _embed_clauses(clauses: list[Clause], embed) -> list:
     return [embed.embed(t) for t in texts]
 
 
-def _best_in_window(
-    rem_w: list[Clause],
-    w_vecs: list,
-    pv,
-    consumed_w: set[str],
-    embed,
-    pi: int,
-    window: int,
-) -> tuple[Clause | None, float]:
-    """在邻域窗口(按 pdf 顺序位置 pi 映射到 word 顺序附近)内找最佳。"""
-    best: Clause | None = None
-    best_sim = -1.0
-    lo = max(0, pi - window)
-    hi = min(len(rem_w), pi + window + 1)
-    for wi in range(lo, hi):
-        wc = rem_w[wi]
-        if wc.clause_id in consumed_w:
-            continue
-        s = embed.similarity(pv, w_vecs[wi])
-        if s > best_sim:
-            best, best_sim = wc, s
-    return best, best_sim
+def _global_monotonic_matches(
+    similarities: list[list[float]], threshold: float
+) -> list[tuple[int, int, float]]:
+    """最大化总相似度的一对一单调匹配；低于阈值的边不可用。"""
+    word_count = len(similarities)
+    pdf_count = len(similarities[0]) if similarities else 0
+    scores = [[0.0] * (pdf_count + 1) for _ in range(word_count + 1)]
+    counts = [[0] * (pdf_count + 1) for _ in range(word_count + 1)]
+    back = [[""] * (pdf_count + 1) for _ in range(word_count + 1)]
 
+    for word_index in range(1, word_count + 1):
+        back[word_index][0] = "skip_word"
+    for pdf_index in range(1, pdf_count + 1):
+        back[0][pdf_index] = "skip_pdf"
 
-def _best_global(
-    rem_w: list[Clause], w_vecs: list, pv, consumed_w: set[str], embed
-) -> tuple[Clause | None, float]:
-    best: Clause | None = None
-    best_sim = -1.0
-    for wi, wc in enumerate(rem_w):
-        if wc.clause_id in consumed_w:
-            continue
-        s = embed.similarity(pv, w_vecs[wi])
-        if s > best_sim:
-            best, best_sim = wc, s
-    return best, best_sim
+    def better(
+        candidate_score: float,
+        candidate_count: int,
+        best_score: float,
+        best_count: int,
+    ) -> bool:
+        return candidate_score > best_score + 1e-12 or (
+            abs(candidate_score - best_score) <= 1e-12 and candidate_count > best_count
+        )
+
+    for word_index in range(1, word_count + 1):
+        for pdf_index in range(1, pdf_count + 1):
+            best_score = scores[word_index - 1][pdf_index]
+            best_count = counts[word_index - 1][pdf_index]
+            best_op = "skip_word"
+
+            if better(
+                scores[word_index][pdf_index - 1],
+                counts[word_index][pdf_index - 1],
+                best_score,
+                best_count,
+            ):
+                best_score = scores[word_index][pdf_index - 1]
+                best_count = counts[word_index][pdf_index - 1]
+                best_op = "skip_pdf"
+
+            similarity = similarities[word_index - 1][pdf_index - 1]
+            if similarity >= threshold:
+                match_score = scores[word_index - 1][pdf_index - 1] + similarity
+                match_count = counts[word_index - 1][pdf_index - 1] + 1
+                if better(match_score, match_count, best_score, best_count):
+                    best_score = match_score
+                    best_count = match_count
+                    best_op = "match"
+
+            scores[word_index][pdf_index] = best_score
+            counts[word_index][pdf_index] = best_count
+            back[word_index][pdf_index] = best_op
+
+    matches: list[tuple[int, int, float]] = []
+    word_index, pdf_index = word_count, pdf_count
+    while word_index > 0 or pdf_index > 0:
+        op = back[word_index][pdf_index]
+        if op == "match":
+            matches.append((
+                word_index - 1,
+                pdf_index - 1,
+                similarities[word_index - 1][pdf_index - 1],
+            ))
+            word_index -= 1
+            pdf_index -= 1
+        elif op == "skip_word":
+            word_index -= 1
+        else:
+            pdf_index -= 1
+    matches.reverse()
+    return matches

@@ -10,7 +10,7 @@ export interface LlmConfig {
   llm_model: string
   llm_timeout: number
   llm_max_concurrency: number
-  // —— LLM 复核服务(规则+LLM 结合,纯文本 LLM)——
+  // —— LLM 辅助说明服务(纯文本 LLM)——
   judge_api_base: string
   judge_api_key: string // 脱敏
   judge_api_key_set: boolean
@@ -38,7 +38,7 @@ export interface LlmConfigUpdate {
   llm_model?: string
   llm_timeout?: number
   llm_max_concurrency?: number
-  // —— LLM 复核服务 ——
+  // —— LLM 辅助说明服务 ——
   judge_api_base?: string
   judge_api_key?: string
   judge_model?: string
