@@ -6,20 +6,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 import time
 from dataclasses import dataclass, field
 
 from .config import settings
-from .models import TaskInfo, TamperReport
+from .models import TaskInfo, TamperReport, TextDiffReport
 from .pipeline import run_pipeline
+from .raw_pipeline import run_raw_pipeline
 from . import storage, webhook
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Task:
     info: TaskInfo
     report: TamperReport | None = None
+    raw_report: TextDiffReport | None = None  # 无标注版报告(与 report 互斥)
     events: list[dict] = field(default_factory=list)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
@@ -51,15 +56,23 @@ class TaskManager:
             callback_url=callback_url,
             callback_secret=callback_secret,
         )
+        logger.info(
+            "task created task_id=%s callback=%s",
+            task_id, "yes" if callback_url else "no",
+        )
         return task_id
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
 
-    async def run(self, task_id: str, word_path: str, pdf_path: str) -> None:
+    async def run(
+        self, task_id: str, word_path: str, pdf_path: str,
+        *, enable_llm_judge: bool = False,
+    ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
+        logger.info("task start task_id=%s word=%s pdf=%s llm_judge=%s", task_id, word_path, pdf_path, enable_llm_judge)
         try:
             async with self._sem:
                 task.info.status = "running"
@@ -68,12 +81,18 @@ class TaskManager:
                 report = await asyncio.to_thread(
                     run_pipeline, word_path, pdf_path, settings,
                     on_progress=lambda stage, frac: task.push_event(stage, frac),
+                    enable_llm_judge=enable_llm_judge,
                 )
             task.report = report
             task.info.overall_risk = report.overall_risk
             task.info.status = "done"
             task.push_event("done", 1.0)
             storage.save_report(task_id, report)
+            logger.info(
+                "task done task_id=%s risk=%s diffs=%s unmatched=%s",
+                task_id, report.overall_risk,
+                len(report.diffs), len(report.unmatched_clauses),
+            )
             await self._fire_callback(task_id, "done", {
                 "overall_risk": report.overall_risk,
                 "summary": report.summary,
@@ -83,10 +102,57 @@ class TaskManager:
             task.info.status = "failed"
             task.info.error = str(e)
             task.push_event("failed", task.info.progress)
+            logger.exception("task failed task_id=%s", task_id)
             await self._fire_callback(task_id, "failed", {"error": str(e)})
         finally:
             task.done.set()
             task.finalize_elapsed()
+            logger.info(
+                "task finished task_id=%s status=%s elapsed=%ss",
+                task_id, task.info.status, task.info.elapsed,
+            )
+
+    async def run_raw(
+        self, task_id: str, word_path: str, pdf_path: str, *, char_level: bool = True
+    ) -> None:
+        """无标注版任务:纯文本 difflib 流程,产出 TextDiffReport。"""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        logger.info("task start(raw) task_id=%s word=%s pdf=%s", task_id, word_path, pdf_path)
+        try:
+            async with self._sem:
+                task.info.status = "running"
+                report = await asyncio.to_thread(
+                    run_raw_pipeline, word_path, pdf_path,
+                    on_progress=lambda stage, frac: task.push_event(stage, frac),
+                    char_level=char_level,
+                )
+            task.raw_report = report
+            task.info.status = "done"
+            task.push_event("done", 1.0)
+            storage.save_raw_report(task_id, report)
+            logger.info(
+                "task done(raw) task_id=%s hunks=%s similarity=%s",
+                task_id, len(report.hunks), report.stats.get("similarity"),
+            )
+            await self._fire_callback(task_id, "done", {
+                "stats": report.stats,
+                "report_url": f"/api/v1/raw-compare/{task_id}/report",
+            })
+        except Exception as e:  # noqa: BLE001
+            task.info.status = "failed"
+            task.info.error = str(e)
+            task.push_event("failed", task.info.progress)
+            logger.exception("task failed(raw) task_id=%s", task_id)
+            await self._fire_callback(task_id, "failed", {"error": str(e)})
+        finally:
+            task.done.set()
+            task.finalize_elapsed()
+            logger.info(
+                "task finished(raw) task_id=%s status=%s elapsed=%ss",
+                task_id, task.info.status, task.info.elapsed,
+            )
 
     async def _fire_callback(self, task_id: str, status: str, payload: dict) -> None:
         task = self._tasks.get(task_id)

@@ -63,6 +63,75 @@ def test_compare_accepts_valid_files(client):
     assert "task_id" in r.json()
 
 
+def test_compare_rejects_bad_options(client):
+    """options 非法 JSON / 类型应返回 400。"""
+    import io
+
+    r = client.post(
+        "/api/v1/compare",
+        files={
+            "source": ("bad.docx", io.BytesIO(b"x"), "application/octet-stream"),
+            "target": ("ok.pdf", io.BytesIO(b"%PDF"), "application/pdf"),
+        },
+        data={"options": "not-json"},
+    )
+    assert r.status_code == 400
+
+
+def test_raw_compare_accepts_valid_files(client):
+    """无标注版 POST /api/v1/raw-compare 应接受 docx+pdf 并返回 task_id。"""
+    import io
+    from docx import Document  # type: ignore[import-untyped]
+
+    doc = Document()
+    doc.add_paragraph("第一条 测试条款")
+    doc_buf = io.BytesIO()
+    doc.save(doc_buf)
+    doc_buf.seek(0)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    page = pdf.new_page(width=595, height=842)
+    page.insert_text((72, 72), "第一条 测试条款", fontsize=12)
+    pdf.save(pdf_buf)
+    pdf_buf.seek(0)
+
+    r = client.post(
+        "/api/v1/raw-compare",
+        files={
+            "source": ("contract.docx", doc_buf, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            "target": ("scan.pdf", pdf_buf, "application/pdf"),
+        },
+    )
+    assert r.status_code == 200
+    assert "task_id" in r.json()
+
+
+def test_raw_compare_rejects_non_docx(client):
+    """无标注版 source 非 docx 应返回 400。"""
+    import io
+
+    r = client.post(
+        "/api/v1/raw-compare",
+        files={
+            "source": ("bad.txt", io.BytesIO(b"text"), "text/plain"),
+            "target": ("ok.pdf", io.BytesIO(b"%PDF"), "application/pdf"),
+        },
+    )
+    assert r.status_code == 400
+    assert "docx" in r.json()["message"]
+
+
+def test_raw_task_not_found_404(client):
+    r = client.get("/api/v1/raw-compare/nonexistent")
+    assert r.status_code == 404
+
+
 def test_task_not_found_404(client):
     r = client.get("/api/v1/compare/nonexistent")
     assert r.status_code == 404

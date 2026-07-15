@@ -6,25 +6,53 @@ import type { LlmConfig } from '@/api/config'
 const store = useModelConfigStore()
 
 const form = reactive({
+  ocr_backend: 'llm',
   llm_api_base: '',
   llm_api_key: '',
   llm_model: '',
   llm_timeout: 120,
   llm_max_concurrency: 4,
+  // —— LLM 复核服务 ——
+  judge_api_base: '',
+  judge_api_key: '',
+  judge_model: '',
+  judge_timeout: 120,
+  // —— 语义向量引擎 ——
+  embed_backend: 'mock',
+  embed_api_base: '',
+  embed_api_key: '',
+  embed_model: '',
+  embed_timeout: 60,
+  pdf_render_dpi: 200,
 })
 
 const keyDirty = ref(false)
+const embedKeyDirty = ref(false)
+const judgeKeyDirty = ref(false)
 const saved = ref(false)
 const saveError = ref<string | null>(null)
 
 function syncFromConfig(c: LlmConfig | null): void {
   if (!c) return
+  form.ocr_backend = c.ocr_backend || 'llm'
   form.llm_api_base = c.llm_api_base || ''
   form.llm_api_key = c.llm_api_key || ''
   form.llm_model = c.llm_model || ''
   form.llm_timeout = c.llm_timeout ?? 120
   form.llm_max_concurrency = c.llm_max_concurrency ?? 4
+  form.judge_api_base = c.judge_api_base || ''
+  form.judge_api_key = c.judge_api_key || ''
+  form.judge_model = c.judge_model || ''
+  form.judge_timeout = c.judge_timeout ?? 120
+  form.embed_backend = c.embed_backend || 'mock'
+  form.embed_api_base = c.embed_api_base || ''
+  form.embed_api_key = c.embed_api_key || ''
+  form.embed_model = c.embed_model || ''
+  form.embed_timeout = c.embed_timeout ?? 60
+  form.pdf_render_dpi = c.pdf_render_dpi ?? 200
   keyDirty.value = false
+  embedKeyDirty.value = false
+  judgeKeyDirty.value = false
 }
 
 onMounted(async () => {
@@ -39,16 +67,43 @@ function onKeyInput(): void {
   keyDirty.value = true
 }
 
+function onEmbedKeyInput(): void {
+  embedKeyDirty.value = true
+}
+
+function onJudgeKeyInput(): void {
+  judgeKeyDirty.value = true
+}
+
 async function onSave(): Promise<void> {
   saveError.value = null
   saved.value = false
   const payload: Record<string, unknown> = {
+    ocr_backend: form.ocr_backend,
     llm_api_base: form.llm_api_base.trim(),
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),
     llm_max_concurrency: Number(form.llm_max_concurrency),
+    pdf_render_dpi: Number(form.pdf_render_dpi),
+    embed_backend: form.embed_backend,
   }
   payload.llm_api_key = keyDirty.value ? form.llm_api_key : '********'
+
+  // LLM 复核服务(独立于 OCR,填了才提交)
+  if (form.judge_api_base.trim() || form.judge_model.trim()) {
+    payload.judge_api_base = form.judge_api_base.trim()
+    payload.judge_model = form.judge_model.trim()
+    payload.judge_timeout = Number(form.judge_timeout)
+    payload.judge_api_key = judgeKeyDirty.value ? form.judge_api_key : '********'
+  }
+
+  // qwen backend 才提交向量服务字段(mock 无需配置)
+  if (form.embed_backend === 'qwen') {
+    payload.embed_api_base = form.embed_api_base.trim()
+    payload.embed_model = form.embed_model.trim()
+    payload.embed_timeout = Number(form.embed_timeout)
+    payload.embed_api_key = embedKeyDirty.value ? form.embed_api_key : '********'
+  }
 
   const ok = await store.save(payload)
   if (ok) {
@@ -74,9 +129,23 @@ async function onReset(): Promise<void> {
     <section class="card">
       <h2 class="page-title">OCR 引擎</h2>
       <p class="muted page-desc">
-        通过远端多模态推理服务(vLLM / SGLang / 云端 API)识别 PDF 扫描件。
-        所有模型(PaddleOCR-VL / 通义千问 VL / GPT-4o 等)共用下方同一套 API 配置,按模型名路由到对应服务。
+        识别 PDF 扫描件版面。选择引擎后,下方显示对应配置。
       </p>
+
+      <div class="field backend-field">
+        <label>引擎</label>
+        <div class="radio-row">
+          <label class="radio">
+            <input type="radio" value="llm" v-model="form.ocr_backend" />
+            <span>llm(通用 VL 模型)</span>
+          </label>
+          <label class="radio">
+            <input type="radio" value="paddleocr" v-model="form.ocr_backend" />
+            <span>paddleocr(专用 OCR 模型)</span>
+          </label>
+        </div>
+        <span class="hint">两者都走下方的 OpenAI 兼容推理服务,区别仅在模型输出格式的解析方式:llm 适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max 等);paddleocr 适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等)。切换引擎无需改连接配置,只需改模型名。</span>
+      </div>
     </section>
 
     <section class="card">
@@ -85,14 +154,14 @@ async function onReset(): Promise<void> {
       <div class="form-grid">
         <div class="field">
           <label>API Base</label>
-          <input v-model="form.llm_api_base" class="input" placeholder="http://localhost:8000/v1" />
-          <span class="hint">vLLM / SGLang / 云端 API 的 OpenAI 兼容根地址</span>
+          <input v-model="form.llm_api_base" class="input" placeholder="https://api.siliconflow.cn/v1" />
+          <span class="hint">OpenAI 兼容根地址(vLLM / SGLang / SiliconFlow / DashScope 等均可)</span>
         </div>
 
         <div class="field">
           <label>模型名称</label>
-          <input v-model="form.llm_model" class="input" placeholder="qwen-vl-max" />
-          <span class="hint">加载的模型名(决定走哪个推理服务)</span>
+          <input v-model="form.llm_model" class="input" :placeholder="form.ocr_backend === 'paddleocr' ? 'PaddlePaddle/PaddleOCR-VL-1.5' : 'qwen-vl-max'" />
+          <span class="hint">{{ form.ocr_backend === 'paddleocr' ? '专用 OCR 模型(如 PaddleOCR-VL)' : '通用 VL 模型(如 qwen-vl-max)' }}</span>
         </div>
 
         <div class="field span-2">
@@ -122,6 +191,118 @@ async function onReset(): Promise<void> {
           <label>最大并发</label>
           <input v-model.number="form.llm_max_concurrency" class="input" type="number" min="1" max="32" />
           <span class="hint">逐页并行数,受推理服务限流</span>
+        </div>
+
+        <div class="field">
+          <label>渲染 DPI</label>
+          <input v-model.number="form.pdf_render_dpi" class="input" type="number" min="72" max="600" />
+          <span class="hint">PDF 渲染为图片的分辨率;200 为速度/质量甜点(默认),过高会显著变慢</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="page-title">LLM 复核服务</h2>
+      <p class="muted page-desc">
+        规则+LLM 结合:对规则判为「modified」的条款调 LLM 复核,可升级或降级风险。
+        需<b>纯文本 LLM</b>(如 Qwen3.5),与 OCR 的多模态 VL 模型分开配置。
+        比对提交页勾选「启用 LLM 判定」后生效;未配置则自动回退规则判定。
+      </p>
+
+      <div class="form-grid">
+        <div class="field">
+          <label>API Base</label>
+          <input v-model="form.judge_api_base" class="input" placeholder="https://api.siliconflow.cn/v1" />
+          <span class="hint">OpenAI 兼容根地址(可与 OCR 服务相同或不同)</span>
+        </div>
+
+        <div class="field">
+          <label>模型名称</label>
+          <input v-model="form.judge_model" class="input" placeholder="Qwen/Qwen3.5-35B-A3B" />
+          <span class="hint">纯文本 LLM 模型名(不要填 VL 模型)</span>
+        </div>
+
+        <div class="field span-2">
+          <label>API Key</label>
+          <input
+            v-model="form.judge_api_key"
+            class="input"
+            type="password"
+            :placeholder="store.config?.judge_api_key_set ? '已设置(输入新值覆盖)' : '与 OCR 服务相同时可填同一 Key'"
+            @input="onJudgeKeyInput"
+          />
+          <span class="hint">
+            <template v-if="store.config?.judge_api_key_set">
+              当前: {{ store.config.judge_api_key || '****' }} · 留空不修改
+            </template>
+            <template v-else>未配置则 LLM 复核自动回退规则判定</template>
+          </span>
+        </div>
+
+        <div class="field">
+          <label>请求超时(秒)</label>
+          <input v-model.number="form.judge_timeout" class="input" type="number" min="10" max="600" />
+          <span class="hint">单条条款复核的超时上限</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="page-title">语义向量引擎</h2>
+      <p class="muted page-desc">
+        用于条款对齐(无编号时的语义匹配)与篡改判定的相似度计算。
+        mock 仅反映字面重叠(测试用);qwen 走 OpenAI 兼容的 /v1/embeddings,
+        适合生产环境自建 Qwen3-Embedding。
+      </p>
+
+      <div class="field backend-field">
+        <label>引擎</label>
+        <div class="radio-row">
+          <label class="radio">
+            <input type="radio" value="mock" v-model="form.embed_backend" />
+            <span>mock(字面相似度)</span>
+          </label>
+          <label class="radio">
+            <input type="radio" value="qwen" v-model="form.embed_backend" />
+            <span>qwen(语义嵌入 API)</span>
+          </label>
+        </div>
+      </div>
+
+      <div v-if="form.embed_backend === 'qwen'" class="form-grid">
+        <div class="field">
+          <label>API Base</label>
+          <input v-model="form.embed_api_base" class="input" placeholder="http://vllm-embed:8000/v1" />
+          <span class="hint">向量服务的 OpenAI 兼容根地址(独立于 OCR)</span>
+        </div>
+
+        <div class="field">
+          <label>模型名称</label>
+          <input v-model="form.embed_model" class="input" placeholder="Qwen3-Embedding-0.6B" />
+          <span class="hint">部署的 embedding 模型名</span>
+        </div>
+
+        <div class="field span-2">
+          <label>API Key</label>
+          <input
+            v-model="form.embed_api_key"
+            class="input"
+            type="password"
+            :placeholder="store.config?.embed_api_key_set ? '已设置(输入新值覆盖)' : '本地 vLLM 通常留空'"
+            @input="onEmbedKeyInput"
+          />
+          <span class="hint">
+            <template v-if="store.config?.embed_api_key_set">
+              当前: {{ store.config.embed_api_key || '****' }} · 留空不修改
+            </template>
+            <template v-else>本地 vLLM 一般无需 Key</template>
+          </span>
+        </div>
+
+        <div class="field">
+          <label>请求超时(秒)</label>
+          <input v-model.number="form.embed_timeout" class="input" type="number" min="5" max="300" />
+          <span class="hint">单次向量请求的超时上限</span>
         </div>
       </div>
     </section>
@@ -175,6 +356,24 @@ async function onReset(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.backend-field {
+  margin-bottom: 16px;
+}
+.radio-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.radio input {
+  cursor: pointer;
 }
 .ok {
   color: var(--risk-clean);

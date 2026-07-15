@@ -3,14 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.7
+    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.14
     container_name: llm-ocr-compare
     platform: linux/amd64
     restart: unless-stopped
     ports:
       - "${DC_PORT:-3012}:8000"
     volumes:
-      - dc_data:/app/.dc_data
-volumes:
-  dc_data:
-    driver: local
+      # 绑定宿主目录:持久化数据(uploads/reports/llm_config.json)与日志(logs/app.log)
+      # 宿主机直接 tail -f ./data/logs/app.log 即可查看日志
+      - ./data:/app/.dc_data

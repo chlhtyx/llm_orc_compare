@@ -31,6 +31,11 @@ class Settings:
       )
    )
 
+    # —— OCR 引擎选择:llm | paddleocr ——
+    # llm:走 OpenAI 兼容多模态 API(默认,无本地 GPU);
+    # paddleocr:走独立部署的 PaddleOCR HTTP 服务(内网/隐私场景,需 GPU 机)。
+    ocr_backend: str = "llm"
+
     # —— 远端多模态推理(vllm backend 用)——
     # 兼容 OpenAI Chat Completions 协议(base_url 指向 vLLM / SGLang / 云端 API)。
     # 所有多模态模型(PaddleOCR-VL / 通义千问 VL / GPT-4o 等)共用此配置,
@@ -45,16 +50,36 @@ class Settings:
     # 单页瞬态失败(超时 / 429 / 5xx)重试次数
     llm_max_retries: int = 2
 
-    # —— 向量引擎选择:mock | bge ——
-    embed_backend: str = "mock"
+    # —— LLM 复核服务(规则+LLM 结合,对 modified 条款做语义复核)——
+    # 与 OCR 服务独立配置:OCR 需多模态 VL 模型(看图),复核需纯文本 LLM(判语义)。
+    # 走 OpenAI 兼容 Chat Completions 协议。未配置时复核自动回退规则判定。
+    judge_api_base: str = ""
+    judge_api_key: str = ""
+    judge_model: str = ""
+    judge_timeout: float = 120.0
+
+    # —— 向量引擎选择:mock | qwen | bge ——
+    # 默认 qwen;若未配置 embed_api_base/model,get_embed_engine 会自动回退 mock。
+    embed_backend: str = "qwen"
+
+    # —— 远端向量服务(qwen backend 用;vLLM / SGLang 自建 Qwen3-Embedding 等)——
+    # 与 OCR 服务独立配置(两者通常不在同一推理服务)。
+    embed_api_base: str = ""
+    embed_api_key: str = ""
+    embed_model: str = ""
+    embed_timeout: float = 60.0
 
     # —— 比对阈值(§9.1 双阈值)——
     similarity_identical: float = 0.98  # >= 视为一致
     similarity_modified: float = 0.85  # < 视为实质修改;之间为疑似
-    align_similarity: float = 0.85  # 对齐配对确认阈值
+    align_similarity: float = 0.85  # 对齐配对确认阈值(语义向量后端)
+    # mock 字符袋相似度系统性偏低(中文同义改写打不到 0.85),单独给一个较低阈值。
+    align_similarity_mock: float = 0.70
 
     # —— PDF 渲染 ——
-    pdf_render_dpi: int = 300
+    # 200 是 OCR 速度/质量的甜点(实测较 300 提速约 27%、token 减半,质量无损);
+    # 过低(如 100)会让密集文字识别变差甚至更慢。
+    pdf_render_dpi: int = 200
 
     # —— 任务 ——
     max_concurrent_tasks: int = 4
@@ -82,24 +107,44 @@ settings = Settings()
 import json as _json
 
 _LLM_CONFIG_FIELDS = (
+    "ocr_backend",
     "llm_api_base",
     "llm_api_key",
     "llm_model",
     "llm_timeout",
     "llm_max_concurrency",
     "llm_max_retries",
+    "judge_api_base",
+    "judge_api_key",
+    "judge_model",
+    "judge_timeout",
     "embed_backend",
+    "embed_api_base",
+    "embed_api_key",
+    "embed_model",
+    "embed_timeout",
+    "pdf_render_dpi",
 )
 
 # dataclass 字段默认值,供首次启动(无 json 文件)时写入种子配置。
 _LLM_DEFAULTS: dict = {
+    "ocr_backend": "llm",
     "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "llm_api_key": "",
     "llm_model": "qwen-vl-max",
     "llm_timeout": 120,
     "llm_max_concurrency": 4,
     "llm_max_retries": 2,
-    "embed_backend": "mock",
+    "judge_api_base": "",
+    "judge_api_key": "",
+    "judge_model": "",
+    "judge_timeout": 120,
+    "embed_backend": "qwen",
+    "embed_api_base": "",
+    "embed_api_key": "",
+    "embed_model": "",
+    "embed_timeout": 60,
+    "pdf_render_dpi": 200,
 }
 
 def llm_config_path() -> Path:
@@ -138,6 +183,8 @@ def save_llm_overrides(overrides: dict) -> None:
 def apply_llm_overrides() -> None:
     """把 llm_config.json 应用到运行时 settings 单例。启动时与保存后各调一次。"""
     cfg = load_llm_overrides()
+    if "ocr_backend" in cfg:
+        settings.ocr_backend = cfg["ocr_backend"]
     if "llm_api_base" in cfg:
         settings.llm_api_base = cfg["llm_api_base"]
     if "llm_api_key" in cfg:
@@ -150,8 +197,29 @@ def apply_llm_overrides() -> None:
         settings.llm_max_concurrency = int(cfg["llm_max_concurrency"])
     if "llm_max_retries" in cfg:
         settings.llm_max_retries = int(cfg["llm_max_retries"])
+    if "judge_api_base" in cfg:
+        settings.judge_api_base = cfg["judge_api_base"]
+    if "judge_api_key" in cfg:
+        settings.judge_api_key = cfg["judge_api_key"]
+    if "judge_model" in cfg:
+        settings.judge_model = cfg["judge_model"]
+    if "judge_timeout" in cfg:
+        settings.judge_timeout = float(cfg["judge_timeout"])
     if "embed_backend" in cfg:
         settings.embed_backend = cfg["embed_backend"]
+    if "embed_api_base" in cfg:
+        settings.embed_api_base = cfg["embed_api_base"]
+    if "embed_api_key" in cfg:
+        settings.embed_api_key = cfg["embed_api_key"]
+    if "embed_model" in cfg:
+        settings.embed_model = cfg["embed_model"]
+    if "embed_timeout" in cfg:
+        settings.embed_timeout = float(cfg["embed_timeout"])
+    if "pdf_render_dpi" in cfg:
+        try:
+            settings.pdf_render_dpi = int(cfg["pdf_render_dpi"])
+        except (TypeError, ValueError):
+            pass
 
 # 启动时应用一次持久化覆盖
 apply_llm_overrides()

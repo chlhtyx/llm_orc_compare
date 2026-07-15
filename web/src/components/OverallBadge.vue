@@ -13,6 +13,7 @@ const TEXT: Record<string, string> = {
   low: '低风险',
   none: '无风险',
   clean: '未见篡改',
+  needs_review: '待人工复核',
 }
 
 const cls = computed(() => `badge badge-${props.level}`)

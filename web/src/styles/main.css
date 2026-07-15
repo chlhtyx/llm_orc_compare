@@ -254,6 +254,10 @@ a:hover {
   background: var(--risk-none-bg);
   color: var(--risk-none);
 }
+.badge-needs_review {
+  background: var(--risk-medium-bg);
+  color: var(--risk-medium);
+}
 
 /* —— 进度条 —— */
 .progress {

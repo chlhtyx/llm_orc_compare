@@ -39,12 +39,42 @@ export function getReport(taskId: string, format: 'json' = 'json'): Promise<Tamp
   return request(
     `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=${format}`,
   )
-  // 后端 pdf 烧录暂未实现;非 json 时由后端返回 501,前端统一按 json 调用即可
 }
 
 /** 返回 PDF 源文件的可访问 URL，供 <iframe> 或 pdf.js 加载。 */
 export function getSourcePdfUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/source`)
+}
+
+/** 返回带差异高亮的 Word 报告下载 URL（整段黄底标注被篡改条款）。 */
+export function getAnnotatedDocxUrl(taskId: string): string {
+  return apiUrl(
+    `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=docx`,
+  )
+}
+
+/** 返回带差异高亮框的 PDF 报告下载 URL（原生 PDF 有效，扫描件无坐标）。 */
+export function getAnnotatedPdfUrl(taskId: string): string {
+  return apiUrl(
+    `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=pdf`,
+  )
+}
+
+/** docx 高亮预览段落（后端 /docx-preview 接口返回）。 */
+export interface PreviewParagraph {
+  text: string
+  highlight: '' | 'modified' | 'deleted'
+  status: string
+  risk_level: string
+  number: string
+}
+
+/** 拉取源 docx 的全段落 + 差异标记，供 HTML 渲染在线高亮预览。 */
+export async function getDocxPreview(taskId: string): Promise<PreviewParagraph[]> {
+  const data = await request<{ paragraphs: PreviewParagraph[] }>(
+    `/api/v1/compare/${encodeURIComponent(taskId)}/docx-preview`,
+  )
+  return data.paragraphs
 }
 
 export interface ProgressHandlers {

@@ -5,6 +5,8 @@ __pycache__/
 build/
 dist/
 .dc_data/
+# docker-compose 绑定挂载的宿主数据目录(含 uploads/reports/logs/llm_config.json)
+data/
 .venv/
 venv/
 .env
@@ -14,3 +16,4 @@ htmlcov/
 *.pdf
 *.docx
 !tests/fixtures/*
+.zcode/

@@ -32,21 +32,38 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from ..config import settings
-from ..models import Block, PageMeta
+from ..models import Block, PageMeta, TableStructure
+from ..observability import log_model_request, log_model_response
 from ..parsing.pdf import render_pages
 from .base import ProgressCb
 
 # 要求 LLM 返回的 JSON 结构:
-# {"blocks": [{"label": ..., "content": ..., "bbox": [x1,y1,x2,y2]}, ...]}
+# {"blocks": [{"label": ..., "content": ..., "bbox": [x1,y1,x2,y2], "table": {"headers":[...], "rows":[...]}}]}
 # bbox 用归一化 [0,1] 坐标(相对页面),再由本引擎换算回 PDF 点坐标。
+# table 字段仅 label=table 时出现,提供结构化表头/行供单元格级比对;
+# content 仍保留为表格纯文本(向后兼容)。
 _SYSTEM_PROMPT = (
     "你是一个文档版面分析助手。给定一页文档图片,识别其中所有可读的版面块,"
     "包括标题、段落、表格、列表、印章等。"
     "严格只输出 JSON,不要解释、不要 markdown 代码块。"
-    "JSON 结构为:{\"blocks\": [{\"label\": str, \"content\": str, \"bbox\": [x1,y1,x2,y2]}]}。"
+    "JSON 结构为:{\"blocks\": [{\"label\": str, \"content\": str, \"bbox\": [x1,y1,x2,y2], \"table\": {\"headers\": [str,...], \"rows\": [[str,...],...]}]}。"
     "label 取值:text / doc_title / paragraph_title / table / list / seal。"
     "bbox 为该块在页面中的归一化边界框,坐标范围 [0,1],原点左上角。"
-    "content 为该块的完整文字内容(表格用 markdown 或 TSV 表达)。"
+    "content 为该块的完整文字内容。\n"
+    "表格格式约定(重要,用于后续逐行比对):\n"
+    "- 表格块必须同时提供 content(纯文本)和 table(结构化)两个字段。\n"
+    "- content 中每行单元格用「 | 」(竖线两侧各一个空格)分隔,首行是表头,"
+    "不要输出 Markdown 表格语法,禁止分隔行(如 |---|---|),禁止行首/行尾额外 |。\n"
+    "- table.headers 是表头各列名称数组;table.rows 是数据行数组,每行是单元格数组,"
+    "每行单元格数应与 headers 对齐。\n"
+    "- 示例:content=\"阶段 | 比例 | 金额\\n预付款 | 30% | 30000\\n尾款 | 70% | 70000\","
+    "table={\"headers\":[\"阶段\",\"比例\",\"金额\"],\"rows\":[[\"预付款\",\"30%\",\"30000\"],[\"尾款\",\"70%\",\"70000\"]]}。\n"
+    "- 非表格块(text/doc_title/paragraph_title/list/seal)不要输出 table 字段。\n"
+    "切分粒度约定(重要):\n"
+    "- 同一编号条款(第X条 / X.X / (X) / 一、等)的全部内容合并为单个 block 输出,"
+    "不要按视觉换行或段落把一条编号条款拆成多个 block。\n"
+    "- 合同首部、签字页的甲乙方信息、联系方式等键值字段,每一行(每个字段名)作为独立 block 输出,"
+    '字段名带冒号,如 content="甲方(甲方主体):XX公司"、content="联系电话:138..."。'
 )
 
 
@@ -66,9 +83,9 @@ class LLMOCREngine:
         max_concurrency: int | None = None,
         max_retries: int | None = None,
     ) -> None:
-        self.api_base = api_base or settings.llm_api_base
+        self.api_base = api_base if api_base is not None else settings.llm_api_base
         self.api_key = api_key if api_key is not None else settings.llm_api_key
-        self.model = model or settings.llm_model
+        self.model = model if model is not None else settings.llm_model
         self.timeout = timeout if timeout is not None else settings.llm_timeout
         self.max_concurrency = (
             max_concurrency if max_concurrency is not None else settings.llm_max_concurrency
@@ -86,9 +103,15 @@ class LLMOCREngine:
         *,
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
+        self._validate_config()
         images = render_pages(pdf_path, dpi=self._dpi)
         if not images:
+            logger.info("ocr recognize pages=0 (empty pdf)")
             return []
+        logger.info(
+            "ocr recognize pages=%s dpi=%s concurrency=%s model=%s",
+            len(images), self._dpi, self.max_concurrency, self.model,
+        )
 
         # Pre-warm certifi CA bundle before spawning threads — certifi.where()
         # uses an unlocked global guard that races under concurrent access.
@@ -100,13 +123,21 @@ class LLMOCREngine:
         total = len(images)
         done_count = [0]  # mutable counter for threads
 
-        with _BoundedConcurrency(self.max_concurrency) as pool:
-            for i, img in enumerate(images):
-                pool.submit(
-                    self._recognize_page,
-                    i, img, page_metas[i], results,
-                    on_progress, total, done_count,
-                )
+        # 一个任务内的所有页面共享连接池。httpx.Client 可跨线程使用，能够
+        # 复用 TCP/TLS 连接，避免每页重新握手；任务结束后统一关闭。
+        timeout = httpx.Timeout(self.timeout, connect=10.0)
+        limits = httpx.Limits(
+            max_connections=max(1, self.max_concurrency),
+            max_keepalive_connections=max(1, self.max_concurrency),
+        )
+        with httpx.Client(timeout=timeout, limits=limits) as client:
+            with _BoundedConcurrency(self.max_concurrency) as pool:
+                for i, img in enumerate(images):
+                    pool.submit(
+                        self._recognize_page,
+                        i, img, page_metas[i], results,
+                        on_progress, total, done_count, client,
+                    )
 
         return results
 
@@ -120,9 +151,10 @@ class LLMOCREngine:
         on_progress: ProgressCb | None = None,
         total_pages: int = 1,
         done_count: list[int] | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
-        content = self._chat(data_url)
+        content = self._chat(data_url, client=client)
         blocks = _parse_blocks(content, page_index, meta)
         out[page_index] = blocks
         if on_progress:
@@ -130,7 +162,18 @@ class LLMOCREngine:
             frac = 0.10 + (done_count[0] / total_pages) * 0.60
             on_progress("ocr", frac)
 
-    def _chat(self, data_url: str) -> str:
+    def _validate_config(self) -> None:
+        """在渲染和重试前识别永久配置错误，避免无意义等待。"""
+        if not self.api_base or not self.api_base.strip():
+            raise ValueError("OCR 未配置 llm_api_base")
+        if not self.model or not self.model.strip():
+            raise ValueError("OCR 未配置 llm_model")
+        if self.max_concurrency < 1:
+            raise ValueError("llm_max_concurrency 必须大于 0")
+        if self.max_retries < 0:
+            raise ValueError("llm_max_retries 不能小于 0")
+
+    def _chat(self, data_url: str, *, client: httpx.Client | None = None) -> str:
         url = self.api_base.rstrip("/") + "/chat/completions"
         payload: dict[str, Any] = {
             "model": self.model,
@@ -154,19 +197,27 @@ class LLMOCREngine:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        # 本地 OpenAI 兼容服务可能无需 key；空 key 时不要构造非法 Bearer 头。
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         # 多模态 OCR 单页推理可能很慢:连接快速失败,读取给予充分时间。
-        timeout = httpx.Timeout(self.timeout, connect=10.0)
         # 可重试的瞬态故障:超时 / 网络传输错误 / 429 / 5xx。
         # (httpx.TransportError 覆盖 ConnectError / ReadTimeout / NetworkError 等)
         # 4xx(鉴权、参数错误等)不可重试,立即抛出。
         last_exc: Exception | None = None
-        with httpx.Client(timeout=timeout) as client:
+        owns_client = client is None
+        if client is None:
+            client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=10.0))
+        try:
             for attempt in range(self.max_retries + 1):
+                request_started = log_model_request(logger, "ocr", url, payload, attempt + 1)
                 try:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
                     last_exc = exc
+                    logger.warning(
+                        "ocr transport error attempt=%s/%s reason=%s",
+                        attempt + 1, self.max_retries + 1, exc,
+                    )
                 else:
                     if resp.status_code == 429 or resp.status_code >= 500:
                         last_exc = httpx.HTTPStatusError(
@@ -174,14 +225,25 @@ class LLMOCREngine:
                             request=resp.request,
                             response=resp,
                         )
+                        logger.warning(
+                            "ocr transient http status=%s attempt=%s/%s",
+                            resp.status_code, attempt + 1, self.max_retries + 1,
+                        )
                     else:
                         resp.raise_for_status()  # 4xx:不可重试,直接抛
                         data = resp.json()
+                        log_model_response(logger, "ocr", resp.status_code, data, request_started)
                         return data["choices"][0]["message"]["content"]
                 if attempt < self.max_retries:
-                    time.sleep(min(2 ** attempt, 8) + random.random())
-        assert last_exc is not None
-        raise last_exc
+                    backoff = min(2 ** attempt, 8) + random.random()
+                    logger.info("ocr retry after %.1fs", backoff)
+                    time.sleep(backoff)
+            assert last_exc is not None
+            logger.error("ocr give up after %s attempts: %s", self.max_retries + 1, last_exc)
+            raise last_exc
+        finally:
+            if owns_client:
+                client.close()
 
 
 # —— 工具函数 ——
@@ -221,6 +283,28 @@ def _parse_blocks(
                 page_index, bbox_norm, bbox_pt,
                 meta.width_px, meta.height_px, w_pt, h_pt,
             )
+        # 结构化表格:label=table 时解析 table 字段(headers/rows)
+        table_obj: TableStructure | None = None
+        if label == "table":
+            tbl = item.get("table")
+            if isinstance(tbl, dict):
+                headers = tbl.get("headers") or []
+                rows = tbl.get("rows") or []
+                if isinstance(headers, list) and isinstance(rows, list):
+                    # 拍平单元格内换行(与 Word 侧 _table_rows 对称):VL 模型偶尔
+                    # 会在表头/单元格内返回换行,如「数\\n量」,会破坏列对齐。
+                    headers_str = [
+                        str(h).replace("\n", " ").replace("\r", " ").strip()
+                        for h in headers
+                        if str(h).replace("\n", " ").strip()
+                    ]
+                    rows_str = [
+                        [str(c).replace("\n", " ").replace("\r", " ").strip() for c in row]
+                        for row in rows
+                        if isinstance(row, list)
+                    ]
+                    if headers_str or rows_str:
+                        table_obj = TableStructure(headers=headers_str, rows=rows_str)
         blocks.append(
             Block(
                 block_id=f"p{page_index}-b{idx}",
@@ -228,6 +312,7 @@ def _parse_blocks(
                 label=label,
                 bbox=bbox_pt,
                 content=text,
+                table=table_obj,
             )
         )
     return blocks
@@ -292,6 +377,7 @@ def _extract_json(text: str) -> Any:
                 return json.loads(m.group(0))
             except json.JSONDecodeError:
                 continue
+    logger.warning("ocr json parse failed, treating as empty; raw=%s", text[:200])
     return {}
 
 

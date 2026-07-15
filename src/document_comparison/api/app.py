@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -25,10 +26,14 @@ from ..config import (
     save_llm_overrides,
     settings,
 )
-from ..models import CompareOptions
-from ..storage import load_report, report_path, save_upload, upload_path
+from ..logging_config import setup_logging
+from ..models import CompareOptions, RawCompareOptions
+from ..storage import load_report, load_raw_report, report_path, save_upload, upload_path
 from ..report.builder import burn_pdf
+from ..report.docx_burn import build_docx_preview, burn_docx
 from ..tasks import task_manager
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -42,6 +47,7 @@ def _mask_key(key: str) -> str:
 
 
 def create_app() -> FastAPI:
+    setup_logging()  # 控制台 + 滚动文件,幂等
     app = FastAPI(
        title="文档比对 API",
         description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",
@@ -85,6 +91,7 @@ def create_app() -> FastAPI:
     async def get_llm_config():
         """读取当前生效的 LLM 配置(环境变量 + 持久化覆盖后的合并值)。"""
         return {
+            "ocr_backend": settings.ocr_backend,
             "llm_api_base": settings.llm_api_base,
             "llm_api_key": _mask_key(settings.llm_api_key),
             "llm_api_key_set": bool(settings.llm_api_key),
@@ -92,7 +99,18 @@ def create_app() -> FastAPI:
             "llm_timeout": settings.llm_timeout,
             "llm_max_concurrency": settings.llm_max_concurrency,
             "llm_max_retries": settings.llm_max_retries,
+            "judge_api_base": settings.judge_api_base,
+            "judge_api_key": _mask_key(settings.judge_api_key),
+            "judge_api_key_set": bool(settings.judge_api_key),
+            "judge_model": settings.judge_model,
+            "judge_timeout": settings.judge_timeout,
             "embed_backend": settings.embed_backend,
+            "embed_api_base": settings.embed_api_base,
+            "embed_api_key": _mask_key(settings.embed_api_key),
+            "embed_api_key_set": bool(settings.embed_api_key),
+            "embed_model": settings.embed_model,
+            "embed_timeout": settings.embed_timeout,
+            "pdf_render_dpi": settings.pdf_render_dpi,
             "persisted": load_llm_overrides(),
             "config_file": str(llm_config_path()),
         }
@@ -101,20 +119,28 @@ def create_app() -> FastAPI:
     async def put_llm_config(body: dict):
         """更新 LLM 配置并持久化。
 
-        可选字段:llm_api_base, llm_api_key, llm_model,
-        llm_timeout, llm_max_concurrency。空值/省略表示不修改(api_key 传
+        可选字段:ocr_backend, llm_api_base, llm_api_key, llm_model,
+        llm_timeout, llm_max_concurrency, llm_max_retries,
+        judge_api_base, judge_api_key, judge_model, judge_timeout,
+        embed_backend, embed_api_base, embed_api_key, embed_model, embed_timeout,
+        pdf_render_dpi。空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
         allowed = {
+            "ocr_backend",
             "llm_api_base", "llm_api_key", "llm_model",
             "llm_timeout", "llm_max_concurrency", "llm_max_retries",
-            "embed_backend",
+            "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
+            "embed_backend", "embed_api_base", "embed_api_key",
+            "embed_model", "embed_timeout", "pdf_render_dpi",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
             raise HTTPException(400, f"未知字段: {sorted(unknown)}")
 
         # 类型校验
+        if "ocr_backend" in body and body["ocr_backend"] not in ("llm", "paddleocr"):
+            raise HTTPException(400, "ocr_backend 仅支持 llm | paddleocr")
         if "llm_timeout" in body and body["llm_timeout"] is not None:
             try:
                 float(body["llm_timeout"])
@@ -130,18 +156,40 @@ def create_app() -> FastAPI:
                 int(body["llm_max_retries"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "llm_max_retries 必须为整数")
-        if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge"):
-            raise HTTPException(400, "embed_backend 仅支持 mock | bge")
+        if "judge_timeout" in body and body["judge_timeout"] is not None:
+            try:
+                float(body["judge_timeout"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "judge_timeout 必须为数字")
+        if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge", "qwen"):
+            raise HTTPException(400, "embed_backend 仅支持 mock | bge | qwen")
+        if "embed_timeout" in body and body["embed_timeout"] is not None:
+            try:
+                float(body["embed_timeout"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "embed_timeout 必须为数字")
+        if "pdf_render_dpi" in body and body["pdf_render_dpi"] is not None:
+            try:
+                dpi = int(body["pdf_render_dpi"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "pdf_render_dpi 必须为整数")
+            if not 72 <= dpi <= 600:
+                raise HTTPException(400, "pdf_render_dpi 取值范围 72-600")
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
         overrides = dict(body)
         if overrides.get("llm_api_key") == "********":
             overrides.pop("llm_api_key")
+        if overrides.get("embed_api_key") == "********":
+            overrides.pop("embed_api_key")
+        if overrides.get("judge_api_key") == "********":
+            overrides.pop("judge_api_key")
 
         save_llm_overrides(overrides)
         return {
             "status": "ok",
             "config": {
+                "ocr_backend": settings.ocr_backend,
                 "llm_api_base": settings.llm_api_base,
                 "llm_api_key": _mask_key(settings.llm_api_key),
                 "llm_api_key_set": bool(settings.llm_api_key),
@@ -149,7 +197,18 @@ def create_app() -> FastAPI:
                 "llm_timeout": settings.llm_timeout,
                 "llm_max_concurrency": settings.llm_max_concurrency,
                 "llm_max_retries": settings.llm_max_retries,
+                "judge_api_base": settings.judge_api_base,
+                "judge_api_key": _mask_key(settings.judge_api_key),
+                "judge_api_key_set": bool(settings.judge_api_key),
+                "judge_model": settings.judge_model,
+                "judge_timeout": settings.judge_timeout,
                 "embed_backend": settings.embed_backend,
+                "embed_api_base": settings.embed_api_base,
+                "embed_api_key": _mask_key(settings.embed_api_key),
+                "embed_api_key_set": bool(settings.embed_api_key),
+                "embed_model": settings.embed_model,
+                "embed_timeout": settings.embed_timeout,
+                "pdf_render_dpi": settings.pdf_render_dpi,
             },
         }
 
@@ -167,10 +226,12 @@ def create_app() -> FastAPI:
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
-        # 解析 options(可选)
+        # 解析 options(可选);提取 enable_llm_judge 透传到 pipeline
+        enable_llm_judge = False
         if options:
             try:
-                CompareOptions.model_validate_json(options)
+                opts = CompareOptions.model_validate_json(options)
+                enable_llm_judge = opts.enable_llm_judge
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
@@ -187,7 +248,10 @@ def create_app() -> FastAPI:
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
         asyncio.create_task(
-            task_manager.run(task_id, str(word_path), str(pdf_path))
+            task_manager.run(
+                task_id, str(word_path), str(pdf_path),
+                enable_llm_judge=enable_llm_judge,
+            )
         )
         return {"task_id": task_id, "status": "pending"}
 
@@ -249,6 +313,21 @@ def create_app() -> FastAPI:
                     "Content-Disposition": f'attachment; filename="report-{task_id}.pdf"'
                 },
             )
+        if format == "docx":
+            # 在源 docx 上烧录差异高亮（整段黄底标注被篡改条款位置）。
+            # 扫描件 PDF 无文本层、OCR 无坐标时无法画 PDF 框，docx 侧始终可标。
+            source_path = upload_path(task_id, "source")
+            if source_path is None:
+                raise HTTPException(404, "源 Word 文件已过期,无法生成标注报告")
+            out = settings.reports_dir / f"{task_id}_annotated.docx"
+            burn_docx(source_path, report, out)
+            return FileResponse(
+                out,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f'attachment; filename="report-{task_id}.docx"'
+                },
+            )
 
     @app.get(
         "/api/v1/compare/{task_id}/source",
@@ -267,6 +346,103 @@ def create_app() -> FastAPI:
             media_type="application/pdf",
             headers={"Content-Disposition": f'inline; filename="{task_id}-target.pdf"'},
         )
+
+    @app.get(
+        "/api/v1/compare/{task_id}/docx-preview",
+    )
+    async def get_docx_preview(task_id: str):
+        """返回源 docx 的全段落列表 + 差异标记，供前端 HTML 渲染在线高亮预览。
+
+        扫描件 PDF 无文本层/坐标时，PDF 预览画不了高亮框，此接口改从源 docx
+        侧渲染整篇合同，被篡改条款整段上底色，让用户在页面上直接看到改动位置。
+        返回 [{text, highlight, status, risk_level, number}, ...]。
+        """
+        source_path = upload_path(task_id, "source")
+        if source_path is None:
+            raise HTTPException(404, "源 Word 文件已过期,无法生成预览")
+        report = (task_manager.get(task_id).report
+                  if task_manager.get(task_id) is not None else None)
+        if report is None:
+            report = load_report(task_id)
+        if report is None:
+            raise HTTPException(404, "report not ready")
+        return JSONResponse(content={"paragraphs": build_docx_preview(source_path, report)})
+
+    # —— 无标注版(纯文本 difflib 比对)端点:与 /api/v1/compare 完全独立 ——
+    @app.post("/api/v1/raw-compare")
+    async def raw_compare(
+        source: UploadFile = File(..., description="原始 Word(.docx)"),
+        target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
+        options: str | None = Form(default=None),
+        callback_url: str | None = Form(default=None),
+        callback_secret: str | None = Form(default=None),
+    ):
+        if not (source.filename or "").lower().endswith(".docx"):
+            raise HTTPException(400, "source 必须为 .docx")
+        if not (target.filename or "").lower().endswith(".pdf"):
+            raise HTTPException(400, "target 必须为 .pdf")
+
+        opts = RawCompareOptions()
+        if options:
+            try:
+                opts = RawCompareOptions.model_validate_json(options)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"options 解析失败: {exc}")
+
+        running = sum(
+            1
+            for t in task_manager._tasks.values()
+            if t.info.status in ("pending", "running")
+        )
+        if running >= settings.max_concurrent_tasks:
+            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        task_id = task_manager.create(callback_url, callback_secret)
+        word_path = save_upload(source, task_id, "source")
+        pdf_path = save_upload(target, task_id, "target")
+        asyncio.create_task(
+            task_manager.run_raw(
+                task_id, str(word_path), str(pdf_path), char_level=opts.char_level
+            )
+        )
+        return {"task_id": task_id, "status": "pending"}
+
+    @app.get("/api/v1/raw-compare/{task_id}")
+    async def raw_get_result(task_id: str):
+        task = task_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+        resp = task.info.model_dump()
+        if task.info.status == "done" and task.raw_report is not None:
+            resp["raw_report"] = task.raw_report.model_dump()
+        elif task.info.status == "done":
+            report = load_raw_report(task_id)
+            if report is not None:
+                resp["raw_report"] = report.model_dump()
+        return resp
+
+    @app.get("/api/v1/raw-compare/{task_id}/events")
+    async def raw_events(task_id: str):
+        task = task_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+
+        async def gen():
+            async for ev in task_manager.event_stream(task_id):
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': task.info.status}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/v1/raw-compare/{task_id}/report")
+    async def raw_download_report(task_id: str):
+        task = task_manager.get(task_id)
+        report = task.raw_report if task else None
+        if report is None:
+            report = load_raw_report(task_id)
+        if report is None:
+            raise HTTPException(404, "report not ready")
+        return JSONResponse(content=report.model_dump())
 
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。

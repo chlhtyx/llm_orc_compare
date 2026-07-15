@@ -10,14 +10,26 @@ from pydantic import BaseModel, Field
 
 # —— 枚举(用 Literal,JSON 友好)——
 DocType = Literal["word", "pdf"]
-MatchType = Literal["number", "semantic", "unmatched"]
+MatchType = Literal["number", "field", "semantic", "unmatched"]
 DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
-OverallRisk = Literal["high", "medium", "low", "clean"]
+OverallRisk = Literal["high", "medium", "low", "clean", "needs_review"]
+RecognitionStatus = Literal["reliable", "needs_review"]
 KeyElementKind = Literal[
     "amount", "date", "ratio", "term", "breach", "jurisdiction", "effective", "seal"
 ]
 BBoxShape = Literal["rect", "quad", "poly"]
+
+
+class TableStructure(BaseModel):
+    """结构化表格(用于单元格级比对)。
+
+    label=table 的 Block 在保留 content 纯文本(向后兼容)的同时,
+    额外携带结构化表头与行数据,使 Diff 引擎能定位到具体单元格。
+    """
+
+    headers: list[str] = Field(default_factory=list, description="表头各列名称")
+    rows: list[list[str]] = Field(default_factory=list, description="数据行,每行单元格数应与 headers 对齐")
 
 
 class Block(BaseModel):
@@ -28,6 +40,7 @@ class Block(BaseModel):
     label: str = Field(..., description="text/table/doc_title/paragraph_title/seal ...")
     bbox: list[float] = Field(default_factory=list, description="PDF 点坐标(pt) [x1,y1,x2,y2]")
     content: str = ""
+    table: TableStructure | None = Field(default=None, description="label=table 时的结构化表头/行;None 表示非表格或未结构化")
 
 
 class RawItem(BaseModel):
@@ -41,6 +54,8 @@ class RawItem(BaseModel):
     heading_level: int = 0
     page_index: int = 0
     bbox: list[float] = Field(default_factory=list)
+    field_key: str = ""
+    table: TableStructure | None = Field(default=None, description="kind=table 时的结构化表头/行")
 
 
 class Clause(BaseModel):
@@ -53,6 +68,11 @@ class Clause(BaseModel):
     title: str = ""
     text: str = ""
     blocks: list[Block] = Field(default_factory=list)
+    tables: list[TableStructure] = Field(
+        default_factory=list,
+        description="条款内含的结构化表格(来自 table 块),供单元格级比对",
+    )
+    field_key: str = Field(default="", description="键值块的字段名锚点(如甲方/乙方/地址/日期),供对齐层字段锚定;非键值块为空")
 
 
 class Alignment(BaseModel):
@@ -91,6 +111,10 @@ class KeyElement(BaseModel):
     word_value: str = ""
     pdf_value: str = ""
     changed: bool = False
+    # 表格要素定位:标识要素来自结构化表格的哪一行哪一列,便于前端高亮到具体单元格。
+    # 非表格要素为空/0,表示来自正文文本。
+    row_index: int = Field(default=-1, description="结构化表格中的行号(0基,-1 表示非表格)")
+    col_header: str = Field(default="", description="结构化表格中的列名(空表示非表格)")
 
 
 class Diff(BaseModel):
@@ -101,6 +125,9 @@ class Diff(BaseModel):
     segments: list[DiffSegment] = Field(default_factory=list)
     risk_level: RiskLevel = "none"
     risk_reasons: list[str] = Field(default_factory=list)
+    judged_by: Literal["rule", "llm"] = Field(
+        default="rule", description="风险判定来源:rule=规则初筛,llm=LLM 复核修正"
+    )
     page_regions: list[PageRegion] = Field(
         default_factory=list, description="该条款在 PDF 扫描件上的高亮区域"
     )
@@ -118,6 +145,21 @@ class PageMeta(BaseModel):
     pdf_height_pt: float = 0.0
 
 
+class PageRecognitionDiagnostic(BaseModel):
+    """逐页读取质量诊断。
+
+    source 记录页面实际采用的读取路径；reliable=False 表示识别内容只能作为
+    人工复核线索，不能据此给出确定性的高风险结论。
+    """
+
+    page_index: int
+    source: Literal["native", "fallback"]
+    reliable: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    char_count: int = 0
+    table_count: int = 0
+
+
 class TamperReport(BaseModel):
     """比对报告。"""
 
@@ -129,6 +171,41 @@ class TamperReport(BaseModel):
     key_elements: list[KeyElement] = Field(default_factory=list)
     unmatched_clauses: list[Diff] = Field(default_factory=list)
     page_meta: list[PageMeta] = Field(default_factory=list)
+    recognition_status: RecognitionStatus = "reliable"
+    recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
+
+
+# —— 无标注版(纯文本 difflib 比对)数据结构 ——
+# 与上面的 TamperReport 体系完全独立,不经过条款对齐/风险分级,
+# 仅做 Word→纯文本、PDF→纯文本、difflib 行级比对。
+class TextDiffHunk(BaseModel):
+    """一段差异(含少量上下文)。
+
+    tag 来自 difflib 的 opcode,equal 不入库(只在 context_* 里作上下文)。
+    """
+
+    tag: Literal["replace", "delete", "insert"]
+    word_lines: list[str] = Field(default_factory=list, description="Word 侧差异行(delete/replace)")
+    pdf_lines: list[str] = Field(default_factory=list, description="PDF 侧差异行(insert/replace)")
+    char_segments: list[DiffSegment] = Field(
+        default_factory=list,
+        description="仅 tag=replace 时:行内字符级 diff(复用 DiffSegment)",
+    )
+    context_before: list[str] = Field(default_factory=list, description="差异前的上下文行(equal)")
+    context_after: list[str] = Field(default_factory=list, description="差异后的上下文行(equal)")
+
+
+class TextDiffReport(BaseModel):
+    """纯文本 difflib 比对报告(与 TamperReport 完全独立)。"""
+
+    source: str
+    target: str
+    word_text: str = ""
+    pdf_text: str = ""
+    hunks: list[TextDiffHunk] = Field(default_factory=list)
+    stats: dict = Field(default_factory=dict)
+    recognition_status: RecognitionStatus = "reliable"
+    recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
 
 
 # —— API 层 DTO ——
@@ -136,6 +213,15 @@ class CompareOptions(BaseModel):
     similarity_identical: float | None = None
     similarity_modified: float | None = None
     enable_llm_judge: bool = False
+
+
+class RawCompareOptions(BaseModel):
+    """无标注版提交选项(纯文本 difflib 流程)。"""
+
+    char_level: bool = Field(
+        default=True,
+        description="replace 行是否做字符级细化(红/绿标记)",
+    )
 
 
 TaskStatus = Literal["pending", "running", "done", "failed"]
