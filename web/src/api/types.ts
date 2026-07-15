@@ -5,7 +5,8 @@ export type DocType = 'word' | 'pdf'
 export type MatchType = 'number' | 'semantic' | 'unmatched'
 export type DiffStatus = 'identical' | 'modified' | 'added' | 'deleted'
 export type RiskLevel = 'high' | 'medium' | 'low' | 'none'
-export type OverallRisk = 'high' | 'medium' | 'low' | 'clean'
+export type OverallRisk = 'high' | 'medium' | 'low' | 'clean' | 'needs_review'
+export type RecognitionStatus = 'reliable' | 'needs_review'
 export type KeyElementKind =
   | 'amount'
   | 'date'
@@ -56,6 +57,15 @@ export interface PageMeta {
   pdf_height_pt: number
 }
 
+export interface PageRecognitionDiagnostic {
+  page_index: number
+  source: 'native' | 'fallback'
+  reliable: boolean
+  reasons: string[]
+  char_count: number
+  table_count: number
+}
+
 export interface TamperReport {
   source: string
   target: string
@@ -65,6 +75,8 @@ export interface TamperReport {
   key_elements: KeyElement[]
   unmatched_clauses: Diff[]
   page_meta: PageMeta[]
+  recognition_status: RecognitionStatus
+  recognition_diagnostics: PageRecognitionDiagnostic[]
 }
 
 export interface CompareOptions {
@@ -117,7 +129,9 @@ export interface TextDiffReport {
   word_text: string
   pdf_text: string
   hunks: TextDiffHunk[]
-  stats: Record<string, number>
+  stats: Record<string, unknown>
+  recognition_status: RecognitionStatus
+  recognition_diagnostics: PageRecognitionDiagnostic[]
 }
 
 export interface RawCompareOptions {

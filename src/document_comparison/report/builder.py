@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pymupdf
 
 logger = logging.getLogger(__name__)
 
-from ..compare.diff import char_diff, table_diff
+from ..compare.diff import char_diff, describe_table_change, table_diff
 from ..compare.elements import (
     elements_changed,
     extract_key_elements,
@@ -28,6 +29,7 @@ from ..models import (
     PageRegion,
     TamperReport,
 )
+from ..structure.normalize import normalize_text
 
 
 def _normalize_regions(blocks, pmeta: dict[int, PageMeta]) -> list[PageRegion]:
@@ -79,6 +81,58 @@ def _unmatched_risk(c: Clause) -> tuple[str, str]:
     return ("low", "疑似切分边界差异,待人工核对")
 
 
+def _compact_clause_text(text: str) -> str:
+    """条款边界判定用比较键：忽略排版空白，保留实际文字。"""
+    return re.sub(r"\s+", "", normalize_text(text))
+
+
+def _covered_boundary_alignments(
+    alignments: list[Alignment],
+    word_by: dict[str, Clause],
+    pdf_by: dict[str, Clause],
+) -> set[int]:
+    """找出已被相邻配对条款完整覆盖的 unmatched 切分片段。
+
+    只检查原文档顺序中相邻的已配对条款，避免因合同中远处重复短语
+    而隐藏真实缺失。短于 4 个字符的片段不自动抑制。
+    """
+    word_ids = list(word_by)
+    pdf_ids = list(pdf_by)
+    word_pos = {clause_id: index for index, clause_id in enumerate(word_ids)}
+    pdf_pos = {clause_id: index for index, clause_id in enumerate(pdf_ids)}
+    paired = [
+        alignment
+        for alignment in alignments
+        if alignment.match_type != "unmatched"
+        and alignment.word_clause_id
+        and alignment.pdf_clause_id
+    ]
+    covered: set[int] = set()
+
+    for alignment_index, alignment in enumerate(alignments):
+        if alignment.match_type != "unmatched":
+            continue
+        if alignment.word_clause_id and not alignment.pdf_clause_id:
+            fragment = _compact_clause_text(word_by[alignment.word_clause_id].text)
+            position = word_pos[alignment.word_clause_id]
+            if len(fragment) >= 4 and any(
+                abs(word_pos[pair.word_clause_id] - position) == 1
+                and fragment in _compact_clause_text(pdf_by[pair.pdf_clause_id].text)
+                for pair in paired
+            ):
+                covered.add(alignment_index)
+        elif alignment.pdf_clause_id and not alignment.word_clause_id:
+            fragment = _compact_clause_text(pdf_by[alignment.pdf_clause_id].text)
+            position = pdf_pos[alignment.pdf_clause_id]
+            if len(fragment) >= 4 and any(
+                abs(pdf_pos[pair.pdf_clause_id] - position) == 1
+                and fragment in _compact_clause_text(word_by[pair.word_clause_id].text)
+                for pair in paired
+            ):
+                covered.add(alignment_index)
+    return covered
+
+
 def build_report(
     *,
     alignments: list[Alignment],
@@ -97,6 +151,9 @@ def build_report(
     all_key_elements: list[KeyElement] = []
     levels: list[str] = []
     status_counts: Counter[str] = Counter()
+    covered_boundary_alignments = _covered_boundary_alignments(
+        alignments, word_by, pdf_by
+    )
 
     # number 锚定时 Alignment.similarity=1 仅代表编号匹配，仍需计算正文相似度。
     # 将原来的每条两次 embed 合并为一次批量调用，避免远程服务产生 2N 次 RPC。
@@ -119,6 +176,9 @@ def build_report(
             )
 
     for idx, al in enumerate(alignments):
+        if idx in covered_boundary_alignments:
+            logger.info("suppress covered boundary fragment alignment=%s", idx)
+            continue
         wc = word_by.get(al.word_clause_id) if al.word_clause_id else None
         pc = pdf_by.get(al.pdf_clause_id) if al.pdf_clause_id else None
 
@@ -130,6 +190,7 @@ def build_report(
                     status="added",
                     risk_level=risk,
                     risk_reasons=[reason],
+                    segments=[DiffSegment(op="insert", text=pc.text)],
                     number=pc.number,
                     title=pc.title,
                     page_regions=_normalize_regions(pc.blocks, pmeta),
@@ -141,6 +202,7 @@ def build_report(
                     status="deleted",
                     risk_level=risk,
                     risk_reasons=[reason],
+                    segments=[DiffSegment(op="delete", text=wc.text)] if wc else [],
                     number=wc.number if wc else "",
                     title=wc.title if wc else "",
                 )
@@ -159,6 +221,7 @@ def build_report(
         ke.extend(tbl_ke)
         all_key_elements.extend([e for e in ke if e.changed])
         segs = char_diff(wt, pt)
+        table_change_reason = describe_table_change(wc.tables, pc.tables)
         # 表格单元格级 diff:两端均有结构化表格时追加,定位到具体单元格
         for tidx in range(min(len(wc.tables), len(pc.tables))):
             wt_tbl = wc.tables[tidx]
@@ -181,6 +244,7 @@ def build_report(
             key_elements=ke,
             sim_identical=thresholds["identical"],
             sim_modified=thresholds["modified"],
+            table_change_reason=table_change_reason,
         )
         status_counts[status] += 1
         if status == "identical":
@@ -210,7 +274,7 @@ def build_report(
     overall = overall_risk_from_diffs(bool(alignments), levels)
     changed_elems = [e for e in all_key_elements if e.changed]
     summary = {
-        "total_alignments": len(alignments),
+        "total_alignments": len(alignments) - len(covered_boundary_alignments),
         "status_counts": dict(status_counts),
         "risk_distribution": dict(Counter(levels)),
         "key_element_changes": len(changed_elems),

@@ -17,9 +17,7 @@ const heading = computed(() => {
   return parts.length ? parts.join(' · ') : `#${props.diff.alignment_id}`
 })
 
-const hasInlineDiff = computed(
-  () => props.diff.status === 'modified' && props.diff.segments.length > 0,
-)
+const hasInlineDiff = computed(() => props.diff.segments.length > 0)
 </script>
 
 <template>

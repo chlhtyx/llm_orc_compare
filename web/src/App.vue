@@ -28,8 +28,7 @@ const reportHref = computed(() => {
         <span class="app-title">文档比对系统</span>
       </div>
       <nav class="app-nav">
-        <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对-标记</RouterLink>
-        <RouterLink to="/raw" :class="{ active: activeName === 'raw-submit' }">无标注比对</RouterLink>
+        <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对</RouterLink>
         <RouterLink
           v-if="reportHref"
           :to="reportHref"

@@ -12,7 +12,7 @@ try:
 except ImportError:
     import fitz  # type: ignore
 
-from document_comparison.models import Block, PageMeta
+from document_comparison.models import Block, PageMeta, PageRecognitionDiagnostic
 from document_comparison.parsing.pdf import extract_text_blocks
 from document_comparison.raw_pipeline import run_raw_pipeline
 from document_comparison.structure.normalize import normalize_table_text
@@ -217,8 +217,9 @@ class _FixedBlockOCR:
     用于验证 raw_pipeline 对 label=table 的 block 套用表格规范化。
     """
 
-    def __init__(self, blocks_per_page):
+    def __init__(self, blocks_per_page, diagnostics=None):
         self._blocks = blocks_per_page
+        self.last_diagnostics = diagnostics or []
 
     def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
         return self._blocks
@@ -294,3 +295,55 @@ def test_raw_table_real_change_detected(tmp_path):
     p_lines = [ln for h in report.hunks for ln in h.pdf_lines]
     assert any("30000" in ln for ln in w_lines)
     assert any("40000" in ln for ln in p_lines)
+
+
+# —— 识别质量门禁 ——
+
+
+def test_raw_report_keeps_reliable_recognition_status(tmp_path):
+    """逐页识别可靠时，无标注版保持正常比对状态。"""
+    word_buf = _make_word([("p", "合同金额为100万元。")])
+    pdf_buf = _make_pdf_from_lines(["合同金额为100万元。"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    diagnostic = PageRecognitionDiagnostic(
+        page_index=0,
+        source="native",
+        reliable=True,
+        char_count=12,
+    )
+    ocr = _FixedBlockOCR(
+        [[_text_block("合同金额为100万元。")]],
+        diagnostics=[diagnostic],
+    )
+
+    report = run_raw_pipeline(wpath, ppath, ocr=ocr)
+
+    assert report.recognition_status == "reliable"
+    assert report.recognition_diagnostics == [diagnostic]
+    assert "recognition_quality" not in report.stats
+
+
+def test_raw_report_marks_unreliable_recognition_for_review(tmp_path):
+    """识别异常时仍保留文本差异，但明确标记为仅供人工复核。"""
+    word_buf = _make_word([("p", "合同金额为100万元。")])
+    pdf_buf = _make_pdf_from_lines(["占位"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    diagnostic = PageRecognitionDiagnostic(
+        page_index=0,
+        source="fallback",
+        reliable=False,
+        reasons=["OCR 返回内容为空或字符过少"],
+        char_count=2,
+    )
+    ocr = _FixedBlockOCR(
+        [[_text_block("金额为200万元。")]],
+        diagnostics=[diagnostic],
+    )
+
+    report = run_raw_pipeline(wpath, ppath, ocr=ocr)
+
+    assert report.hunks
+    assert report.recognition_status == "needs_review"
+    assert report.recognition_diagnostics == [diagnostic]
+    assert report.stats["recognition_quality"] == "needs_review"
+    assert report.stats["unreliable_pages"] == [1]

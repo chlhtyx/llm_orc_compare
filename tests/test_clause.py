@@ -1,5 +1,5 @@
 """条款切分测试。"""
-from document_comparison.models import RawItem
+from document_comparison.models import RawItem, TableStructure
 from document_comparison.structure.clause import (
     build_clauses,
     detect_number,
@@ -29,6 +29,9 @@ def test_detect_field_key_patterns():
     assert detect_field_key("联系电话:13800")[1] == "电话"
     assert detect_field_key("开户行:工行")[1] == "开户行"
     assert detect_field_key("日期:2026年07月09日")[1] == "日期"
+    assert detect_field_key("帐号:039401040006087")[1] == "账号"
+    assert detect_field_key("签约代表:王斌")[1] == "签约代表"
+    assert detect_field_key("时间:2026-07-13")[1] == "日期"
     # 复合字段名(含 /)
     assert detect_field_key("统一社会信用代码/身份证号:91310115")[1] == "统一社会信用代码"
     # 签字盖章
@@ -127,3 +130,39 @@ def test_build_clauses_preserves_unnumbered_merge():
     assert len(clauses) == 1
     assert "正文第一行" in clauses[0].text
     assert "正文第二行" in clauses[0].text
+
+
+def test_contract_section_titles_anchor_numbered_and_unnumbered_versions():
+    word = build_clauses([
+        RawItem(text="质量要求:产品应符合国家标准。"),
+        RawItem(text="违约责任:逾期按0.3%/天支付违约金。"),
+    ], "word")
+    pdf = build_clauses([
+        RawItem(text="2. 质量要求:产品应符合国家标准。"),
+        RawItem(text="7. 违约责任:逾期按0.3%/天支付违约金。"),
+    ], "pdf")
+
+    assert [clause.field_key for clause in word] == ["section:质量要求", "section:违约责任"]
+    assert [clause.field_key for clause in pdf] == ["section:质量要求", "section:违约责任"]
+
+
+def test_signature_key_value_table_splits_into_field_clauses():
+    table = TableStructure(
+        headers=["甲方:武汉甲公司", "乙方:武汉乙公司"],
+        rows=[
+            ["帐号:039401040006087", "帐号:416180100100240923"],
+            ["签约代表:王斌", "签约代表:邹加盛"],
+            ["时间:2026-07-13", "时间:2026-07-13"],
+        ],
+    )
+    clauses = build_clauses([
+        RawItem(
+            text="\n".join(" | ".join(row) for row in [table.headers, *table.rows]),
+            kind="table",
+            table=table,
+        )
+    ], "word")
+
+    assert [clause.field_key for clause in clauses] == [
+        "甲方", "乙方", "账号", "账号", "签约代表", "签约代表", "日期", "日期"
+    ]

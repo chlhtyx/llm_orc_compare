@@ -13,7 +13,8 @@ DocType = Literal["word", "pdf"]
 MatchType = Literal["number", "field", "semantic", "unmatched"]
 DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
-OverallRisk = Literal["high", "medium", "low", "clean"]
+OverallRisk = Literal["high", "medium", "low", "clean", "needs_review"]
+RecognitionStatus = Literal["reliable", "needs_review"]
 KeyElementKind = Literal[
     "amount", "date", "ratio", "term", "breach", "jurisdiction", "effective", "seal"
 ]
@@ -144,6 +145,21 @@ class PageMeta(BaseModel):
     pdf_height_pt: float = 0.0
 
 
+class PageRecognitionDiagnostic(BaseModel):
+    """逐页读取质量诊断。
+
+    source 记录页面实际采用的读取路径；reliable=False 表示识别内容只能作为
+    人工复核线索，不能据此给出确定性的高风险结论。
+    """
+
+    page_index: int
+    source: Literal["native", "fallback"]
+    reliable: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    char_count: int = 0
+    table_count: int = 0
+
+
 class TamperReport(BaseModel):
     """比对报告。"""
 
@@ -155,6 +171,8 @@ class TamperReport(BaseModel):
     key_elements: list[KeyElement] = Field(default_factory=list)
     unmatched_clauses: list[Diff] = Field(default_factory=list)
     page_meta: list[PageMeta] = Field(default_factory=list)
+    recognition_status: RecognitionStatus = "reliable"
+    recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
 
 
 # —— 无标注版(纯文本 difflib 比对)数据结构 ——
@@ -186,6 +204,8 @@ class TextDiffReport(BaseModel):
     pdf_text: str = ""
     hunks: list[TextDiffHunk] = Field(default_factory=list)
     stats: dict = Field(default_factory=dict)
+    recognition_status: RecognitionStatus = "reliable"
+    recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
 
 
 # —— API 层 DTO ——

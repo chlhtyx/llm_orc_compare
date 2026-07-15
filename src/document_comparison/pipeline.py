@@ -15,6 +15,7 @@ from .config import Settings, settings
 from .embed import get_embed_engine, is_mock_engine
 from .models import TamperReport
 from .ocr import get_ocr_engine
+from .ocr.quality import apply_recognition_gate
 from .observability import timed_stage
 from .parsing import get_page_metas, parse_word
 from .report import build_report
@@ -105,6 +106,8 @@ def run_pipeline(
             target=str(pdf_path),
             enable_llm_judge=enable_llm_judge,
         )
+        diagnostics = list(getattr(ocr, "last_diagnostics", []))
+        apply_recognition_gate(report, diagnostics)
     _progress("compare_done", 1.0)
 
     return report

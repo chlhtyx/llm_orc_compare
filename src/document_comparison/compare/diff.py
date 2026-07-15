@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import re
 
 from ..models import DiffSegment, TableStructure
+from ..structure.normalize import normalize_text
 
 
 def char_diff(a: str, b: str) -> list[DiffSegment]:
@@ -78,3 +80,52 @@ def table_diff(a: TableStructure, b: TableStructure) -> list[DiffSegment]:
             for k in range(pair_count, len(b_block)):
                 segs.append(DiffSegment(op="insert", text=b_block[k] + "\n"))
     return segs
+
+
+def describe_table_change(
+    word_tables: list[TableStructure], pdf_tables: list[TableStructure]
+) -> str:
+    """返回首个确定性的表格结构/单元格差异说明。"""
+    if len(word_tables) != len(pdf_tables):
+        if len(word_tables) > len(pdf_tables):
+            return "PDF 缺失 DOCX 中的表格"
+        return "PDF 新增表格"
+
+    for table_index, (word_table, pdf_table) in enumerate(zip(word_tables, pdf_tables)):
+        if [_table_cell_key(cell) for cell in word_table.headers] != [
+            _table_cell_key(cell) for cell in pdf_table.headers
+        ]:
+            return f"第{table_index + 1}张表格表头发生变化"
+        max_rows = max(len(word_table.rows), len(pdf_table.rows))
+        for row_index in range(max_rows):
+            if row_index >= len(pdf_table.rows):
+                return f"第{table_index + 1}张表格缺失第{row_index + 1}行"
+            if row_index >= len(word_table.rows):
+                return f"第{table_index + 1}张表格新增第{row_index + 1}行"
+            word_row = word_table.rows[row_index]
+            pdf_row = pdf_table.rows[row_index]
+            max_cols = max(len(word_row), len(pdf_row))
+            for col_index in range(max_cols):
+                word_cell = word_row[col_index] if col_index < len(word_row) else ""
+                pdf_cell = pdf_row[col_index] if col_index < len(pdf_row) else ""
+                word_key = _table_cell_key(word_cell)
+                pdf_key = _table_cell_key(pdf_cell)
+                if word_key == pdf_key:
+                    continue
+                header = (
+                    word_table.headers[col_index]
+                    if col_index < len(word_table.headers)
+                    else f"第{col_index + 1}列"
+                )
+                location = f"第{table_index + 1}张表格第{row_index + 1}行「{header}」"
+                if word_key and not pdf_key:
+                    return f"{location}文本缺失"
+                if pdf_key and not word_key:
+                    return f"{location}新增文本"
+                return f"{location}内容发生变化"
+    return ""
+
+
+def _table_cell_key(cell: str) -> str:
+    """表格确定性比较键：忽略排版空白，保留实际文字。"""
+    return re.sub(r"\s+", "", normalize_text(cell))

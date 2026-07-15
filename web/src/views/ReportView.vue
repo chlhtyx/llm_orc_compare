@@ -93,6 +93,22 @@ function onSelectClause(id: string) {
     <p v-if="loadError" class="card err">{{ loadError }}</p>
 
     <template v-if="reportStore.report">
+        <section
+          v-if="reportStore.report.recognition_status === 'needs_review'"
+          class="card recognition-warning"
+        >
+          <h3 class="section-title">识别质量不足，已暂停自动高风险结论</h3>
+          <p>以下差异仅供人工复核。请优先检查识别异常页面，确认文字后再判断合同风险。</p>
+          <ul>
+            <li
+              v-for="item in reportStore.report.recognition_diagnostics.filter((d) => !d.reliable)"
+              :key="item.page_index"
+            >
+              第 {{ item.page_index + 1 }} 页：{{ item.reasons.join('；') }}
+            </li>
+          </ul>
+        </section>
+
         <section class="card">
         <div class="summary">
         <div class="sum-item">
@@ -177,6 +193,14 @@ display: flex;
 justify-content: space-between;
 align-items: flex-start;
 gap: 16px;
+}
+.recognition-warning {
+  border-left: 4px solid var(--risk-medium);
+  background: var(--risk-medium-bg);
+}
+.recognition-warning p,
+.recognition-warning ul {
+  margin-bottom: 0;
 }
 .page-title {
 margin: 0 0 10px;

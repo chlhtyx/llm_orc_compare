@@ -12,15 +12,26 @@ from __future__ import annotations
 from ..config import settings
 from .base import OCREngine
 from .llm import LLMOCREngine
+from .native import NativePDFEngine
 from .paddleocr_http import PaddleOCREngine
+from .trusted import TrustedPDFReader
 
 
 def get_ocr_engine() -> OCREngine:
     backend = settings.ocr_backend
     if backend == "paddleocr":
-        return PaddleOCREngine()
-    # 默认 llm
-    return LLMOCREngine()
+        fallback: OCREngine = PaddleOCREngine()
+    else:
+        fallback = LLMOCREngine()
+    # 无论视觉 OCR 选哪一个 adapter，都先尝试确定性的 PDF 原生读取。
+    return TrustedPDFReader(fallback)
 
 
-__all__ = ["OCREngine", "get_ocr_engine", "LLMOCREngine", "PaddleOCREngine"]
+__all__ = [
+    "OCREngine",
+    "get_ocr_engine",
+    "LLMOCREngine",
+    "NativePDFEngine",
+    "PaddleOCREngine",
+    "TrustedPDFReader",
+]

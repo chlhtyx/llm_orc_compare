@@ -64,6 +64,19 @@ const similarityPct = computed(() => {
     <p v-if="loadError" class="card err">{{ loadError }}</p>
 
     <template v-if="report">
+      <section v-if="report.recognition_status === 'needs_review'" class="card recognition-warning">
+        <h3 class="section-title">识别质量不足</h3>
+        <p>当前文本差异仅供人工复核：</p>
+        <ul>
+          <li
+            v-for="item in report.recognition_diagnostics.filter((d) => !d.reliable)"
+            :key="item.page_index"
+          >
+            第 {{ item.page_index + 1 }} 页：{{ item.reasons.join('；') }}
+          </li>
+        </ul>
+      </section>
+
       <section class="card">
         <div class="summary">
           <div class="sum-item">
@@ -146,5 +159,13 @@ const similarityPct = computed(() => {
 }
 .err {
   color: var(--risk-high);
+}
+.recognition-warning {
+  border-left: 4px solid var(--risk-medium);
+  background: var(--risk-medium-bg);
+}
+.recognition-warning p,
+.recognition-warning ul {
+  margin-bottom: 0;
 }
 </style>

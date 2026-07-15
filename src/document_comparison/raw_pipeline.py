@@ -16,6 +16,7 @@ from .compare.diff import char_diff
 from .config import Settings, settings
 from .models import TextDiffHunk, TextDiffReport
 from .ocr import get_ocr_engine
+from .ocr.quality import attach_raw_recognition_diagnostics
 from .observability import timed_stage
 from .parsing import get_page_metas, parse_word
 from .structure.normalize import normalize_table_text, normalize_text
@@ -87,6 +88,8 @@ def run_raw_pipeline(
     with timed_stage(logger, "raw_diff"):
         report = _diff_texts(word_text, pdf_text, char_level=char_level,
                              source=str(word_path), target=str(pdf_path))
+        diagnostics = list(getattr(ocr, "last_diagnostics", []))
+        attach_raw_recognition_diagnostics(report, diagnostics)
     logger.info(
         "diff stage cost=%.3fs word_lines=%s pdf_lines=%s hunks=%s similarity=%s",
         time.perf_counter() - t0,

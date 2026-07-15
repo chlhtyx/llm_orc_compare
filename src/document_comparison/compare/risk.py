@@ -28,6 +28,7 @@ def classify_diff(
     key_elements: list[KeyElement],
     sim_identical: float,
     sim_modified: float,
+    table_change_reason: str = "",
 ) -> tuple[DiffStatus, RiskLevel, list[str]]:
     """对一对配对条款做篡改判定。
 
@@ -37,7 +38,7 @@ def classify_diff(
     reasons: list[str] = []
 
     # 归一化后字符一致 → 无差异
-    if word_text == pdf_text:
+    if word_text == pdf_text and not table_change_reason:
         return "identical", "none", []
 
     changed_kinds = [e.kind for e in key_elements if e.changed]
@@ -45,6 +46,10 @@ def classify_diff(
     # 高风险要素变化 → 必报
     if changed_kinds:
         return "modified", "high", [f"高风险要素变更:{', '.join(changed_kinds)}"]
+
+    # 表格结构来自确定性的行列/单元格比对，不能被整条语义高相似度覆盖。
+    if table_change_reason:
+        return "modified", "medium", [table_change_reason]
 
     # 高相似度且无要素变化 → 视为 OCR 噪声
     if similarity >= sim_identical:
