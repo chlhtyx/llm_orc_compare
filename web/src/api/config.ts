@@ -3,13 +3,22 @@ import { request } from './client'
 
 /** 后端返回的生效配置(GET)。api_key 已脱敏。 */
 export interface LlmConfig {
-  ocr_backend: string // llm | paddleocr
+  // —— llm 引擎(通用 VL 模型)——
   llm_api_base: string
   llm_api_key: string // 脱敏,如 ****5678
   llm_api_key_set: boolean
   llm_model: string
   llm_timeout: number
   llm_max_concurrency: number
+  llm_max_retries: number
+  // —— paddleocr 引擎(专用 OCR 模型,独立配置)——
+  paddleocr_api_base: string
+  paddleocr_api_key: string // 脱敏
+  paddleocr_api_key_set: boolean
+  paddleocr_model: string
+  paddleocr_timeout: number
+  paddleocr_max_concurrency: number
+  paddleocr_max_retries: number
   // —— LLM 辅助说明服务(纯文本 LLM)——
   judge_api_base: string
   judge_api_key: string // 脱敏
@@ -31,13 +40,19 @@ export interface LlmConfig {
 
 /** 更新请求(PUT)。全部可选;不传的字段不修改。 */
 export interface LlmConfigUpdate {
-  ocr_backend?: string
+  // —— llm 引擎 ——
   llm_api_base?: string
   /** 传空串清除已保存 key;传 "********" 表示不修改 */
   llm_api_key?: string
   llm_model?: string
   llm_timeout?: number
   llm_max_concurrency?: number
+  // —— paddleocr 引擎 ——
+  paddleocr_api_base?: string
+  paddleocr_api_key?: string
+  paddleocr_model?: string
+  paddleocr_timeout?: number
+  paddleocr_max_concurrency?: number
   // —— LLM 辅助说明服务 ——
   judge_api_base?: string
   judge_api_key?: string

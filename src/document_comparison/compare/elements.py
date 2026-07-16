@@ -302,7 +302,11 @@ def _normalize_layout_whitespace(text: str) -> str:
 
 
 def _canonical_base_text(text: str) -> str:
-    return normalize_text(text).translate(_SAFE_PUNCTUATION_TRANSLATION)
+    # 先消除 CJK 字间空格(账 号→账号),否则多字关键词正则(账号/统一社会信用代码)
+    # 会在正则扫描阶段失配,导致两端抽取结果不一致并误报"高风险要素变更"。
+    return _normalize_layout_whitespace(normalize_text(text)).translate(
+        _SAFE_PUNCTUATION_TRANSLATION
+    )
 
 
 def canonicalize_contract_text(text: str) -> str:
@@ -356,7 +360,8 @@ def reviewable_formatting_change(
 def extract_key_elements(text: str) -> dict[str, list[str]]:
     """返回 canonical {kind: [values]}，避免表示格式差异触发误报。"""
     res: dict[str, list[str]] = defaultdict(list)
-    norm = normalize_text(text)
+    # 同 _canonical_base_text:先消 CJK 字间空格,避免 OCR 分字导致关键词正则失配。
+    norm = _normalize_layout_whitespace(normalize_text(text))
     for span in _fact_spans(norm):
         res[span.kind].append(span.value)
     for kind, kws in _KEYWORDS.items():

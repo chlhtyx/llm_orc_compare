@@ -31,15 +31,14 @@ class Settings:
       )
    )
 
-    # —— OCR 引擎选择:llm | paddleocr ——
-    # llm:走 OpenAI 兼容多模态 API(默认,无本地 GPU);
-    # paddleocr:走独立部署的 PaddleOCR HTTP 服务(内网/隐私场景,需 GPU 机)。
+    # —— OCR 引擎默认选择:llm | paddleocr ——
+    # 不再持久化、不在设置页暴露。仅作为代码兜底默认值:
+    # 比对提交页的引擎选择器初始值、API 未传 ocr_backend 时的兜底。
     ocr_backend: str = "llm"
 
-    # —— 远端多模态推理(vllm backend 用)——
+    # —— 远端多模态推理(llm 引擎用:通用 VL 模型)——
     # 兼容 OpenAI Chat Completions 协议(base_url 指向 vLLM / SGLang / 云端 API)。
-    # 所有多模态模型(PaddleOCR-VL / 通义千问 VL / GPT-4o 等)共用此配置,
-    # 按 model 路由到对应服务;无需本地安装任何 OCR 引擎。
+    # 适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o 等)。
     llm_api_base: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
@@ -50,13 +49,25 @@ class Settings:
     # 单页瞬态失败(超时 / 429 / 5xx)重试次数
     llm_max_retries: int = 2
 
+    # —— 远端多模态推理(paddleocr 引擎用:专用 OCR 模型)——
+    # 与 llm_* 完全独立配置。走同一套 OpenAI 兼容 /chat/completions 协议,
+    # 但适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等)。
+    # 未配置(api_base 为空)时,选用 paddleocr 引擎会直接报错,不回退 llm_*。
+    paddleocr_api_base: str = ""
+    paddleocr_api_key: str = ""
+    paddleocr_model: str = ""
+    paddleocr_timeout: float = 300.0
+    paddleocr_max_concurrency: int = 4
+    paddleocr_max_retries: int = 2
+
     # —— LLM 辅助说明服务(对 modified 条款补充严重度建议)——
     # 与 OCR 服务独立配置:OCR 需多模态 VL 模型(看图),说明需纯文本 LLM。
     # 走 OpenAI 兼容 Chat Completions 协议。未配置时复核自动回退规则判定。
     judge_api_base: str = ""
     judge_api_key: str = ""
     judge_model: str = ""
-    judge_timeout: float = 120.0
+    # 无标注版整篇比对是重推理(超长输入+结构化输出),需要比 OCR 单页更长的超时。
+    judge_timeout: float = 300.0
 
     # —— 向量引擎选择:mock | qwen | bge ——
     # 默认 qwen;若未配置 embed_api_base/model,get_embed_engine 会自动回退 mock。
@@ -109,13 +120,18 @@ settings = Settings()
 import json as _json
 
 _LLM_CONFIG_FIELDS = (
-    "ocr_backend",
     "llm_api_base",
     "llm_api_key",
     "llm_model",
     "llm_timeout",
     "llm_max_concurrency",
     "llm_max_retries",
+    "paddleocr_api_base",
+    "paddleocr_api_key",
+    "paddleocr_model",
+    "paddleocr_timeout",
+    "paddleocr_max_concurrency",
+    "paddleocr_max_retries",
     "judge_api_base",
     "judge_api_key",
     "judge_model",
@@ -130,17 +146,22 @@ _LLM_CONFIG_FIELDS = (
 
 # dataclass 字段默认值,供首次启动(无 json 文件)时写入种子配置。
 _LLM_DEFAULTS: dict = {
-    "ocr_backend": "llm",
     "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "llm_api_key": "",
     "llm_model": "qwen-vl-max",
     "llm_timeout": 120,
     "llm_max_concurrency": 4,
     "llm_max_retries": 2,
+    "paddleocr_api_base": "",
+    "paddleocr_api_key": "",
+    "paddleocr_model": "",
+    "paddleocr_timeout": 300,
+    "paddleocr_max_concurrency": 4,
+    "paddleocr_max_retries": 2,
     "judge_api_base": "",
     "judge_api_key": "",
     "judge_model": "",
-    "judge_timeout": 120,
+    "judge_timeout": 300,
     "embed_backend": "qwen",
     "embed_api_base": "",
     "embed_api_key": "",
@@ -185,8 +206,6 @@ def save_llm_overrides(overrides: dict) -> None:
 def apply_llm_overrides() -> None:
     """把 llm_config.json 应用到运行时 settings 单例。启动时与保存后各调一次。"""
     cfg = load_llm_overrides()
-    if "ocr_backend" in cfg:
-        settings.ocr_backend = cfg["ocr_backend"]
     if "llm_api_base" in cfg:
         settings.llm_api_base = cfg["llm_api_base"]
     if "llm_api_key" in cfg:
@@ -199,6 +218,18 @@ def apply_llm_overrides() -> None:
         settings.llm_max_concurrency = int(cfg["llm_max_concurrency"])
     if "llm_max_retries" in cfg:
         settings.llm_max_retries = int(cfg["llm_max_retries"])
+    if "paddleocr_api_base" in cfg:
+        settings.paddleocr_api_base = cfg["paddleocr_api_base"]
+    if "paddleocr_api_key" in cfg:
+        settings.paddleocr_api_key = cfg["paddleocr_api_key"]
+    if "paddleocr_model" in cfg:
+        settings.paddleocr_model = cfg["paddleocr_model"]
+    if "paddleocr_timeout" in cfg:
+        settings.paddleocr_timeout = float(cfg["paddleocr_timeout"])
+    if "paddleocr_max_concurrency" in cfg:
+        settings.paddleocr_max_concurrency = int(cfg["paddleocr_max_concurrency"])
+    if "paddleocr_max_retries" in cfg:
+        settings.paddleocr_max_retries = int(cfg["paddleocr_max_retries"])
     if "judge_api_base" in cfg:
         settings.judge_api_base = cfg["judge_api_base"]
     if "judge_api_key" in cfg:

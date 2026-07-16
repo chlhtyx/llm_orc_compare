@@ -13,6 +13,7 @@ const targetFile = ref<File | null>(null)
 
 const opts = reactive({
   enableLlmJudge: false,
+  ocrBackend: 'paddleocr' as 'llm' | 'paddleocr',
 })
 const callbackUrl = ref('')
 
@@ -35,6 +36,7 @@ async function onSubmit(): Promise<void> {
       target: targetFile.value,
       options: {
         enable_llm_judge: opts.enableLlmJudge,
+        ocr_backend: opts.ocrBackend,
       },
       callbackUrl: callbackUrl.value.trim() || undefined,
     })
@@ -82,6 +84,20 @@ async function onSubmit(): Promise<void> {
     <section class="card">
       <h3 class="section-title">比对选项(可选)</h3>
       <div class="opts">
+        <div class="field">
+          <label>识别引擎</label>
+          <div class="radio-row">
+            <label class="radio">
+              <input type="radio" value="paddleocr" v-model="opts.ocrBackend" />
+              <span>paddleocr(专用 OCR 模型)</span>
+            </label>
+            <label class="radio">
+              <input type="radio" value="llm" v-model="opts.ocrBackend" />
+              <span>llm(通用 VL 模型)</span>
+            </label>
+          </div>
+          <span class="hint">识别 PDF 扫描件版面所用的引擎。两套引擎在设置页分别配置,需确保所选引擎已配置。</span>
+        </div>
         <label class="check">
           <input v-model="opts.enableLlmJudge" type="checkbox" />
           <span>启用 LLM 辅助说明(不会撤销已确认变化)</span>
@@ -124,6 +140,21 @@ async function onSubmit(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
+}
+.radio-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.radio input {
   cursor: pointer;
 }
 .zero-tolerance {

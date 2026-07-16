@@ -66,6 +66,19 @@ _SYSTEM_PROMPT = (
     '字段名带冒号,如 content="甲方(甲方主体):XX公司"、content="联系电话:138..."。'
 )
 
+# 整图(长图)整体 OCR 用的提示词:只要纯文本,不要求版面块 JSON。
+# 用于无标注版管线的扫描件兜底——所有页拼成一张长图,单次调用取全文。
+_WHOLE_DOC_OCR_PROMPT = (
+    "你是一个文档文字识别助手。给定一张可能包含多页的完整文档图片,"
+    "请按人类阅读顺序(从上到下、从左到右)识别其中全部文字内容,直接输出纯文本。"
+    "不要输出 JSON,不要解释,不要加页码或分隔标记。"
+    "要求:\n"
+    "- 保留原文的段落与换行结构,段落之间空一行。\n"
+    "- 表格内容每行用「 | 」(竖线两侧各一个空格)分隔单元格,首行是表头,"
+    "不要输出 Markdown 表格语法,不要分隔行(如 |---|---|)。\n"
+    "- 只输出识别到的文字,不要添加标题、说明或格式包裹。"
+)
+
 
 class LLMOCREngine:
     """通过多模态 LLM API 识别 PDF 版面。
@@ -174,7 +187,6 @@ class LLMOCREngine:
             raise ValueError("llm_max_retries 不能小于 0")
 
     def _chat(self, data_url: str, *, client: httpx.Client | None = None) -> str:
-        url = self.api_base.rstrip("/") + "/chat/completions"
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -197,26 +209,70 @@ class LLMOCREngine:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
+        return self._post_chat(payload, kind="ocr", client=client)
+
+    def recognize_text(
+        self, image_bytes: bytes, *, client: httpx.Client | None = None
+    ) -> str:
+        """单次 OCR 取纯文本(无标注版扫描件识别用)。
+
+        与逐页结构化 `recognize` 的区别:不要求 JSON 版面块,直接让模型按阅读顺序
+        输出该图片的纯文本,表格用「cell | cell」格式。既可处理整张长图,也可处理
+        单页图片;无标注版扫描件采用逐页并发调用本方法、最后按序拼接成整篇纯文本。
+
+        `client` 可传入共享的 httpx.Client 以复用 TCP/TLS 连接池(并发场景)。
+        """
+        self._validate_config()
+        data_url = _to_data_url(image_bytes)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": _WHOLE_DOC_OCR_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请识别这张文档图片的全部文字,按阅读顺序输出。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                    ],
+                },
+            ],
+            "temperature": 0,
+        }
+        return self._post_chat(payload, kind="ocr-whole", client=client)
+
+    def _post_chat(
+        self,
+        payload: dict[str, Any],
+        *,
+        kind: str,
+        client: httpx.Client | None = None,
+    ) -> str:
+        """统一的 OpenAI 兼容 chat/completions POST + 重试骨架,返回 message content。
+
+        可重试瞬态故障:超时 / 网络传输错误 / 429 / 5xx。
+        (httpx.TransportError 覆盖 ConnectError / ReadTimeout / NetworkError 等)
+        4xx(鉴权、参数错误等)不可重试,立即抛出。
+        """
+        url = self.api_base.rstrip("/") + "/chat/completions"
         # 本地 OpenAI 兼容服务可能无需 key；空 key 时不要构造非法 Bearer 头。
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        # 多模态 OCR 单页推理可能很慢:连接快速失败,读取给予充分时间。
-        # 可重试的瞬态故障:超时 / 网络传输错误 / 429 / 5xx。
-        # (httpx.TransportError 覆盖 ConnectError / ReadTimeout / NetworkError 等)
-        # 4xx(鉴权、参数错误等)不可重试,立即抛出。
         last_exc: Exception | None = None
         owns_client = client is None
         if client is None:
             client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=10.0))
         try:
             for attempt in range(self.max_retries + 1):
-                request_started = log_model_request(logger, "ocr", url, payload, attempt + 1)
+                request_started = log_model_request(logger, kind, url, payload, attempt + 1)
                 try:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
                     last_exc = exc
                     logger.warning(
-                        "ocr transport error attempt=%s/%s reason=%s",
-                        attempt + 1, self.max_retries + 1, exc,
+                        "%s transport error attempt=%s/%s reason=%s",
+                        kind, attempt + 1, self.max_retries + 1, exc,
                     )
                 else:
                     if resp.status_code == 429 or resp.status_code >= 500:
@@ -226,20 +282,20 @@ class LLMOCREngine:
                             response=resp,
                         )
                         logger.warning(
-                            "ocr transient http status=%s attempt=%s/%s",
-                            resp.status_code, attempt + 1, self.max_retries + 1,
+                            "%s transient http status=%s attempt=%s/%s",
+                            kind, resp.status_code, attempt + 1, self.max_retries + 1,
                         )
                     else:
                         resp.raise_for_status()  # 4xx:不可重试,直接抛
                         data = resp.json()
-                        log_model_response(logger, "ocr", resp.status_code, data, request_started)
+                        log_model_response(logger, kind, resp.status_code, data, request_started)
                         return data["choices"][0]["message"]["content"]
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
-                    logger.info("ocr retry after %.1fs", backoff)
+                    logger.info("%s retry after %.1fs", kind, backoff)
                     time.sleep(backoff)
             assert last_exc is not None
-            logger.error("ocr give up after %s attempts: %s", self.max_retries + 1, last_exc)
+            logger.error("%s give up after %s attempts: %s", kind, self.max_retries + 1, last_exc)
             raise last_exc
         finally:
             if owns_client:

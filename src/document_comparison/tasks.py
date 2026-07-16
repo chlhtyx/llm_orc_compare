@@ -67,12 +67,12 @@ class TaskManager:
 
     async def run(
         self, task_id: str, word_path: str, pdf_path: str,
-        *, enable_llm_judge: bool = False,
+        *, enable_llm_judge: bool = False, ocr_backend: str | None = None,
     ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start task_id=%s word=%s pdf=%s llm_judge=%s", task_id, word_path, pdf_path, enable_llm_judge)
+        logger.info("task start task_id=%s word=%s pdf=%s llm_judge=%s ocr_backend=%s", task_id, word_path, pdf_path, enable_llm_judge, ocr_backend)
         try:
             async with self._sem:
                 task.info.status = "running"
@@ -82,6 +82,7 @@ class TaskManager:
                     run_pipeline, word_path, pdf_path, settings,
                     on_progress=lambda stage, frac: task.push_event(stage, frac),
                     enable_llm_judge=enable_llm_judge,
+                    ocr_backend=ocr_backend,
                 )
             task.report = report
             task.info.overall_risk = report.overall_risk
@@ -113,13 +114,14 @@ class TaskManager:
             )
 
     async def run_raw(
-        self, task_id: str, word_path: str, pdf_path: str, *, char_level: bool = True
+        self, task_id: str, word_path: str, pdf_path: str,
+        *, char_level: bool = True, ocr_backend: str | None = None,
     ) -> None:
         """无标注版任务:纯文本 difflib 流程,产出 TextDiffReport。"""
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start(raw) task_id=%s word=%s pdf=%s", task_id, word_path, pdf_path)
+        logger.info("task start(raw) task_id=%s word=%s pdf=%s ocr_backend=%s", task_id, word_path, pdf_path, ocr_backend)
         try:
             async with self._sem:
                 task.info.status = "running"
@@ -127,6 +129,7 @@ class TaskManager:
                     run_raw_pipeline, word_path, pdf_path,
                     on_progress=lambda stage, frac: task.push_event(stage, frac),
                     char_level=char_level,
+                    ocr_backend=ocr_backend,
                 )
             task.raw_report = report
             task.info.status = "done"

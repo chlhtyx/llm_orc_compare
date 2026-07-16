@@ -34,9 +34,10 @@ def run_pipeline(
     embed=None,
     on_progress: ProgressCb | None = None,
     enable_llm_judge: bool = False,
+    ocr_backend: str | None = None,
 ) -> TamperReport:
     cfg = cfg or settings
-    ocr = ocr or get_ocr_engine()
+    ocr = ocr or get_ocr_engine(ocr_backend)
     embed = embed or get_embed_engine(cfg.embed_backend)
     thresholds = {"identical": cfg.similarity_identical, "modified": cfg.similarity_modified}
 
@@ -68,8 +69,8 @@ def run_pipeline(
             "ocr returned 0 blocks for %s pages — 模型可能未遵循 JSON 格式指令,"
             "或返回了非 blocks 结构(如专用 OCR 模型 PaddleOCR-VL / DeepSeek-OCR)。"
             "请确认 llm_model 是多模态对话模型(如 Qwen3-VL-32B-Instruct),"
-            "而非专用 OCR 模型。当前 ocr_backend=%s model=%s",
-            len(page_metas), cfg.ocr_backend, getattr(cfg, "llm_model", ""),
+            "而非专用 OCR 模型。当前 ocr_backend=%s llm_model=%s",
+            len(page_metas), ocr_backend or cfg.ocr_backend, cfg.llm_model,
         )
     _progress("ocr_done", 0.70)
     with timed_stage(logger, "pdf_structure"):

@@ -189,13 +189,14 @@ def test_plain_text_to_table_empty():
     assert _plain_text_to_table("   ") is None
 
 
-def test_engine_reads_llm_config():
-    """paddleocr 后端直接复用 llm_* 配置(无独立 paddleocr_* 字段)。"""
+def test_engine_reads_paddleocr_config():
+    """paddleocr 后端使用独立的 paddleocr_* 配置(不复用 llm_*)。"""
     from document_comparison.ocr.paddleocr_http import PaddleOCREngine
 
     eng = PaddleOCREngine()
-    # 应与 llm_* 配置一致(settings.llm_api_base / llm_api_key / llm_model)
+    # 应与 paddleocr_* 配置一致(settings.paddleocr_api_base / _api_key / _model),
+    # 与 llm_* 完全隔离。
     from document_comparison.config import settings
-    assert eng.api_base == settings.llm_api_base
-    assert eng.api_key == settings.llm_api_key
-    assert eng.model == settings.llm_model
+    assert eng.api_base == settings.paddleocr_api_base
+    assert eng.api_key == settings.paddleocr_api_key
+    assert eng.model == settings.paddleocr_model

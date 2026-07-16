@@ -121,6 +121,21 @@ def test_canonical_identifier_accepts_ocr_character_spacing():
     ) == canonicalize_contract_text("合同编号:QGSC2607080010")
 
 
+def test_account_extraction_tolerates_ocr_cjk_spacing():
+    """OCR 在多字关键词中间插空格(账 号)不能让账号要素失配而误报高风险变更。
+
+    回归:此前 PDF 侧因 "账 号" 抽不到 account,与 Word 侧集合不同,
+    被判 "高风险要素变更:account, account"。
+    """
+    word = "XX市恒信商贸有限公司账号:6222081001008899776"
+    pdf = "XX市恒信商贸有限公司账 号:6222081001008899776"
+
+    assert extract_key_elements(pdf).get("account") == ["6222081001008899776"]
+    assert canonicalize_contract_text(word) == canonicalize_contract_text(pdf)
+    changed = elements_changed(extract_key_elements(word), extract_key_elements(pdf))
+    assert not any(e.kind == "account" and e.changed for e in changed)
+
+
 def test_reviewable_punctuation_does_not_include_structural_numeric_marks():
     assert reviewable_formatting_change("本条有效。", "本条有效") == "punctuation"
     assert reviewable_formatting_change("第1.1条", "第11条") is None

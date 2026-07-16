@@ -103,7 +103,6 @@ def create_app() -> FastAPI:
     async def get_llm_config():
         """读取当前生效的 LLM 配置(环境变量 + 持久化覆盖后的合并值)。"""
         return {
-            "ocr_backend": settings.ocr_backend,
             "llm_api_base": settings.llm_api_base,
             "llm_api_key": _mask_key(settings.llm_api_key),
             "llm_api_key_set": bool(settings.llm_api_key),
@@ -111,6 +110,13 @@ def create_app() -> FastAPI:
             "llm_timeout": settings.llm_timeout,
             "llm_max_concurrency": settings.llm_max_concurrency,
             "llm_max_retries": settings.llm_max_retries,
+            "paddleocr_api_base": settings.paddleocr_api_base,
+            "paddleocr_api_key": _mask_key(settings.paddleocr_api_key),
+            "paddleocr_api_key_set": bool(settings.paddleocr_api_key),
+            "paddleocr_model": settings.paddleocr_model,
+            "paddleocr_timeout": settings.paddleocr_timeout,
+            "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
+            "paddleocr_max_retries": settings.paddleocr_max_retries,
             "judge_api_base": settings.judge_api_base,
             "judge_api_key": _mask_key(settings.judge_api_key),
             "judge_api_key_set": bool(settings.judge_api_key),
@@ -131,17 +137,20 @@ def create_app() -> FastAPI:
     async def put_llm_config(body: dict):
         """更新 LLM 配置并持久化。
 
-        可选字段:ocr_backend, llm_api_base, llm_api_key, llm_model,
-        llm_timeout, llm_max_concurrency, llm_max_retries,
+        可选字段:llm_api_base, llm_api_key, llm_model, llm_timeout,
+        llm_max_concurrency, llm_max_retries,
+        paddleocr_api_base, paddleocr_api_key, paddleocr_model,
+        paddleocr_timeout, paddleocr_max_concurrency, paddleocr_max_retries,
         judge_api_base, judge_api_key, judge_model, judge_timeout,
         embed_backend, embed_api_base, embed_api_key, embed_model, embed_timeout,
         pdf_render_dpi。空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
         allowed = {
-            "ocr_backend",
             "llm_api_base", "llm_api_key", "llm_model",
             "llm_timeout", "llm_max_concurrency", "llm_max_retries",
+            "paddleocr_api_base", "paddleocr_api_key", "paddleocr_model",
+            "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
             "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
             "embed_backend", "embed_api_base", "embed_api_key",
             "embed_model", "embed_timeout", "pdf_render_dpi",
@@ -151,8 +160,6 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"未知字段: {sorted(unknown)}")
 
         # 类型校验
-        if "ocr_backend" in body and body["ocr_backend"] not in ("llm", "paddleocr"):
-            raise HTTPException(400, "ocr_backend 仅支持 llm | paddleocr")
         if "llm_timeout" in body and body["llm_timeout"] is not None:
             try:
                 float(body["llm_timeout"])
@@ -168,6 +175,21 @@ def create_app() -> FastAPI:
                 int(body["llm_max_retries"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "llm_max_retries 必须为整数")
+        if "paddleocr_timeout" in body and body["paddleocr_timeout"] is not None:
+            try:
+                float(body["paddleocr_timeout"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "paddleocr_timeout 必须为数字")
+        if "paddleocr_max_concurrency" in body and body["paddleocr_max_concurrency"] is not None:
+            try:
+                int(body["paddleocr_max_concurrency"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "paddleocr_max_concurrency 必须为整数")
+        if "paddleocr_max_retries" in body and body["paddleocr_max_retries"] is not None:
+            try:
+                int(body["paddleocr_max_retries"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "paddleocr_max_retries 必须为整数")
         if "judge_timeout" in body and body["judge_timeout"] is not None:
             try:
                 float(body["judge_timeout"])
@@ -192,6 +214,8 @@ def create_app() -> FastAPI:
         overrides = dict(body)
         if overrides.get("llm_api_key") == "********":
             overrides.pop("llm_api_key")
+        if overrides.get("paddleocr_api_key") == "********":
+            overrides.pop("paddleocr_api_key")
         if overrides.get("embed_api_key") == "********":
             overrides.pop("embed_api_key")
         if overrides.get("judge_api_key") == "********":
@@ -201,7 +225,6 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "config": {
-                "ocr_backend": settings.ocr_backend,
                 "llm_api_base": settings.llm_api_base,
                 "llm_api_key": _mask_key(settings.llm_api_key),
                 "llm_api_key_set": bool(settings.llm_api_key),
@@ -209,6 +232,13 @@ def create_app() -> FastAPI:
                 "llm_timeout": settings.llm_timeout,
                 "llm_max_concurrency": settings.llm_max_concurrency,
                 "llm_max_retries": settings.llm_max_retries,
+                "paddleocr_api_base": settings.paddleocr_api_base,
+                "paddleocr_api_key": _mask_key(settings.paddleocr_api_key),
+                "paddleocr_api_key_set": bool(settings.paddleocr_api_key),
+                "paddleocr_model": settings.paddleocr_model,
+                "paddleocr_timeout": settings.paddleocr_timeout,
+                "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
+                "paddleocr_max_retries": settings.paddleocr_max_retries,
                 "judge_api_base": settings.judge_api_base,
                 "judge_api_key": _mask_key(settings.judge_api_key),
                 "judge_api_key_set": bool(settings.judge_api_key),
@@ -238,12 +268,14 @@ def create_app() -> FastAPI:
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
-        # 解析 options(可选);提取 enable_llm_judge 透传到 pipeline
+        # 解析 options(可选);提取 enable_llm_judge / ocr_backend 透传到 pipeline
         enable_llm_judge = False
+        ocr_backend: str | None = None
         if options:
             try:
                 opts = CompareOptions.model_validate_json(options)
                 enable_llm_judge = opts.enable_llm_judge
+                ocr_backend = opts.ocr_backend
                 if (
                     opts.similarity_identical is not None
                     or opts.similarity_modified is not None
@@ -270,6 +302,7 @@ def create_app() -> FastAPI:
             task_manager.run(
                 task_id, str(word_path), str(pdf_path),
                 enable_llm_judge=enable_llm_judge,
+                ocr_backend=ocr_backend,
             )
         )
         return {"task_id": task_id, "status": "pending"}
@@ -421,7 +454,8 @@ def create_app() -> FastAPI:
         pdf_path = save_upload(target, task_id, "target")
         asyncio.create_task(
             task_manager.run_raw(
-                task_id, str(word_path), str(pdf_path), char_level=opts.char_level
+                task_id, str(word_path), str(pdf_path),
+                char_level=opts.char_level, ocr_backend=opts.ocr_backend,
             )
         )
         return {"task_id": task_id, "status": "pending"}

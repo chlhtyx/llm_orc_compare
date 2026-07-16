@@ -254,15 +254,19 @@ class CompareOptions(BaseModel):
     similarity_identical: float | None = Field(default=None, deprecated=True)
     similarity_modified: float | None = Field(default=None, deprecated=True)
     enable_llm_judge: bool = False
+    # OCR 引擎选择(每次提交时由对比页选择);None 表示用默认 llm。
+    ocr_backend: Literal["llm", "paddleocr"] | None = None
 
 
 class RawCompareOptions(BaseModel):
-    """无标注版提交选项(纯文本 difflib 流程)。"""
+    """无标注版提交选项(LLM 整篇比对流程)。"""
 
     char_level: bool = Field(
-        default=True,
-        description="replace 行是否做字符级细化(红/绿标记)",
+        default=False,
+        description="replace 行是否做字符级细化(红/绿标记);默认关闭以降低 LLM 输出量与超时风险",
     )
+    # OCR 引擎选择(每次提交时由对比页选择);None 表示用默认 llm。
+    ocr_backend: Literal["llm", "paddleocr"] | None = None
 
 
 TaskStatus = Literal["pending", "running", "done", "failed"]

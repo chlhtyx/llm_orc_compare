@@ -22,9 +22,9 @@ PaddleOCR-VL 是专用 OCR 模型,**不遵循 system prompt 的 JSON 格式指�
   直到 token 上限,导致合计行/后续内容丢失(实测 200DPI 大图 385 行死循环)。
 - 不带 `response_format`(强制 JSON 会让该模型陷入构造死循环)
 
-配置:复用 llm_*(llm_api_base / llm_api_key / llm_model),与 llm 后端共用
-同一套推理服务连接。当 ocr_backend=paddleocr 时由 get_ocr_engine() 路由到
-本引擎——用户只需填一套推理服务配置,切换 ocr_backend 即改变解析逻辑。
+配置:独立使用 paddleocr_*(paddleocr_api_base / paddleocr_api_key / paddleocr_model),
+与 llm 后端的配置完全隔离。当 ocr_backend=paddleocr 时由 get_ocr_engine() 路由到
+本引擎。未配置 paddleocr_api_base 时直接报错,不回退 llm_*。
 """
 from __future__ import annotations
 
@@ -60,6 +60,10 @@ _LOC_SPACE = 1000.0
 # (含表格)的全部内容,过小会截断尾部,过大会放任死循环。
 _MAX_TOKENS = 2000
 
+# 整图(长图)整体 OCR 的生成长度上限:无标注版把整篇拼成一张长图,
+# 单次调用需容纳全文,按整篇合同量级放宽到 8000。
+_WHOLE_DOC_MAX_TOKENS = 8000
+
 # 表格行:含至少一个 |(Markdown 表格的单元格分隔)。用于识别连续表格行。
 _TABLE_LINE_RE = re.compile(r"\||\t")
 _HTML_TABLE_RE = re.compile(r"<table\b[\s\S]*?</table\s*>", re.IGNORECASE)
@@ -85,18 +89,17 @@ class PaddleOCREngine:
         max_concurrency: int | None = None,
         max_retries: int | None = None,
     ) -> None:
-        # paddleocr 后端复用 llm_* 配置(与 llm 后端同协议、同连接,仅解析逻辑不同):
-        # 都走 OpenAI 兼容 /chat/completions,只是请求指令与响应解析不同。
-        # 用户只需在设置页填一套推理服务配置,切换 ocr_backend 即可。
-        self.api_base = api_base or settings.llm_api_base
-        self.api_key = api_key if api_key is not None else settings.llm_api_key
-        self.model = model or settings.llm_model
-        self.timeout = timeout if timeout is not None else settings.llm_timeout
+        # paddleocr 后端使用独立的 paddleocr_* 配置(与 llm 后端同协议、同连接方式,
+        # 但配置项完全隔离,不复用 llm_*)。
+        self.api_base = api_base or settings.paddleocr_api_base
+        self.api_key = api_key if api_key is not None else settings.paddleocr_api_key
+        self.model = model or settings.paddleocr_model
+        self.timeout = timeout if timeout is not None else settings.paddleocr_timeout
         self.max_concurrency = (
-            max_concurrency if max_concurrency is not None else settings.llm_max_concurrency
+            max_concurrency if max_concurrency is not None else settings.paddleocr_max_concurrency
         )
         self.max_retries = (
-            max_retries if max_retries is not None else settings.llm_max_retries
+            max_retries if max_retries is not None else settings.paddleocr_max_retries
         )
         self._dpi = settings.pdf_render_dpi
 
@@ -110,7 +113,7 @@ class PaddleOCREngine:
     ) -> list[list[Block]]:
         if not self.api_base:
             raise RuntimeError(
-                "llm_api_base 未配置,请在设置页填写推理服务地址"
+                "paddleocr_api_base 未配置,请在设置页填写专用 OCR 模型的推理服务地址"
             )
 
         images = render_pages(pdf_path, dpi=self._dpi)
@@ -165,8 +168,37 @@ class PaddleOCREngine:
             frac = 0.10 + (done_count[0] / total_pages) * 0.60
             on_progress("ocr", frac)
 
-    def _chat(self, data_url: str) -> str:
-        """发送多模态请求,返回模型原始文本(含 <|LOC_|> 标记)。"""
+    def recognize_text(
+        self, image_bytes: bytes, *, client: httpx.Client | None = None
+    ) -> str:
+        """单次 OCR 取纯文本(无标注版扫描件识别用)。
+
+        与逐页结构化 `recognize` 的区别:只要纯文本(剥除 <|LOC_|> 坐标标记),
+        用更大的 max_tokens 容纳内容。既可处理整张长图,也可处理单页;无标注版
+        扫描件逐页并发调用本方法、最后按序拼接成整篇纯文本。
+
+        `client` 可传入共享的 httpx.Client 以复用连接池(并发场景)。
+        """
+        if not self.api_base:
+            raise RuntimeError(
+                "paddleocr_api_base 未配置,请在设置页填写专用 OCR 模型的推理服务地址"
+            )
+        data_url = _to_data_url(image_bytes)
+        content = self._chat(data_url, max_tokens=_MAX_TOKENS, client=client)
+        # 剥除可能的 <|LOC_N|> 坐标标记,只留文字
+        return _LOC_RE.sub("", content)
+
+    def _chat(
+        self,
+        data_url: str,
+        *,
+        max_tokens: int = _MAX_TOKENS,
+        client: httpx.Client | None = None,
+    ) -> str:
+        """发送多模态请求,返回模型原始文本(含 <|LOC_|> 标记)。
+
+        `client` 可传入共享的 httpx.Client 以复用连接池(并发场景);不传则自建并关闭。
+        """
         url = self.api_base.rstrip("/") + "/chat/completions"
         # PaddleOCR-VL 不遵循复杂 system prompt,用最简指令
         payload: dict[str, Any] = {
@@ -183,13 +215,16 @@ class PaddleOCREngine:
             "temperature": 0,
             # 限制生成长度:见模块 docstring,PaddleOCR-VL 在表格行上不自我停止,
             # 会重复 hallucination 刷到默认上限,导致后续内容(合计行/签字页)丢失。
-            "max_tokens": _MAX_TOKENS,
+            "max_tokens": max_tokens,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         timeout = httpx.Timeout(self.timeout, connect=10.0)
 
         last_exc: Exception | None = None
-        with httpx.Client(timeout=timeout) as client:
+        owns_client = client is None
+        if client is None:
+            client = httpx.Client(timeout=timeout)
+        try:
             for attempt in range(self.max_retries + 1):
                 request_started = log_model_request(logger, "paddleocr", url, payload, attempt + 1)
                 try:
@@ -222,13 +257,16 @@ class PaddleOCREngine:
                                 "paddleocr response truncated at max_tokens=%s chars=%s; "
                                 "parser will remove repeated/empty table tail but omitted "
                                 "source content cannot be recovered",
-                                _MAX_TOKENS, len(content),
+                                max_tokens, len(content),
                             )
                         return content
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
                     logger.info("paddleocr retry after %.1fs", backoff)
                     time.sleep(backoff)
+        finally:
+            if owns_client:
+                client.close()
         assert last_exc is not None
         logger.error(
             "paddleocr give up after %s attempts: %s", self.max_retries + 1, last_exc

@@ -93,6 +93,8 @@ export interface TamperReport {
 
 export interface CompareOptions {
   enable_llm_judge?: boolean
+  /** OCR 引擎选择(由对比页每次提交时选择);不传则用默认 llm */
+  ocr_backend?: 'llm' | 'paddleocr'
 }
 
 export interface TaskInfo {
@@ -146,6 +148,8 @@ export interface TextDiffReport {
 
 export interface RawCompareOptions {
   char_level?: boolean
+  /** OCR 引擎选择(由对比页每次提交时选择);不传则用默认 llm */
+  ocr_backend?: 'llm' | 'paddleocr'
 }
 
 /** 无标注版任务信息(GET /api/v1/raw-compare/{id}),done 时附加 raw_report。 */

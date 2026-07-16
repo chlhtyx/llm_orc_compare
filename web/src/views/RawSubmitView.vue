@@ -10,7 +10,8 @@ const rawTaskStore = useRawTaskStore()
 
 const sourceFile = ref<File | null>(null)
 const targetFile = ref<File | null>(null)
-const charLevel = ref(true)
+const charLevel = ref(false)
+const ocrBackend = ref<'llm' | 'paddleocr'>('paddleocr')
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
 
@@ -28,7 +29,7 @@ async function onSubmit(): Promise<void> {
     const id = await rawTaskStore.submit({
       source: sourceFile.value,
       target: targetFile.value,
-      options: { char_level: charLevel.value },
+      options: { char_level: charLevel.value, ocr_backend: ocrBackend.value },
     })
     router.push(`/raw/report/${id}`)
   } catch (e) {
@@ -74,10 +75,27 @@ async function onSubmit(): Promise<void> {
 
     <section class="card">
       <h3 class="section-title">比对选项(可选)</h3>
-      <label class="check">
-        <input v-model="charLevel" type="checkbox" />
-        <span>字符级细化(对替换行做行内红/绿标记)</span>
-      </label>
+      <div class="opts">
+        <div class="field">
+          <label>识别引擎</label>
+          <div class="radio-row">
+             <label class="radio">
+              <input type="radio" value="paddleocr" v-model="ocrBackend" />
+              <span>paddleocr(专用 OCR 模型)</span>
+            </label>
+            <label class="radio">
+              <input type="radio" value="llm" v-model="ocrBackend" />
+              <span>llm(通用 VL 模型)</span>
+            </label>
+           
+          </div>
+          <span class="hint">识别 PDF 扫描件版面所用的引擎。两套引擎在设置页分别配置,需确保所选引擎已配置。</span>
+        </div>
+        <label class="check">
+          <input v-model="charLevel" type="checkbox" />
+          <span>字符级细化(对替换行做行内红/绿标记)</span>
+        </label>
+      </div>
     </section>
 
     <section class="card">
@@ -99,10 +117,30 @@ async function onSubmit(): Promise<void> {
 .page-desc {
   margin: 0 0 16px;
 }
+.opts {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 .check {
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
+}
+.radio-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.radio input {
   cursor: pointer;
 }
 .actions {

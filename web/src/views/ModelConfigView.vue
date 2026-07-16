@@ -6,12 +6,18 @@ import type { LlmConfig } from '@/api/config'
 const store = useModelConfigStore()
 
 const form = reactive({
-  ocr_backend: 'llm',
+  // —— llm 引擎(通用 VL 模型)——
   llm_api_base: '',
   llm_api_key: '',
   llm_model: '',
   llm_timeout: 120,
   llm_max_concurrency: 4,
+  // —— paddleocr 引擎(专用 OCR 模型)——
+  paddleocr_api_base: '',
+  paddleocr_api_key: '',
+  paddleocr_model: '',
+  paddleocr_timeout: 300,
+  paddleocr_max_concurrency: 4,
   // —— LLM 辅助说明服务 ——
   judge_api_base: '',
   judge_api_key: '',
@@ -27,6 +33,7 @@ const form = reactive({
 })
 
 const keyDirty = ref(false)
+const paddleKeyDirty = ref(false)
 const embedKeyDirty = ref(false)
 const judgeKeyDirty = ref(false)
 const saved = ref(false)
@@ -34,12 +41,16 @@ const saveError = ref<string | null>(null)
 
 function syncFromConfig(c: LlmConfig | null): void {
   if (!c) return
-  form.ocr_backend = c.ocr_backend || 'llm'
   form.llm_api_base = c.llm_api_base || ''
   form.llm_api_key = c.llm_api_key || ''
   form.llm_model = c.llm_model || ''
   form.llm_timeout = c.llm_timeout ?? 120
   form.llm_max_concurrency = c.llm_max_concurrency ?? 4
+  form.paddleocr_api_base = c.paddleocr_api_base || ''
+  form.paddleocr_api_key = c.paddleocr_api_key || ''
+  form.paddleocr_model = c.paddleocr_model || ''
+  form.paddleocr_timeout = c.paddleocr_timeout ?? 300
+  form.paddleocr_max_concurrency = c.paddleocr_max_concurrency ?? 4
   form.judge_api_base = c.judge_api_base || ''
   form.judge_api_key = c.judge_api_key || ''
   form.judge_model = c.judge_model || ''
@@ -51,6 +62,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.embed_timeout = c.embed_timeout ?? 60
   form.pdf_render_dpi = c.pdf_render_dpi ?? 200
   keyDirty.value = false
+  paddleKeyDirty.value = false
   embedKeyDirty.value = false
   judgeKeyDirty.value = false
 }
@@ -67,6 +79,10 @@ function onKeyInput(): void {
   keyDirty.value = true
 }
 
+function onPaddleKeyInput(): void {
+  paddleKeyDirty.value = true
+}
+
 function onEmbedKeyInput(): void {
   embedKeyDirty.value = true
 }
@@ -79,15 +95,22 @@ async function onSave(): Promise<void> {
   saveError.value = null
   saved.value = false
   const payload: Record<string, unknown> = {
-    ocr_backend: form.ocr_backend,
+    // —— llm 引擎 ——
     llm_api_base: form.llm_api_base.trim(),
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),
     llm_max_concurrency: Number(form.llm_max_concurrency),
+    llm_api_key: keyDirty.value ? form.llm_api_key : '********',
+    // —— paddleocr 引擎(独立于 llm,填了才提交)——
+    paddleocr_api_base: form.paddleocr_api_base.trim(),
+    paddleocr_model: form.paddleocr_model.trim(),
+    paddleocr_timeout: Number(form.paddleocr_timeout),
+    paddleocr_max_concurrency: Number(form.paddleocr_max_concurrency),
+    paddleocr_api_key: paddleKeyDirty.value ? form.paddleocr_api_key : '********',
+    // —— 全局 ——
     pdf_render_dpi: Number(form.pdf_render_dpi),
     embed_backend: form.embed_backend,
   }
-  payload.llm_api_key = keyDirty.value ? form.llm_api_key : '********'
 
   // LLM 辅助说明服务(独立于 OCR,填了才提交)
   if (form.judge_api_base.trim() || form.judge_model.trim()) {
@@ -127,41 +150,24 @@ async function onReset(): Promise<void> {
     <div v-if="store.loading" class="muted">加载配置中…</div>
 
     <section class="card">
-      <h2 class="page-title">OCR 引擎</h2>
+      <h2 class="page-title">llm 引擎(通用 VL 模型)</h2>
       <p class="muted page-desc">
-        识别 PDF 扫描件版面。选择引擎后,下方显示对应配置。
+        识别 PDF 扫描件版面的多模态 VL 模型。兼容 OpenAI Chat Completions 协议,
+        适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o 等)。
+        在比对提交页选择「llm」时使用本配置。
       </p>
-
-      <div class="field backend-field">
-        <label>引擎</label>
-        <div class="radio-row">
-          <label class="radio">
-            <input type="radio" value="llm" v-model="form.ocr_backend" />
-            <span>llm(通用 VL 模型)</span>
-          </label>
-          <label class="radio">
-            <input type="radio" value="paddleocr" v-model="form.ocr_backend" />
-            <span>paddleocr(专用 OCR 模型)</span>
-          </label>
-        </div>
-        <span class="hint">两者都走下方的 OpenAI 兼容推理服务,区别仅在模型输出格式的解析方式:llm 适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max 等);paddleocr 适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等)。切换引擎无需改连接配置,只需改模型名。</span>
-      </div>
-    </section>
-
-    <section class="card">
-      <h3 class="section-title">推理服务配置</h3>
 
       <div class="form-grid">
         <div class="field">
           <label>API Base</label>
-          <input v-model="form.llm_api_base" class="input" placeholder="https://api.siliconflow.cn/v1" />
+          <input v-model="form.llm_api_base" class="input" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
           <span class="hint">OpenAI 兼容根地址(vLLM / SGLang / SiliconFlow / DashScope 等均可)</span>
         </div>
 
         <div class="field">
           <label>模型名称</label>
-          <input v-model="form.llm_model" class="input" :placeholder="form.ocr_backend === 'paddleocr' ? 'PaddlePaddle/PaddleOCR-VL-1.5' : 'qwen-vl-max'" />
-          <span class="hint">{{ form.ocr_backend === 'paddleocr' ? '专用 OCR 模型(如 PaddleOCR-VL)' : '通用 VL 模型(如 qwen-vl-max)' }}</span>
+          <input v-model="form.llm_model" class="input" placeholder="qwen-vl-max" />
+          <span class="hint">通用 VL 模型(如 qwen-vl-max / Qwen3-VL-32B-Instruct)</span>
         </div>
 
         <div class="field span-2">
@@ -192,11 +198,69 @@ async function onReset(): Promise<void> {
           <input v-model.number="form.llm_max_concurrency" class="input" type="number" min="1" max="32" />
           <span class="hint">逐页并行数,受推理服务限流</span>
         </div>
+      </div>
+    </section>
 
+    <section class="card">
+      <h2 class="page-title">paddleocr 引擎(专用 OCR 模型)</h2>
+      <p class="muted page-desc">
+        识别 PDF 扫描件版面的专用 OCR 模型。与 llm 引擎走同一套 OpenAI 兼容协议,
+        但适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等,不遵循 JSON 指令)。
+        <b>配置完全独立</b>于 llm 引擎;未配置时选择「paddleocr」会报错,不复用 llm 配置。
+        在比对提交页选择「paddleocr」时使用本配置。
+      </p>
+
+      <div class="form-grid">
+        <div class="field">
+          <label>API Base</label>
+          <input v-model="form.paddleocr_api_base" class="input" placeholder="https://api.siliconflow.cn/v1" />
+          <span class="hint">OpenAI 兼容根地址(可与 llm 相同或不同)</span>
+        </div>
+
+        <div class="field">
+          <label>模型名称</label>
+          <input v-model="form.paddleocr_model" class="input" placeholder="PaddlePaddle/PaddleOCR-VL-1.5" />
+          <span class="hint">专用 OCR 模型(如 PaddleOCR-VL)</span>
+        </div>
+
+        <div class="field span-2">
+          <label>API Key</label>
+          <input
+            v-model="form.paddleocr_api_key"
+            class="input"
+            type="password"
+            :placeholder="store.config?.paddleocr_api_key_set ? '已设置(输入新值覆盖)' : '本地 vLLM 通常留空'"
+            @input="onPaddleKeyInput"
+          />
+          <span class="hint">
+            <template v-if="store.config?.paddleocr_api_key_set">
+              当前: {{ store.config.paddleocr_api_key || '****' }} · 留空不修改
+            </template>
+            <template v-else>本地 vLLM 一般无需 Key;云端服务需要</template>
+          </span>
+        </div>
+
+        <div class="field">
+          <label>请求超时(秒)</label>
+          <input v-model.number="form.paddleocr_timeout" class="input" type="number" min="10" max="600" />
+          <span class="hint">单页识别的超时上限(专用 OCR 模型较慢,建议 ≥ 300)</span>
+        </div>
+
+        <div class="field">
+          <label>最大并发</label>
+          <input v-model.number="form.paddleocr_max_concurrency" class="input" type="number" min="1" max="32" />
+          <span class="hint">逐页并行数,受推理服务限流</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 class="section-title">渲染 DPI(共享)</h3>
+      <div class="form-grid">
         <div class="field">
           <label>渲染 DPI</label>
           <input v-model.number="form.pdf_render_dpi" class="input" type="number" min="72" max="600" />
-          <span class="hint">PDF 渲染为图片的分辨率;200 为速度/质量甜点(默认),过高会显著变慢</span>
+          <span class="hint">PDF 渲染为图片的分辨率,两种引擎共用;200 为速度/质量甜点(默认),过高会显著变慢</span>
         </div>
       </div>
     </section>
