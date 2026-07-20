@@ -102,9 +102,6 @@ async function onSubmit(): Promise<void> {
           <input v-model="opts.enableLlmJudge" type="checkbox" />
           <span>启用 LLM 辅助说明(不会撤销已确认变化)</span>
         </label>
-        <p class="hint zero-tolerance">
-          零容忍模式：语义相似度仅用于条款对齐，任何确认的内容变化都会报告；识别证据不足时进入人工复核。
-        </p>
         <div class="field">
           <label>回调地址(可选)</label>
           <input v-model="callbackUrl" class="input" placeholder="https://your/cb · 完成后回调" />
@@ -156,12 +153,6 @@ async function onSubmit(): Promise<void> {
 }
 .radio input {
   cursor: pointer;
-}
-.zero-tolerance {
-  margin: 0;
-  padding: 10px 12px;
-  border-left: 3px solid var(--primary);
-  background: var(--surface-2);
 }
 .actions {
   display: flex;
