@@ -20,6 +20,22 @@ from ..models import Block, PageMeta
 logger = logging.getLogger(__name__)
 
 
+def count_pages(path: str | Path) -> int:
+    """返回 PDF 页数(打开即关,不做渲染)。
+
+    供提交前的页数上限预检使用:比 get_page_metas / render_pages 轻量,
+    不读取页面内容,只用 len(doc) 取页数。
+    """
+    with fitz.open(str(path)) as doc:
+        return len(doc)
+
+
+def count_pages_from_bytes(data: bytes) -> int:
+    """与 count_pages 相同,但接收内存中的 PDF 字节(供上传预检使用)。"""
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        return len(doc)
+
+
 def get_page_metas(path: str | Path, dpi: int = 300) -> list[PageMeta]:
     """获取每页尺寸(pt 与渲染像素)。"""
     scale = dpi / 72.0

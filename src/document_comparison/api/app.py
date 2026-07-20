@@ -29,6 +29,7 @@ from ..config import (
 )
 from ..logging_config import setup_logging
 from ..models import CompareOptions, RawCompareOptions
+from ..parsing.pdf import count_pages_from_bytes
 from ..storage import load_report, load_raw_report, report_path, save_upload, upload_path
 from ..report.builder import burn_pdf
 from ..report.docx_burn import build_docx_preview, burn_docx
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
             "embed_model": settings.embed_model,
             "embed_timeout": settings.embed_timeout,
             "pdf_render_dpi": settings.pdf_render_dpi,
+            "max_pdf_pages": settings.max_pdf_pages,
             "persisted": load_llm_overrides(),
             "config_file": str(llm_config_path()),
         }
@@ -143,7 +145,7 @@ def create_app() -> FastAPI:
         paddleocr_timeout, paddleocr_max_concurrency, paddleocr_max_retries,
         judge_api_base, judge_api_key, judge_model, judge_timeout,
         embed_backend, embed_api_base, embed_api_key, embed_model, embed_timeout,
-        pdf_render_dpi。空值/省略表示不修改(api_key 传
+        pdf_render_dpi, max_pdf_pages。空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
         allowed = {
@@ -153,7 +155,7 @@ def create_app() -> FastAPI:
             "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
             "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
             "embed_backend", "embed_api_base", "embed_api_key",
-            "embed_model", "embed_timeout", "pdf_render_dpi",
+            "embed_model", "embed_timeout", "pdf_render_dpi", "max_pdf_pages",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
@@ -209,6 +211,13 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "pdf_render_dpi 必须为整数")
             if not 72 <= dpi <= 600:
                 raise HTTPException(400, "pdf_render_dpi 取值范围 72-600")
+        if "max_pdf_pages" in body and body["max_pdf_pages"] is not None:
+            try:
+                pages = int(body["max_pdf_pages"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "max_pdf_pages 必须为整数")
+            if pages < 0:
+                raise HTTPException(400, "max_pdf_pages 必须 >= 0(0 表示不限制)")
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
         overrides = dict(body)
@@ -251,6 +260,7 @@ def create_app() -> FastAPI:
                 "embed_model": settings.embed_model,
                 "embed_timeout": settings.embed_timeout,
                 "pdf_render_dpi": settings.pdf_render_dpi,
+                "max_pdf_pages": settings.max_pdf_pages,
             },
         }
 
@@ -294,6 +304,23 @@ def create_app() -> FastAPI:
         )
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        # PDF 页数上限预检:超过配置上限直接拒绝,不进入流水线。
+        # 0 表示不限制;读取 target 字节计数后回拨流,供 save_upload 再读一次。
+        if settings.max_pdf_pages > 0:
+            try:
+                pdf_bytes = target.file.read()
+            finally:
+                target.file.seek(0)
+            try:
+                page_count = count_pages_from_bytes(pdf_bytes)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"无法解析 PDF: {exc}")
+            if page_count > settings.max_pdf_pages:
+                raise HTTPException(
+                    400,
+                    f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                )
 
         task_id = task_manager.create(callback_url, callback_secret)
         word_path = save_upload(source, task_id, "source")
@@ -448,6 +475,22 @@ def create_app() -> FastAPI:
         )
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        # PDF 页数上限预检(与 /api/v1/compare 一致)。
+        if settings.max_pdf_pages > 0:
+            try:
+                pdf_bytes = target.file.read()
+            finally:
+                target.file.seek(0)
+            try:
+                page_count = count_pages_from_bytes(pdf_bytes)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"无法解析 PDF: {exc}")
+            if page_count > settings.max_pdf_pages:
+                raise HTTPException(
+                    400,
+                    f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                )
 
         task_id = task_manager.create(callback_url, callback_secret)
         word_path = save_upload(source, task_id, "source")

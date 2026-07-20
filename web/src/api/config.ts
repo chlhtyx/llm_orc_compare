@@ -34,6 +34,8 @@ export interface LlmConfig {
   embed_timeout: number
   /** PDF 渲染 DPI(OCR 用),200 为速度/质量甜点 */
   pdf_render_dpi: number
+  /** PDF 页数上限(0 表示不限制);提交超过此页数的扫描件会被直接拒绝 */
+  max_pdf_pages: number
   persisted: Record<string, unknown>
   config_file?: string
 }
@@ -65,6 +67,7 @@ export interface LlmConfigUpdate {
   embed_model?: string
   embed_timeout?: number
   pdf_render_dpi?: number
+  max_pdf_pages?: number
 }
 
 export function getLlmConfig(): Promise<LlmConfig> {

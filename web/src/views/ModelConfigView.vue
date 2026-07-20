@@ -30,6 +30,7 @@ const form = reactive({
   embed_model: '',
   embed_timeout: 60,
   pdf_render_dpi: 200,
+  max_pdf_pages: 0,
 })
 
 const keyDirty = ref(false)
@@ -61,6 +62,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.embed_model = c.embed_model || ''
   form.embed_timeout = c.embed_timeout ?? 60
   form.pdf_render_dpi = c.pdf_render_dpi ?? 200
+  form.max_pdf_pages = c.max_pdf_pages ?? 0
   keyDirty.value = false
   paddleKeyDirty.value = false
   embedKeyDirty.value = false
@@ -109,6 +111,7 @@ async function onSave(): Promise<void> {
     paddleocr_api_key: paddleKeyDirty.value ? form.paddleocr_api_key : '********',
     // —— 全局 ——
     pdf_render_dpi: Number(form.pdf_render_dpi),
+    max_pdf_pages: Number(form.max_pdf_pages),
     embed_backend: form.embed_backend,
   }
 
@@ -255,12 +258,18 @@ async function onReset(): Promise<void> {
     </section>
 
     <section class="card">
-      <h3 class="section-title">渲染 DPI(共享)</h3>
+      <h3 class="section-title">共享设置</h3>
       <div class="form-grid">
         <div class="field">
           <label>渲染 DPI</label>
           <input v-model.number="form.pdf_render_dpi" class="input" type="number" min="72" max="600" />
           <span class="hint">PDF 渲染为图片的分辨率,两种引擎共用;200 为速度/质量甜点(默认),过高会显著变慢</span>
+        </div>
+
+        <div class="field">
+          <label>最大页数</label>
+          <input v-model.number="form.max_pdf_pages" class="input" type="number" min="0" />
+          <span class="hint">提交时若扫描件 PDF 页数超过此值,直接拒绝(暂不支持),不进入比对流程;0 表示不限制</span>
         </div>
       </div>
     </section>

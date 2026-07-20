@@ -94,6 +94,11 @@ class Settings:
     # 过低(如 100)会让密集文字识别变差甚至更慢。
     pdf_render_dpi: int = 200
 
+    # —— PDF 页数上限 ——
+    # 提交时若扫描件 PDF 页数超过此值,直接拒绝(返回 400「暂不支持」),不进入流水线。
+    # 0 表示不限制。OCR 单页成本较高,长文档易拖垮队列,故设置一个软上限。
+    max_pdf_pages: int = 0
+
     # —— 任务 ——
     max_concurrent_tasks: int = 4
 
@@ -142,6 +147,7 @@ _LLM_CONFIG_FIELDS = (
     "embed_model",
     "embed_timeout",
     "pdf_render_dpi",
+    "max_pdf_pages",
 )
 
 # dataclass 字段默认值,供首次启动(无 json 文件)时写入种子配置。
@@ -168,6 +174,7 @@ _LLM_DEFAULTS: dict = {
     "embed_model": "",
     "embed_timeout": 60,
     "pdf_render_dpi": 200,
+    "max_pdf_pages": 0,
 }
 
 def llm_config_path() -> Path:
@@ -251,6 +258,11 @@ def apply_llm_overrides() -> None:
     if "pdf_render_dpi" in cfg:
         try:
             settings.pdf_render_dpi = int(cfg["pdf_render_dpi"])
+        except (TypeError, ValueError):
+            pass
+    if "max_pdf_pages" in cfg:
+        try:
+            settings.max_pdf_pages = int(cfg["max_pdf_pages"])
         except (TypeError, ValueError):
             pass
 
