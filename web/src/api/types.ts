@@ -102,6 +102,7 @@ export interface TaskInfo {
   status: TaskStatus
   stage: string
   progress: number
+  stage_timings: Record<string, number>
   overall_risk: OverallRisk | null
   error: string | null
   elapsed: number | null
@@ -120,6 +121,7 @@ export interface ProgressEvent {
   status?: TaskStatus
   stage?: string
   progress?: number
+  stage_timings?: Record<string, number>
   overall_risk?: OverallRisk | null
   error?: string | null
   [key: string]: unknown
@@ -155,4 +157,67 @@ export interface RawCompareOptions {
 /** 无标注版任务信息(GET /api/v1/raw-compare/{id}),done 时附加 raw_report。 */
 export interface RawTaskInfo extends TaskInfo {
   raw_report?: TextDiffReport
+}
+
+// —— 对帐单金额统计(与后端 statement_pipeline 对应,独立通道)——
+export type StatementColumnSource = 'heuristic' | 'llm' | 'none'
+
+export interface StatementAmountItem {
+  file_index: number
+  file_name: string
+  table_index: number
+  page_index: number
+  row_index: number
+  row_label: string
+  column: string
+  raw_cell: string
+  canonical: string
+  value: number
+}
+
+export interface StatementTableSummary {
+  file_index: number
+  file_name: string
+  table_index: number
+  page_index: number
+  headers: string[]
+  column_sums: Record<string, number>
+  declared_totals: Record<string, number>
+  totals_match: Record<string, boolean>
+  items: StatementAmountItem[]
+  skipped_rows: number[]
+  column_source: Record<string, StatementColumnSource>
+}
+
+export interface StatementFileSummary {
+  file_index: number
+  file_name: string
+  total_amount: number
+  tables: StatementTableSummary[]
+  recognition_status: RecognitionStatus
+  recognition_diagnostics: PageRecognitionDiagnostic[]
+  error: string | null
+}
+
+export interface StatementSummaryReport {
+  files: StatementFileSummary[]
+  grand_total: number
+  grand_totals_by_column: Record<string, number>
+  total_files: number
+  total_tables: number
+  total_items: number
+  verdict: ChangeVerdict
+  reasons: string[]
+  column_detection_summary: Record<string, number>
+}
+
+export interface StatementOptions {
+  ocr_backend?: 'llm' | 'paddleocr'
+  amount_column_keywords?: string[]
+  enable_llm_column_detection?: boolean
+}
+
+/** 对帐单任务信息(GET /api/v1/statement/{id}),done 时附加 statement_report。 */
+export interface StatementTaskInfo extends TaskInfo {
+  statement_report?: StatementSummaryReport
 }

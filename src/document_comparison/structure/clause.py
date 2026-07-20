@@ -17,6 +17,23 @@ from .normalize import normalize_text
 
 _SEP = r"(?=[\s，,。：:、]|$)"
 
+# PDF 文本层有时会把多个视觉逻辑行压成同一个 text line，例如
+# ``...3.2 支付方式...``、``开户行:...账户名:...``。这些起点必须在
+# 条款切分前恢复，否则字段/编号锚定会把多个条款错误合并。
+_INLINE_NUMBER_RE = re.compile(
+    # 合同编号通常为 1~2 位段号；限制每段长度避免把 50000.00、2026.08
+    # 等金额/日期小数误识别为新条款。
+    r"(?:(?<!\d)\d{1,2}\.\d{1,2}(?:\.\d{1,2})?[.、]?\s+|[（(][一二三四五六七八九十\d]+[)）])"
+)
+_INLINE_CHAPTER_RE = re.compile(
+    r"第[一二三四五六七八九十百千零〇\d]+(?:条|章)"
+)
+_INLINE_FIELD_RE = re.compile(
+    r"(?:统一社会信用代码(?:[/／]身份证号)?|身份证号|法定代表人|负责人|"
+    r"联系电话|联系地址|开户行|开户银行|账户名|账户名称|账号|帐号|账\s*号|"
+    r"日期|时间|签约日期|签订日期|签约代表|地址|电话|传真|邮编|邮箱|电子邮箱)\s*[:：]"
+)
+
 # —— 编号模式(顺序敏感)—— 返回 (prefix, number, level) ——
 _NUM_PATTERNS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"^第([一二三四五六七八九十百千零〇\d]+)(?:条|章)" + _SEP), 1),
@@ -193,10 +210,75 @@ def _line_item(item: RawItem, text: str, line_index: int, line_count: int) -> Ra
 
 
 def _split_lines_with_bbox(item: RawItem, norm: str) -> list[RawItem]:
-    lines = [line.strip() for line in norm.split("\n") if line.strip()]
+    lines = _split_logical_lines(norm)
     if not lines:
         return []
     return [_line_item(item, line, idx, len(lines)) for idx, line in enumerate(lines)]
+
+
+def _split_logical_lines(norm: str) -> list[str]:
+    """按显式换行及块内编号/字段起点恢复逻辑行。
+
+    这是对 PDF 原生文本层的保守修复：只在强锚点处拆分，不按普通中文标点
+    拆正文。紧凑章标题（如 ``第一条合作内容``）只在逻辑行开头接受，避免
+    把正文中的「第一条」引用误识别为新条款。
+    """
+    logical_lines: list[str] = []
+    for raw_line in norm.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        starts = [0]
+        for match in _INLINE_NUMBER_RE.finditer(line):
+            index = match.start()
+            if index == 0:
+                continue
+            previous = line[index - 1]
+            # (2) 通常跟在分号/顿号后；数字编号要求后面有空格，避免
+            # 把金额小数或日期中的点拆开。
+            if match.group(0).startswith(("(", "（")) and not (
+                previous.isspace() or previous in "。；;、:："
+            ):
+                continue
+            starts.append(index)
+
+        for match in _INLINE_FIELD_RE.finditer(line):
+            if match.start() > 0:
+                starts.append(match.start())
+
+        # 紧凑中文章标题可能没有空格，但只接受行首或标点后的起点。
+        for match in _INLINE_CHAPTER_RE.finditer(line):
+            index = match.start()
+            if index == 0:
+                starts.append(index)
+            elif line[index - 1] in "。；;、:：":
+                starts.append(index)
+
+        starts = sorted(set(starts))
+        for start, end in zip(starts, [*starts[1:], len(line)]):
+            part = line[start:end].strip()
+            if not part:
+                continue
+            # 仅对条款行首的紧凑章节补一个解析用分隔符；输出正文仍不含该空格。
+            chapter = _INLINE_CHAPTER_RE.match(part)
+            compact_body = part[chapter.end():].lstrip() if chapter else ""
+            if (
+                chapter
+                and chapter.end() < len(part)
+                and not part[chapter.end()].isspace()
+                and _looks_like_compact_chapter_heading(compact_body)
+            ):
+                part = f"{part[:chapter.end()]} {part[chapter.end():]}"
+            logical_lines.append(part)
+    return logical_lines
+
+
+def _looks_like_compact_chapter_heading(body: str) -> bool:
+    """判断无分隔符章标题，避免把「第三条正文内容。」当作新编号。"""
+    if not body or len(body) > 20:
+        return False
+    return not any(char in body for char in "，,。；;:：、!?！？")
 
 
 def _split_body(line: str, prefix: str) -> str:

@@ -10,7 +10,8 @@
 - 通过编号、字段和语义向量对齐条款，执行字符级及表格单元格级 diff。
 - 对金额、日期、主体、账号、责任等高风险要素进行 canonical 强校验，并可启用纯文本 LLM 辅助说明。
 - 提供标准条款比对和纯文本快速比对两种模式。
-- 通过 SSE 实时展示任务进度，并支持任务完成 Webhook。
+- **对帐单金额统计**:一次可上传多个对帐单 PDF(扫描件),OCR 识别表格后用确定性代码抽取并累加金额,聚合输出所有文件的总金额;自动核对「合计/小计」声明值;列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
+- 通过 SSE 实时展示任务进度、各阶段耗时，并支持任务完成 Webhook。
 - 输出 JSON 报告、带差异标注的 PDF，以及带整段高亮的 Word 报告。
 - 报告页可在线查看原始 Word 全文及差异高亮；PDF 有坐标信息时可同步查看 PDF 标注。
 
@@ -149,7 +150,11 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 `llm_config.json`�
 | `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
 | `GET` | `/api/v1/compare/{task_id}/docx-preview` | 获取 Word 全文及差异标记 |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
+| `POST` | `/api/v1/statement` | 提交对帐单金额统计(支持多文件,`target` 字段同键多值) |
+| `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
+| `GET` | `/api/v1/statement/{task_id}/events` | 订阅 SSE 进度 |
+| `GET` | `/api/v1/statement/{task_id}/report` | 获取统计报告(含总合计、按列汇总、逐行明细) |
 | `GET` | `/api/v1/config/llm` | 获取当前模型配置（Key 脱敏） |
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 
-完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)。
+完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)；对帐单金额统计的设计与边界见 [对帐单金额统计方案](docs/对帐单金额统计方案.md)。

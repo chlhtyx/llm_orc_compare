@@ -12,12 +12,33 @@ import time
 from dataclasses import dataclass, field
 
 from .config import settings
-from .models import TaskInfo, TamperReport, TextDiffReport
+from .models import TaskInfo, TamperReport, TextDiffReport, StatementSummaryReport
 from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
+from .statement_pipeline import run_statement_pipeline
 from . import storage, webhook
 
 logger = logging.getLogger(__name__)
+
+_STAGE_TIMING_KEY = {
+    "parse_word": "word",
+    "word_parsing": "word",
+    "word_done": "word",
+    "ocr_pdf": "ocr",
+    "ocr": "ocr",
+    "ocr_done": "ocr",
+    "structure": "structure",
+    "structure_done": "structure",
+    "align": "align",
+    "align_done": "align",
+    "compare": "compare",
+    "compare_done": "compare",
+    "report": "compare",
+    "normalize": "normalize",
+    "diff": "diff",
+    "statement_start": "statement",
+    "statement_aggregate": "statement",
+}
 
 
 @dataclass
@@ -25,11 +46,14 @@ class Task:
     info: TaskInfo
     report: TamperReport | None = None
     raw_report: TextDiffReport | None = None  # 无标注版报告(与 report 互斥)
+    statement_report: StatementSummaryReport | None = None  # 对帐单金额统计报告(与上两者互斥)
     events: list[dict] = field(default_factory=list)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
     callback_secret: str | None = None
     start_time: float = field(default_factory=time.monotonic)
+    active_timing_stage: str | None = None
+    active_timing_started_at: float | None = None
 
     def finalize_elapsed(self) -> None:
         """终结时计算总耗时(秒),写入 info.elapsed。"""
@@ -37,9 +61,34 @@ class Task:
             self.info.elapsed = round(time.monotonic() - self.start_time, 2)
 
     def push_event(self, stage: str, progress: float) -> None:
-        self.events.append({"stage": stage, "progress": progress})
+        now = time.monotonic()
+        timing_stage = _STAGE_TIMING_KEY.get(stage)
+        # 对帐单多文件串行使用动态 stage 名(statement_file_N / statement_file_N_done),
+        # 统一映射到 "statement" 计时桶。
+        if timing_stage is None and stage.startswith("statement"):
+            timing_stage = "statement"
+        if timing_stage != self.active_timing_stage:
+            self._finish_active_timing(now)
+            if timing_stage is not None:
+                self.active_timing_stage = timing_stage
+                self.active_timing_started_at = now
+        self.info.stage_timings = dict(self.info.stage_timings)
+        self.events.append({
+            "stage": stage,
+            "progress": progress,
+            "stage_timings": dict(self.info.stage_timings),
+        })
         self.info.stage = stage
         self.info.progress = progress
+
+    def _finish_active_timing(self, now: float) -> None:
+        if self.active_timing_stage is None or self.active_timing_started_at is None:
+            return
+        elapsed = max(0.0, now - self.active_timing_started_at)
+        previous = self.info.stage_timings.get(self.active_timing_stage, 0.0)
+        self.info.stage_timings[self.active_timing_stage] = round(previous + elapsed, 3)
+        self.active_timing_stage = None
+        self.active_timing_started_at = None
 
 
 class TaskManager:
@@ -154,6 +203,57 @@ class TaskManager:
             task.finalize_elapsed()
             logger.info(
                 "task finished(raw) task_id=%s status=%s elapsed=%ss",
+                task_id, task.info.status, task.info.elapsed,
+            )
+
+    async def run_statement(
+        self, task_id: str, pdf_paths: list[str], file_names: list[str],
+        *, ocr_backend: str | None = None,
+        amount_column_keywords: list[str] | None = None,
+        enable_llm_column_detection: bool = True,
+    ) -> None:
+        """对帐单金额统计任务:多文件串行 OCR + 表格抽取 + 代码确定性求和。"""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        logger.info(
+            "task start(statement) task_id=%s files=%s ocr_backend=%s",
+            task_id, len(pdf_paths), ocr_backend,
+        )
+        try:
+            async with self._sem:
+                task.info.status = "running"
+                report = await asyncio.to_thread(
+                    run_statement_pipeline, pdf_paths, file_names,
+                    on_progress=lambda stage, frac: task.push_event(stage, frac),
+                    ocr_backend=ocr_backend,
+                    amount_column_keywords=amount_column_keywords,
+                    enable_llm_column_detection=enable_llm_column_detection,
+                )
+            task.statement_report = report
+            task.info.status = "done"
+            task.push_event("done", 1.0)
+            storage.save_statement_report(task_id, report)
+            logger.info(
+                "task done(statement) task_id=%s grand_total=%s verdict=%s",
+                task_id, report.grand_total, report.verdict,
+            )
+            await self._fire_callback(task_id, "done", {
+                "grand_total": report.grand_total,
+                "verdict": report.verdict,
+                "report_url": f"/api/v1/statement/{task_id}/report",
+            })
+        except Exception as e:  # noqa: BLE001
+            task.info.status = "failed"
+            task.info.error = str(e)
+            task.push_event("failed", task.info.progress)
+            logger.exception("task failed(statement) task_id=%s", task_id)
+            await self._fire_callback(task_id, "failed", {"error": str(e)})
+        finally:
+            task.done.set()
+            task.finalize_elapsed()
+            logger.info(
+                "task finished(statement) task_id=%s status=%s elapsed=%ss",
                 task_id, task.info.status, task.info.elapsed,
             )
 

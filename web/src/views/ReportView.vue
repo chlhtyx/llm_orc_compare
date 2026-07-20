@@ -90,6 +90,7 @@ function onSelectClause(id: string) {
         :status="taskStore.status"
         :stage="taskStore.stage"
         :progress="taskStore.progress"
+        :stage-timings="taskStore.stageTimings"
         :overall-risk="taskStore.overallRisk"
         :error="taskStore.error"
         :elapsed="taskStore.elapsed"

@@ -28,9 +28,16 @@ from ..config import (
     settings,
 )
 from ..logging_config import setup_logging
-from ..models import CompareOptions, RawCompareOptions
+from ..models import CompareOptions, RawCompareOptions, StatementOptions
 from ..parsing.pdf import count_pages_from_bytes
-from ..storage import load_report, load_raw_report, report_path, save_upload, upload_path
+from ..storage import (
+    load_report,
+    load_raw_report,
+    load_statement_report,
+    report_path,
+    save_upload,
+    upload_path,
+)
 from ..report.builder import burn_pdf
 from ..report.docx_burn import build_docx_preview, burn_docx
 from ..tasks import task_manager
@@ -536,6 +543,112 @@ def create_app() -> FastAPI:
         report = task.raw_report if task else None
         if report is None:
             report = load_raw_report(task_id)
+        if report is None:
+            raise HTTPException(404, "report not ready")
+        return JSONResponse(content=report.model_dump())
+
+    # —— 对帐单金额统计端点:与 /api/v1/raw-compare 完全独立 ——
+    # 单端 PDF(对帐单扫描件),支持一次上传多个 PDF;后端串行 OCR + 表格抽取 + 代码求和,
+    # 聚合输出所有文件的总金额。LLM 仅用于列定位兜底,绝不参与数值识别或求和。
+    @app.post("/api/v1/statement")
+    async def statement(
+        target: list[UploadFile] = File(..., description="对帐单 PDF(可多选,.pdf)"),
+        options: str | None = Form(default=None),
+        callback_url: str | None = Form(default=None),
+        callback_secret: str | None = Form(default=None),
+    ):
+        if not target:
+            raise HTTPException(400, "至少上传一个 PDF")
+        for i, t in enumerate(target):
+            if not (t.filename or "").lower().endswith(".pdf"):
+                raise HTTPException(400, f"第 {i + 1} 个文件必须是 .pdf")
+
+        opts = StatementOptions()
+        if options:
+            try:
+                opts = StatementOptions.model_validate_json(options)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"options 解析失败: {exc}")
+
+        # 限流:与 compare/raw 共享并发上限
+        running = sum(
+            1
+            for t in task_manager._tasks.values()
+            if t.info.status in ("pending", "running")
+        )
+        if running >= settings.max_concurrent_tasks:
+            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        # PDF 页数上限预检(对每个 PDF 校验)
+        if settings.max_pdf_pages > 0:
+            for i, t in enumerate(target):
+                try:
+                    pdf_bytes = t.file.read()
+                finally:
+                    t.file.seek(0)
+                try:
+                    page_count = count_pages_from_bytes(pdf_bytes)
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(400, f"第 {i + 1} 个文件无法解析 PDF: {exc}")
+                if page_count > settings.max_pdf_pages:
+                    raise HTTPException(
+                        400,
+                        f"暂不支持:第 {i + 1} 个文件 {t.filename} 共 {page_count} 页,"
+                        f"超过上限 {settings.max_pdf_pages} 页",
+                    )
+
+        task_id = task_manager.create(callback_url, callback_secret)
+        # 多文件保存:role="target" + index,避免覆盖
+        pdf_paths: list[str] = []
+        file_names: list[str] = []
+        for i, t in enumerate(target):
+            saved = save_upload(t, task_id, "target", index=i)
+            pdf_paths.append(str(saved))
+            file_names.append(t.filename or f"target-{i}.pdf")
+        asyncio.create_task(
+            task_manager.run_statement(
+                task_id, pdf_paths, file_names,
+                ocr_backend=opts.ocr_backend,
+                amount_column_keywords=opts.amount_column_keywords,
+                enable_llm_column_detection=opts.enable_llm_column_detection,
+            )
+        )
+        return {"task_id": task_id, "status": "pending", "file_count": len(pdf_paths)}
+
+    @app.get("/api/v1/statement/{task_id}")
+    async def statement_get_result(task_id: str):
+        task = task_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+        resp = task.info.model_dump()
+        if task.info.status == "done" and task.statement_report is not None:
+            resp["statement_report"] = task.statement_report.model_dump()
+        elif task.info.status == "done":
+            # 进程重启后内存丢失,从存储回捞
+            report = load_statement_report(task_id)
+            if report is not None:
+                resp["statement_report"] = report.model_dump()
+        return resp
+
+    @app.get("/api/v1/statement/{task_id}/events")
+    async def statement_events(task_id: str):
+        task = task_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, "task not found")
+
+        async def gen():
+            async for ev in task_manager.event_stream(task_id):
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': task.info.status}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/v1/statement/{task_id}/report")
+    async def statement_download_report(task_id: str):
+        task = task_manager.get(task_id)
+        report = task.statement_report if task else None
+        if report is None:
+            report = load_statement_report(task_id)
         if report is None:
             raise HTTPException(404, "report not ready")
         return JSONResponse(content=report.model_dump())

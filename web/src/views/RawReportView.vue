@@ -51,6 +51,7 @@ const similarityPct = computed(() => {
           :status="rawTaskStore.status"
           :stage="rawTaskStore.stage"
           :progress="rawTaskStore.progress"
+          :stage-timings="rawTaskStore.stageTimings"
           :overall-risk="null"
           :error="rawTaskStore.error"
           :elapsed="rawTaskStore.elapsed"

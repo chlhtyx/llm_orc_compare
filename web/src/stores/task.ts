@@ -24,6 +24,7 @@ export const useTaskStore = defineStore('task', () => {
   const status = ref<TaskStatus>('pending')
   const stage = ref('')
   const progress = ref(0)
+  const stageTimings = ref<Record<string, number>>({})
  const overallRisk = ref<TaskInfo['overall_risk']>(null)
  const error = ref<string | null>(null)
  const report = ref<TamperReport | null>(null)
@@ -41,6 +42,7 @@ export const useTaskStore = defineStore('task', () => {
     status.value = 'pending'
     stage.value = ''
     progress.value = 0
+    stageTimings.value = {}
     overallRisk.value = null
    error.value = null
    report.value = null
@@ -54,6 +56,7 @@ export const useTaskStore = defineStore('task', () => {
     status.value = info.status
     stage.value = info.stage || stage.value
    progress.value = info.progress ?? progress.value
+    stageTimings.value = info.stage_timings ?? stageTimings.value
    overallRisk.value = info.overall_risk ?? overallRisk.value
    error.value = info.error
     elapsed.value = info.elapsed
@@ -84,6 +87,7 @@ export const useTaskStore = defineStore('task', () => {
       onEvent: (ev) => {
         if (ev.stage) stage.value = ev.stage
         if (typeof ev.progress === 'number') progress.value = ev.progress
+        if (ev.stage_timings) stageTimings.value = ev.stage_timings
         if (ev.status) status.value = ev.status
         if ('overall_risk' in ev && ev.overall_risk) overallRisk.value = ev.overall_risk
         if (ev.error) error.value = ev.error
@@ -143,6 +147,7 @@ export const useTaskStore = defineStore('task', () => {
     status,
     stage,
     progress,
+    stageTimings,
     overallRisk,
    error,
    report,

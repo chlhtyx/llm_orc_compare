@@ -83,6 +83,28 @@ def test_build_clauses_splits_multiline_bbox_by_line():
     assert clauses[3].blocks[0].bbox == [10, 80, 210, 100]
 
 
+def test_build_clauses_splits_inline_numbered_and_field_boundaries():
+    """原生 PDF 可能把多个逻辑起点放在同一文本行，仍需拆成独立条款。"""
+    items = [
+        RawItem(
+            text=(
+                "第一条合作内容 1.1 服务内容。1.2 支付方式。"
+                "开户行:中国工商银行 账户名:甲公司"
+            ),
+            kind="paragraph",
+            page_index=0,
+            bbox=[10, 20, 310, 60],
+        )
+    ]
+
+    clauses = build_clauses(items, "pdf")
+
+    assert [clause.number for clause in clauses[:3]] == ["一", "1.1", "1.2"]
+    assert [clause.field_key for clause in clauses[3:]] == ["开户行", "账户名"]
+    assert clauses[1].text == "服务内容。"
+    assert clauses[2].text == "支付方式。"
+
+
 def test_blocks_to_raw_maps_labels():
     pages = [[
         Block(block_id="b1", page_index=0, label="doc_title", bbox=[0, 0, 1, 1], content="合同"),

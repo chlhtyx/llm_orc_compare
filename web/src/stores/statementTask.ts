@@ -1,17 +1,17 @@
-// 无标注版任务 store:与 stores/task.ts 平行,持有 TextDiffReport。
-// 提交、跟踪进度(SSE 主、轮询兜底)、终结后落 raw_report。
+// 对帐单金额统计任务 store:与 stores/rawTask.ts 平行,持有 StatementSummaryReport。
+// 提交、跟踪进度(SSE 主、轮询兜底)、终结后落 statement_report。
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
   ApiError,
-  getRawTask,
-  subscribeRawProgress,
-  submitRawCompare,
-  type RawSubmitArgs,
-} from '@/api/raw'
-import type { RawTaskInfo, TaskStatus, TextDiffReport } from '@/api/types'
+  getStatementTask,
+  subscribeStatementProgress,
+  submitStatement,
+  type StatementSubmitArgs,
+} from '@/api/statement'
+import type { StatementSummaryReport, StatementTaskInfo, TaskStatus } from '@/api/types'
 
-export type { RawSubmitArgs }
+export type { StatementSubmitArgs }
 
 const STATUS_ORDER: Record<TaskStatus, number> = {
   pending: 0,
@@ -20,14 +20,14 @@ const STATUS_ORDER: Record<TaskStatus, number> = {
   failed: 2,
 }
 
-export const useRawTaskStore = defineStore('rawTask', () => {
+export const useStatementTaskStore = defineStore('statementTask', () => {
   const taskId = ref<string | null>(null)
   const status = ref<TaskStatus>('pending')
   const stage = ref('')
   const progress = ref(0)
   const stageTimings = ref<Record<string, number>>({})
   const error = ref<string | null>(null)
-  const report = ref<TextDiffReport | null>(null)
+  const report = ref<StatementSummaryReport | null>(null)
   const elapsed = ref<number | null>(null)
 
   const isTerminal = computed(() => status.value === 'done' || status.value === 'failed')
@@ -48,7 +48,7 @@ export const useRawTaskStore = defineStore('rawTask', () => {
     elapsed.value = null
   }
 
-  function applyInfo(info: RawTaskInfo): void {
+  function applyInfo(info: StatementTaskInfo): void {
     if (STATUS_ORDER[info.status] < STATUS_ORDER[status.value] && !isTerminal.value) return
     taskId.value = info.task_id
     status.value = info.status
@@ -57,12 +57,12 @@ export const useRawTaskStore = defineStore('rawTask', () => {
     stageTimings.value = info.stage_timings ?? stageTimings.value
     error.value = info.error
     elapsed.value = info.elapsed
-    if (info.raw_report) report.value = info.raw_report
+    if (info.statement_report) report.value = info.statement_report
   }
 
-  async function submit(args: RawSubmitArgs): Promise<string> {
+  async function submit(args: StatementSubmitArgs): Promise<string> {
     reset()
-    const resp = await submitRawCompare(args)
+    const resp = await submitStatement(args)
     taskId.value = resp.task_id
     status.value = resp.status ?? 'pending'
     beginStream(resp.task_id)
@@ -72,14 +72,14 @@ export const useRawTaskStore = defineStore('rawTask', () => {
   /** 通过 id 接管任务:拉一次状态,未终结则开始跟随。 */
   async function load(id: string): Promise<void> {
     taskId.value = id
-    const info = await getRawTask(id)
+    const info = await getStatementTask(id)
     applyInfo(info)
     if (!isTerminal.value) beginStream(id)
   }
 
   function beginStream(id: string): void {
     abort?.abort()
-    abort = subscribeRawProgress(id, {
+    abort = subscribeStatementProgress(id, {
       onEvent: (ev) => {
         if (ev.stage) stage.value = ev.stage
         if (typeof ev.progress === 'number') progress.value = ev.progress
@@ -90,14 +90,14 @@ export const useRawTaskStore = defineStore('rawTask', () => {
       onDone: async (finalStatus) => {
         status.value = finalStatus
         try {
-          const info = await getRawTask(id)
+          const info = await getStatementTask(id)
           applyInfo(info)
         } catch {
           // 终态已拿到,补拉失败不致命
         }
       },
       onError: (err) => {
-        console.warn('[rawTask] SSE 失败,降级轮询:', err)
+        console.warn('[statementTask] SSE 失败,降级轮询:', err)
         fallbackPoll(id)
       },
     })
@@ -108,7 +108,7 @@ export const useRawTaskStore = defineStore('rawTask', () => {
     if (pollTimer) return
     const tick = async () => {
       try {
-        const info = await getRawTask(id)
+        const info = await getStatementTask(id)
         applyInfo(info)
         if (info.status === 'done' || info.status === 'failed') {
           stopPoll()

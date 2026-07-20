@@ -10,9 +10,11 @@ except ImportError:
     import fitz  # type: ignore
 
 from document_comparison.embed.mock import MockEmbedding
-from document_comparison.models import PageMeta
+from document_comparison.models import Block, PageMeta
 from document_comparison.parsing.pdf import extract_text_blocks
 from document_comparison.pipeline import run_pipeline
+from document_comparison.report.builder import burn_pdf
+from document_comparison.report.docx_burn import burn_docx
 
 
 class _TextLayerOCR:
@@ -20,6 +22,24 @@ class _TextLayerOCR:
 
     def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
         return extract_text_blocks(pdf_path)
+
+
+class _MergedTextLayerOCR:
+    """模拟原生 PDF 把多个逻辑条款合并在同一文本块的情况。"""
+
+    def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
+        return [[
+            Block(
+                block_id="merged",
+                page_index=0,
+                label="text",
+                bbox=[72, 72, 520, 180],
+                content=(
+                    "第三条费用及支付方式 3.1 总额为100元。"
+                    "3.2 支付50%预付款。"
+                ),
+            )
+        ]]
 
 
 def _make_word(parts):
@@ -127,3 +147,37 @@ def test_pipeline_header_field_alignment_no_false_positive(tmp_path):
         f"expected no unmatched, got: {[d.status for d in report.unmatched_clauses]}"
     )
     assert report.overall_risk == "clean"
+
+
+def test_pipeline_recovers_inline_pdf_boundaries_and_marks_only_real_change(tmp_path):
+    """块内条款合并时仍应配对成功，并只报告真实比例变化。"""
+    word_buf = _make_word([
+        ("h1", "第三条 费用及支付方式"),
+        ("p", "3.1 总额为100元。"),
+        ("p", "3.2 支付60%预付款。"),
+    ])
+    # 让 PDF 侧 3.2 变为 50%，同时模拟章节、3.1、3.2 在同一原生 block。
+    pdf_buf = _make_pdf_from_lines(["placeholder"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    progress_events: list[tuple[str, float]] = []
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_MergedTextLayerOCR(),
+        embed=MockEmbedding(),
+        on_progress=lambda stage, progress: progress_events.append((stage, progress)),
+    )
+
+    assert not report.unmatched_clauses
+    assert [diff.number for diff in report.diffs] == ["3.2"]
+    assert any(element.kind == "ratio" for element in report.key_elements)
+    assert [stage for stage, _ in progress_events if stage in {"structure", "align", "compare"}] == [
+        "structure", "align", "compare",
+    ]
+
+    annotated_pdf = tmp_path / "annotated.pdf"
+    annotated_docx = tmp_path / "annotated.docx"
+    burn_pdf(ppath, report, annotated_pdf)
+    burn_docx(wpath, report, annotated_docx)
+    assert annotated_pdf.exists() and annotated_pdf.stat().st_size > 0
+    assert annotated_docx.exists() and annotated_docx.stat().st_size > 0

@@ -11,6 +11,15 @@ def client():
     return TestClient(create_app())
 
 
+@pytest.fixture(autouse=True)
+def _reset_task_manager():
+    """每个测试前后清空 task_manager,避免后台任务跨测试残留导致并发上限误触发。"""
+    from document_comparison.api.app import task_manager
+    task_manager._tasks.clear()
+    yield
+    task_manager._tasks.clear()
+
+
 def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
@@ -276,3 +285,112 @@ def test_llm_config_rejects_negative_max_pdf_pages(client):
     """max_pdf_pages 不能为负数。"""
     r = client.put("/api/v1/config/llm", json={"max_pdf_pages": -1})
     assert r.status_code == 400
+
+
+# —— 对帐单金额统计端点冒烟(/api/v1/statement)——
+
+def test_statement_accepts_multiple_pdfs(client, monkeypatch):
+    """POST /api/v1/statement 接受多个 PDF,返回 task_id + file_count。
+
+    mock 掉 run_statement 避免触发真实 OCR;TestClient 多文件需用 list-of-tuple 形式
+    (同字段名多次出现),不能用 dict 单键 list 形式(后者会触发 multipart 解析错误)。
+    """
+    import io
+
+    from document_comparison.api.app import task_manager
+
+    async def _noop(*args, **kwargs):
+        return None
+    monkeypatch.setattr(task_manager, "run_statement", _noop)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    def _pdf_bytes():
+        buf = io.BytesIO()
+        pdf = fitz.open()
+        pdf.new_page(width=595, height=842)
+        pdf.save(buf)
+        pdf.close()
+        buf.seek(0)
+        return buf
+
+    r = client.post(
+        "/api/v1/statement",
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+            ("target", ("b.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "task_id" in body
+    assert body["file_count"] == 2
+
+
+def test_statement_rejects_non_pdf(client):
+    """混入非 PDF → 400。"""
+    import io
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page(width=595, height=842)
+    pdf.save(pdf_buf)
+    pdf.close()
+    pdf_buf.seek(0)
+
+    r = client.post(
+        "/api/v1/statement",
+        files=[
+            ("target", ("ok.pdf", pdf_buf, "application/pdf")),
+            ("target", ("bad.txt", io.BytesIO(b"text"), "text/plain")),
+        ],
+    )
+    assert r.status_code == 400
+    assert "pdf" in r.json()["message"].lower()
+
+
+def test_statement_rejects_oversized_pdf(client, monkeypatch):
+    """多文件中任一超 max_pdf_pages → 400 暂不支持。"""
+    import io
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    monkeypatch.setattr(settings, "max_pdf_pages", 1)
+    # 构造 3 页 PDF
+    buf = io.BytesIO()
+    pdf = fitz.open()
+    for _ in range(3):
+        pdf.new_page(width=595, height=842)
+    pdf.save(buf)
+    pdf.close()
+    buf.seek(0)
+
+    r = client.post(
+        "/api/v1/statement",
+        files=[
+            ("target", ("big.pdf", buf, "application/pdf")),
+        ],
+    )
+    assert r.status_code == 400
+    assert "暂不支持" in r.json()["message"]
+
+
+def test_statement_task_not_found_404(client):
+    r = client.get("/api/v1/statement/nonexistent")
+    assert r.status_code == 404
+
+
+def test_statement_report_not_found_404(client):
+    r = client.get("/api/v1/statement/nonexistent/report")
+    assert r.status_code == 404

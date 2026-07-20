@@ -73,6 +73,7 @@ def run_pipeline(
             len(page_metas), ocr_backend or cfg.ocr_backend, cfg.llm_model,
         )
     _progress("ocr_done", 0.70)
+    _progress("structure", 0.72)
     with timed_stage(logger, "pdf_structure"):
         pdf_raw = blocks_to_raw(pages_blocks)
         pdf_clauses = build_clauses(pdf_raw, "pdf")
@@ -82,6 +83,7 @@ def run_pipeline(
     # —— ④ 对齐 ——
     # 阈值自适应:mock 字符袋相似度系统性偏低,用较低阈值;语义后端用标准阈值。
     align_threshold = cfg.align_similarity_mock if is_mock_engine(embed) else cfg.align_similarity
+    _progress("align", 0.80)
     with timed_stage(logger, "clause_alignment"):
         alignments = align_clauses(
             word_clauses, pdf_clauses, embed, align_threshold
@@ -95,6 +97,7 @@ def run_pipeline(
     # —— ⑤⑥ 比对 + 报告 ——
     word_by = {c.clause_id: c for c in word_clauses}
     pdf_by = {c.clause_id: c for c in pdf_clauses}
+    _progress("compare", 0.90)
     with timed_stage(logger, "compare_and_report"):
         report = build_report(
             alignments=alignments,

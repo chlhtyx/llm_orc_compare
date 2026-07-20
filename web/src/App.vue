@@ -5,9 +5,10 @@ import { computed } from 'vue'
 const route = useRoute()
 const activeName = computed(() => {
   const name = String(route.name ?? '')
-  if (name === 'report' || name === 'raw-report') return name
+  if (name === 'report' || name === 'raw-report' || name === 'statement-report') return name
   if (name === 'settings') return 'settings'
   if (name === 'raw-submit') return 'raw-submit'
+  if (name === 'statement-submit') return 'statement-submit'
   return 'submit'
 })
 // 「报告」链接按当前流程指向对应报告页。
@@ -16,6 +17,7 @@ const reportHref = computed(() => {
   if (!tid) return null
   const name = String(route.name)
   if (name.startsWith('raw')) return `/raw/report/${tid}`
+  if (name.startsWith('statement')) return `/statement/report/${tid}`
   return `/report/${tid}`
 })
 </script>
@@ -30,10 +32,11 @@ const reportHref = computed(() => {
       <nav class="app-nav">
         <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对</RouterLink>
         <RouterLink to="/raw" :class="{ active: activeName === 'raw-submit' }">无标注比对</RouterLink>
+        <RouterLink to="/statement" :class="{ active: activeName === 'statement-submit' }">对帐单统计</RouterLink>
         <RouterLink
           v-if="reportHref"
           :to="reportHref"
-          :class="{ active: activeName === 'report' || activeName === 'raw-report' }"
+          :class="{ active: activeName === 'report' || activeName === 'raw-report' || activeName === 'statement-report' }"
         >
           报告
         </RouterLink>

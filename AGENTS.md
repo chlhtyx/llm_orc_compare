@@ -9,6 +9,8 @@
 - `src/document_comparison/api/`：FastAPI 路由、SSE 进度和配置接口。
 - `src/document_comparison/pipeline.py`：结构化条款比对主流水线。
 - `src/document_comparison/raw_pipeline.py`：纯文本快速比对流水线；不要与主流水线混为一谈。
+- `src/document_comparison/statement_pipeline.py`：对帐单金额统计流水线(多文件串行);与 `raw_pipeline` 完全独立。
+- `src/document_comparison/statement/`：金额列定位、代码确定性求和、LLM 兜底列指认。
 - `src/document_comparison/parsing/`、`ocr/`：Word/PDF 解析与 OCR 降级策略。
 - `src/document_comparison/structure/`、`align/`、`compare/`：条款切分、对齐、差异和风险判定。
 - `src/document_comparison/report/`：JSON、PDF 和 DOCX 报告输出。
@@ -19,6 +21,7 @@
 
 - 字符级/表格级差异和 canonical 强校验是变化判定的依据；语义向量只用于条款对齐。
 - LLM 辅助说明只能补充已确认差异的解释或严重度建议，不能撤销确定的变化。
+- 对帐单金额统计通道中,**LLM 仅用于列定位兜底(指认金额列索引),金额抽取与求和始终由代码完成**;不可让 LLM 做算术或撤销确定性结论。
 - 原生 PDF 文本优先；仅在需要时降级 OCR，并保留低质量结果为“待复核”的语义。
 - 改动报告数据结构时，保持 JSON、PDF、DOCX 输出及前端展示的一致性。
 - 改动 API 合约时，同步检查 `web/src/api/`、相关 stores、视图和后端测试。

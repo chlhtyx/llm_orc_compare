@@ -269,6 +269,88 @@ class RawCompareOptions(BaseModel):
     ocr_backend: Literal["llm", "paddleocr"] | None = None
 
 
+# —— 对帐单金额统计(独立通道,与 TamperReport / TextDiffReport 完全隔离)——
+# 一次可上传多个 PDF,串行 OCR + 表格抽取 + 代码确定性求和,聚合输出总金额。
+# LLM 仅在启发式列定位失败时指认金额列(列索引+角色),绝不参与数值识别或求和。
+class StatementAmountItem(BaseModel):
+    """单行金额明细(可审计粒度)。"""
+
+    file_index: int = Field(default=0, description="所属 PDF 在本次提交中的序号")
+    file_name: str = ""
+    table_index: int = Field(default=0, description="该 PDF 内的表格序号")
+    page_index: int = Field(default=0, description="表格所在页(0 基)")
+    row_index: int = Field(default=0, description="表格内行号(0 基)")
+    row_label: str = Field(default="", description="首列单元格内容,用于标识本行")
+    column: str = Field(default="", description="金额列名(启发式或 LLM 指认)")
+    raw_cell: str = Field(default="", description="OCR 原始单元格文本")
+    canonical: str = Field(default="", description='canonical 形式,如 "CNY:30000.00"')
+    value: float = Field(default=0.0, description="解析后数值(单位元)")
+
+
+class StatementTableSummary(BaseModel):
+    """单张表格的统计结果。"""
+
+    file_index: int = 0
+    file_name: str = ""
+    table_index: int = 0
+    page_index: int = 0
+    headers: list[str] = Field(default_factory=list)
+    # 按金额列分别求和(支持"已付/未付/金额"等多金额列)
+    column_sums: dict[str, float] = Field(default_factory=dict)
+    # 表内"合计/小计"行声明的值(按列)
+    declared_totals: dict[str, float] = Field(default_factory=dict)
+    # column_sums vs declared_totals 是否一致(同列存在时才比较)
+    totals_match: dict[str, bool] = Field(default_factory=dict)
+    items: list[StatementAmountItem] = Field(default_factory=list)
+    skipped_rows: list[int] = Field(default_factory=list, description="被跳过的行号(合计行本身,避免重复计入)")
+    # 列定位方式:heuristic(启发式) | llm(LLM 兜底) | none(定位失败)
+    column_source: dict[str, Literal["heuristic", "llm", "none"]] = Field(default_factory=dict)
+
+
+class StatementFileSummary(BaseModel):
+    """单个 PDF 的统计汇总。"""
+
+    file_index: int = 0
+    file_name: str = ""
+    total_amount: float = Field(default=0.0, description="本 PDF 所有金额列之和")
+    tables: list[StatementTableSummary] = Field(default_factory=list)
+    recognition_status: RecognitionStatus = "reliable"
+    recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
+    error: str | None = Field(default=None, description="单文件失败原因(其他文件继续处理)")
+
+
+class StatementSummaryReport(BaseModel):
+    """对帐单金额统计报告(多文件聚合)。"""
+
+    files: list[StatementFileSummary] = Field(default_factory=list)
+    grand_total: float = Field(default=0.0, description="所有文件所有金额列之和")
+    grand_totals_by_column: dict[str, float] = Field(
+        default_factory=dict, description="跨文件按列名汇总"
+    )
+    total_files: int = 0
+    total_tables: int = 0
+    total_items: int = 0
+    verdict: ChangeVerdict = Field(
+        default="clean",
+        description="clean / changed(声明不一致) / needs_review(OCR 或列定位低置信)",
+    )
+    reasons: list[str] = Field(default_factory=list, description="判定理由(可审计)")
+    column_detection_summary: dict[str, int] = Field(
+        default_factory=dict,
+        description='{"heuristic": N, "llm": M, "none": K}',
+    )
+
+
+class StatementOptions(BaseModel):
+    """对帐单统计提交选项。"""
+
+    ocr_backend: Literal["llm", "paddleocr"] | None = None
+    # 用户自定义金额列关键词(覆盖默认启发式表)
+    amount_column_keywords: list[str] | None = None
+    # 启用 LLM 列定位兜底(默认开启)
+    enable_llm_column_detection: bool = True
+
+
 TaskStatus = Literal["pending", "running", "done", "failed"]
 
 
@@ -277,6 +359,10 @@ class TaskInfo(BaseModel):
     status: TaskStatus = "pending"
     stage: str = ""
     progress: float = 0.0
+    stage_timings: dict[str, float] = Field(
+        default_factory=dict,
+        description="已完成处理阶段的耗时秒数，键为 word/ocr/structure/align/compare 等",
+    )
     overall_risk: OverallRisk | None = None
     error: str | None = None
     elapsed: float | None = None
