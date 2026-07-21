@@ -4,8 +4,10 @@ import { useRouter } from 'vue-router'
 import {
   ApiError,
   getTaskEvents,
+  getTaskLlmCalls,
   listTasks,
   reportRouteFor,
+  type LlmCallItem,
   type TaskEventItem,
   type TaskKind,
   type TaskListItem,
@@ -24,9 +26,14 @@ const statusFilter = ref<TaskStatus | ''>('')
 const PAGE_SIZE = 20
 const page = ref(0) // 0 基
 
+// 展开行:同一个任务下切换「时间线 / 模型调用」两个面板
 const selectedTaskId = ref<string | null>(null)
+const detailTab = ref<'events' | 'llm-calls'>('events')
 const selectedEvents = ref<TaskEventItem[]>([])
+const selectedLlmCalls = ref<LlmCallItem[]>([])
 const eventsLoading = ref(false)
+/** 展开后每条 LLM 调用的 payload/response 折叠状态(id → 是否展开)。 */
+const expandedCalls = ref<Record<number, boolean>>({})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
@@ -48,6 +55,7 @@ function riskText(risk: OverallRisk | null): string {
     case 'high': return '高风险'
     case 'medium': return '中风险'
     case 'low': return '低风险'
+    case 'changed': return '有变化'
     case 'clean': return '未篡改'
     case 'needs_review': return '待复核'
     default: return '—'
@@ -108,8 +116,7 @@ async function refresh(): Promise<void> {
 
 async function onFilterChange(): Promise<void> {
   page.value = 0
-  selectedTaskId.value = null
-  selectedEvents.value = []
+  collapseDetail()
   await refresh()
 }
 
@@ -130,13 +137,13 @@ function viewReport(item: TaskListItem): void {
 }
 
 async function showEvents(taskId: string): Promise<void> {
-  if (selectedTaskId.value === taskId) {
+  if (selectedTaskId.value === taskId && detailTab.value === 'events') {
     // 折叠
-    selectedTaskId.value = null
-    selectedEvents.value = []
+    collapseDetail()
     return
   }
   selectedTaskId.value = taskId
+  detailTab.value = 'events'
   selectedEvents.value = []
   eventsLoading.value = true
   try {
@@ -144,10 +151,79 @@ async function showEvents(taskId: string): Promise<void> {
     selectedEvents.value = resp.items
   } catch (e) {
     selectedEvents.value = []
-    // 不致命,记录到控制台
     console.warn('[history] load events failed:', e)
   } finally {
     eventsLoading.value = false
+  }
+}
+
+async function showLlmCalls(taskId: string): Promise<void> {
+  if (selectedTaskId.value === taskId && detailTab.value === 'llm-calls') {
+    collapseDetail()
+    return
+  }
+  selectedTaskId.value = taskId
+  detailTab.value = 'llm-calls'
+  selectedLlmCalls.value = []
+  expandedCalls.value = {}
+  eventsLoading.value = true
+  try {
+    const resp = await getTaskLlmCalls(taskId)
+    selectedLlmCalls.value = resp.items
+  } catch (e) {
+    selectedLlmCalls.value = []
+    console.warn('[history] load llm calls failed:', e)
+  } finally {
+    eventsLoading.value = false
+  }
+}
+
+function collapseDetail(): void {
+  selectedTaskId.value = null
+  detailTab.value = 'events'
+  selectedEvents.value = []
+  selectedLlmCalls.value = []
+  expandedCalls.value = {}
+}
+
+function toggleCall(id: number): void {
+  expandedCalls.value = { ...expandedCalls.value, [id]: !expandedCalls.value[id] }
+}
+
+/** LLM 调用 kind → 中文标签。 */
+const llmKindText: Record<string, string> = {
+  'ocr': 'OCR 识别',
+  'ocr-whole': '整页 OCR',
+  'paddleocr': 'PaddleOCR',
+  'judge': '辅助说明',
+  'llm-diff': '整篇比对',
+  'statement-column': '列定位',
+}
+
+/** status_code → CSS 类(2xx 绿、4xx 黄、5xx 红、null 灰)。 */
+function statusClass(code: number | null): string {
+  if (code == null) return 'http-fail'
+  if (code >= 200 && code < 300) return 'http-ok'
+  if (code >= 400 && code < 500) return 'http-4xx'
+  return 'http-5xx'
+}
+
+function httpStatusText(code: number | null): string {
+  return code == null ? '失败' : String(code)
+}
+
+function formatMs(ms: number | null): string {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${ms} ms`
+  return `${(ms / 1000).toFixed(2)} s`
+}
+
+/** 把 payload/response 对象渲染成可读 JSON(图片已脱敏)。 */
+function jsonPreview(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
   }
 }
 
@@ -240,23 +316,69 @@ onMounted(refresh)
                     :disabled="item.status !== 'done' && item.status !== 'failed'"
                     @click="showEvents(item.task_id)"
                   >
-                    {{ selectedTaskId === item.task_id ? '收起' : '时间线' }}
+                    {{ selectedTaskId === item.task_id && detailTab === 'events' ? '收起' : '时间线' }}
+                  </button>
+                  <button
+                    class="chip"
+                    type="button"
+                    :disabled="item.status !== 'done' && item.status !== 'failed'"
+                    @click="showLlmCalls(item.task_id)"
+                  >
+                    {{ selectedTaskId === item.task_id && detailTab === 'llm-calls' ? '收起' : '模型调用' }}
                   </button>
                 </td>
               </tr>
               <tr v-if="selectedTaskId === item.task_id" class="event-row">
                 <td colspan="7">
-                  <div v-if="eventsLoading" class="muted">加载时间线…</div>
-                  <ol v-else-if="selectedEvents.length" class="event-list">
-                    <li v-for="ev in selectedEvents" :key="ev.id">
-                      <span class="ev-time mono small">{{ formatTime(ev.created_at) }}</span>
-                      <span class="ev-stage">{{ ev.stage }}</span>
-                      <span class="muted small">
-                        progress {{ (ev.progress * 100).toFixed(0) }}%
-                      </span>
-                    </li>
-                  </ol>
-                  <p v-else class="muted">该任务没有已保存的里程碑事件(可能创建于本次持久化功能上线前)。</p>
+                  <div v-if="eventsLoading" class="muted">
+                    {{ detailTab === 'events' ? '加载时间线…' : '加载模型调用…' }}
+                  </div>
+                  <template v-else-if="detailTab === 'events'">
+                    <ol v-if="selectedEvents.length" class="event-list">
+                      <li v-for="ev in selectedEvents" :key="ev.id">
+                        <span class="ev-time mono small">{{ formatTime(ev.created_at) }}</span>
+                        <span class="ev-stage">{{ ev.stage }}</span>
+                        <span class="muted small">
+                          progress {{ (ev.progress * 100).toFixed(0) }}%
+                        </span>
+                      </li>
+                    </ol>
+                    <p v-else class="muted">该任务没有已保存的里程碑事件(可能创建于本次持久化功能上线前)。</p>
+                  </template>
+                  <template v-else>
+                    <div v-if="!selectedLlmCalls.length" class="muted">
+                      该任务没有已保存的模型调用记录(embedding 不记录;可能创建于本功能上线前)。
+                    </div>
+                    <ul v-else class="llm-call-list">
+                      <li v-for="call in selectedLlmCalls" :key="call.id" class="llm-call-item">
+                        <div class="llm-call-head" @click="toggleCall(call.id)">
+                          <span class="llm-kind" :class="`kind-${call.kind}`">
+                            {{ llmKindText[call.kind] ?? call.kind }}
+                          </span>
+                          <span :class="['http-tag', statusClass(call.status_code)]">
+                            {{ httpStatusText(call.status_code) }}
+                          </span>
+                          <span class="muted small">#{{ call.attempt }}</span>
+                          <span class="muted small">{{ formatMs(call.elapsed_ms) }}</span>
+                          <span class="mono small ev-time">{{ formatTime(call.created_at) }}</span>
+                          <span class="muted small toggle-hint">
+                            {{ expandedCalls[call.id] ? '收起 ▲' : '展开 ▼' }}
+                          </span>
+                        </div>
+                        <div v-if="call.error" class="llm-call-err small">⚠ {{ call.error }}</div>
+                        <div v-if="expandedCalls[call.id]" class="llm-call-body">
+                          <div class="llm-block">
+                            <div class="llm-block-title muted small">请求 payload(图片已脱敏)</div>
+                            <pre class="llm-json">{{ jsonPreview(call.payload) }}</pre>
+                          </div>
+                          <div v-if="call.response" class="llm-block">
+                            <div class="llm-block-title muted small">响应 response(截断 64KB)</div>
+                            <pre class="llm-json">{{ jsonPreview(call.response) }}</pre>
+                          </div>
+                        </div>
+                      </li>
+                    </ul>
+                  </template>
                   <p v-if="item.error" class="err small">错误: {{ item.error }}</p>
                 </td>
               </tr>
@@ -374,6 +496,8 @@ table.task-table {
 .risk-tag.risk-high { color: var(--risk-high); font-weight: 600; }
 .risk-tag.risk-medium { color: var(--risk-medium); font-weight: 600; }
 .risk-tag.risk-low { color: var(--risk-low); }
+.risk-tag.risk-changed { color: var(--risk-medium); font-weight: 600; }
+.risk-tag.risk-needs_review { color: var(--risk-medium); font-weight: 600; }
 .risk-tag.risk-clean { color: var(--risk-clean); }
 
 .event-row td {
@@ -402,6 +526,84 @@ table.task-table {
   border: 1px solid var(--border);
   padding: 1px 6px;
   border-radius: 4px;
+}
+
+/* —— LLM 调用明细 —— */
+.llm-call-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.llm-call-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+.llm-call-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+.llm-call-head:hover {
+  background: var(--surface-2);
+}
+.llm-kind {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.http-tag {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.http-ok { background: var(--risk-low-bg); color: var(--risk-low); }
+.http-4xx { background: var(--risk-medium-bg); color: var(--risk-medium); }
+.http-5xx { background: var(--risk-high-bg); color: var(--risk-high); }
+.http-fail { background: var(--risk-none-bg); color: var(--risk-none); }
+.toggle-hint {
+  margin-left: auto;
+}
+.llm-call-err {
+  padding: 6px 12px;
+  color: var(--risk-high);
+  background: var(--risk-high-bg);
+}
+.llm-call-body {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.llm-block-title {
+  margin-bottom: 4px;
+}
+.llm-json {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .pager {

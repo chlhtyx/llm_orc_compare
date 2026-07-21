@@ -169,7 +169,7 @@ def test_unreliable_recognition_marks_only_related_diff_for_review():
         )
     ]
 
-    apply_recognition_gate(report, diagnostics)
+    apply_recognition_gate(report, diagnostics, enable_risk_assessment=True)
 
     assert report.overall_risk == "high"
     assert report.change_status == "changed"

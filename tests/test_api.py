@@ -588,3 +588,50 @@ def test_get_task_events_endpoint(client):
 def test_get_task_events_unknown_404(client):
     r = client.get("/api/v1/tasks/unknown-task/events")
     assert r.status_code == 404
+
+
+# —— LLM 调用记录端点(/api/v1/tasks/{task_id}/llm-calls)——
+
+def test_get_task_llm_calls_endpoint(client):
+    """/api/v1/tasks/{id}/llm-calls 返回持久化的 LLM 调用记录(按 id 升序)。"""
+    from document_comparison.observability import LlmCallRecord
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("lc-1", "compare")
+    db_repo.save_llm_calls_batch("lc-1", [
+        LlmCallRecord(
+            kind="ocr", attempt=1, payload={"model": "m"},
+            status_code=200, elapsed_ms=50,
+            response={"choices": [{"message": {"content": "p1"}}]},
+        ),
+        LlmCallRecord(
+            kind="judge", attempt=1, payload={"model": "j"},
+            status_code=429, error="transient HTTP 429",
+        ),
+    ])
+
+    r = client.get("/api/v1/tasks/lc-1/llm-calls")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["task_id"] == "lc-1"
+    assert len(body["items"]) == 2
+    assert [it["kind"] for it in body["items"]] == ["ocr", "judge"]
+    assert body["items"][0]["status_code"] == 200
+    assert body["items"][0]["response"]["choices"][0]["message"]["content"] == "p1"
+    assert body["items"][1]["status_code"] == 429
+    assert body["items"][1]["error"] == "transient HTTP 429"
+
+
+def test_get_task_llm_calls_unknown_404(client):
+    r = client.get("/api/v1/tasks/unknown-task/llm-calls")
+    assert r.status_code == 404
+
+
+def test_get_task_llm_calls_empty_for_task_without_calls(client):
+    """任务存在但无 LLM 调用记录 → 空列表(不报错)。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("lc-empty", "compare")
+    r = client.get("/api/v1/tasks/lc-empty/llm-calls")
+    assert r.status_code == 200
+    assert r.json()["items"] == []

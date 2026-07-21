@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from difflib import SequenceMatcher
 
 from ..models import Alignment, Clause
 from ..structure.normalize import normalize_text
@@ -140,16 +141,20 @@ def align_clauses(
                 )
                 consumed_w.add(best.clause_id)
             else:
-                best_sim = max(
-                    (similarities[word_index][pdf_index] for word_index in range(len(rem_w))),
-                    default=0.0,
+                best_word_index = max(
+                    range(len(rem_w)),
+                    key=lambda word_index: similarities[word_index][pdf_index],
                 )
+                best_sim = similarities[best_word_index][pdf_index]
                 alignments.append(
                     Alignment(
                         word_clause_id=None,
                         pdf_clause_id=pc.clause_id,
                         match_type="unmatched",
                         similarity=max(best_sim, 0.0),
+                        alignment_reason=_unmatched_reason(
+                            rem_w[best_word_index], pc, best_sim, threshold
+                        ),
                     )
                 )
     elif rem_p:
@@ -161,18 +166,32 @@ def align_clauses(
                     pdf_clause_id=pc.clause_id,
                     match_type="unmatched",
                     similarity=0.0,
+                    alignment_reason="Word 侧没有可供配对的条款",
                 )
             )
 
     # —— 5. word 剩余 → deleted ——
-    for wc in rem_w:
+    for word_index, wc in enumerate(rem_w):
         if wc.clause_id not in consumed_w:
+            if rem_p:
+                best_pdf_index = max(
+                    range(len(rem_p)),
+                    key=lambda pdf_index: similarities[word_index][pdf_index],
+                )
+                best_sim = similarities[word_index][best_pdf_index]
+                reason = _unmatched_reason(
+                    wc, rem_p[best_pdf_index], best_sim, threshold
+                )
+            else:
+                best_sim = 0.0
+                reason = "PDF 侧没有可供配对的条款"
             alignments.append(
                 Alignment(
                     word_clause_id=wc.clause_id,
                     pdf_clause_id=None,
                     match_type="unmatched",
-                    similarity=0.0,
+                    similarity=max(best_sim, 0.0),
+                    alignment_reason=reason,
                 )
             )
 
@@ -202,6 +221,55 @@ def _group_by_field(clauses: list[Clause]) -> dict[str, list[Clause]]:
     for c in clauses:
         groups.setdefault(c.field_key, []).append(c)
     return groups
+
+
+def _unmatched_reason(
+    word_clause: Clause,
+    pdf_clause: Clause,
+    similarity: float,
+    threshold: float,
+) -> str:
+    """解释相近条款为何没有配成一对，并给出有界的字符差异线索。"""
+    if similarity < threshold:
+        reason = (
+            f"最相近的另一侧条款语义相似度 {similarity:.3f}，"
+            f"低于对齐阈值 {threshold:.3f}"
+        )
+    else:
+        reason = (
+            "存在达到阈值的候选，但未进入全局一对一单调最优配对"
+            f"（相似度 {similarity:.3f}，阈值 {threshold:.3f}）"
+        )
+    hint = _text_difference_hint(word_clause.text, pdf_clause.text)
+    return f"{reason}；主要字符差异：{hint}" if hint else reason
+
+
+def _text_difference_hint(word_text: str, pdf_text: str) -> str:
+    """忽略排版空白后，摘取少量 Word/PDF 独有字符用于解释未对齐。"""
+    word = _text_alignment_key(word_text)
+    pdf = _text_alignment_key(pdf_text)
+    word_only: list[str] = []
+    pdf_only: list[str] = []
+    for tag, w_start, w_end, p_start, p_end in SequenceMatcher(
+        None, word, pdf, autojunk=False
+    ).get_opcodes():
+        if tag in ("delete", "replace") and w_start != w_end:
+            word_only.append(word[w_start:w_end])
+        if tag in ("insert", "replace") and p_start != p_end:
+            pdf_only.append(pdf[p_start:p_end])
+
+    hints: list[str] = []
+    if word_only:
+        hints.append(f"Word 独有“{_bounded_snippets(word_only)}”")
+    if pdf_only:
+        hints.append(f"PDF 独有“{_bounded_snippets(pdf_only)}”")
+    return "；".join(hints)
+
+
+def _bounded_snippets(parts: list[str], limit: int = 40) -> str:
+    """原因字段保持简短，避免把整份条款重复写入报告。"""
+    value = "…".join(parts[:3])
+    return value if len(value) <= limit else f"{value[:limit]}…"
 
 
 def _text_alignment_key(text: str) -> str:

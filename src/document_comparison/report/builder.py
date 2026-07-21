@@ -91,15 +91,15 @@ def _report_change_status(diffs: list[Diff]) -> str:
 
 
 def _overall_risk_from_change_status(change_status: str) -> str:
-    """风险判别关闭时:overall_risk 从 change_status 推导,只反映「有无差异」。
+    """风险判别关闭时:overall_risk 直接镜像 change_status,不再表达风险等级。
 
-    - changed → low(有确认差异;前端徽章显示「低风险」可接受,或按 change_status 展示)
+    - changed → changed(有确认差异;前端按 change_status 文案展示,不显示「低风险」徽章)
     - needs_review → needs_review(待人工复核,与风险等级无关,直接保留语义)
     - clean → clean(无差异)
-    不再用 high/medium 表达,因为风险判别已被关闭。
+    不再用 high/medium/low 表达,因为风险判别已被关闭。
     """
     if change_status == "changed":
-        return "low"
+        return "changed"
     if change_status == "needs_review":
         return "needs_review"
     return "clean"
@@ -223,6 +223,7 @@ def build_report(
                     risk_reasons=risk_reasons,
                     verdict=verdict,
                     confidence=confidence,
+                    alignment_reason=al.alignment_reason,
                     segments=[DiffSegment(op="insert", text=pc.text)],
                     number=pc.number,
                     title=pc.title,
@@ -242,6 +243,7 @@ def build_report(
                     risk_reasons=risk_reasons,
                     verdict=verdict,
                     confidence=confidence,
+                    alignment_reason=al.alignment_reason,
                     segments=[DiffSegment(op="delete", text=wc.text)] if wc else [],
                     number=wc.number if wc else "",
                     title=wc.title if wc else "",

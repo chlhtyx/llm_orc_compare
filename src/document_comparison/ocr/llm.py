@@ -23,6 +23,7 @@ import random
 import re
 from collections import deque
 from pathlib import Path
+import contextvars
 import threading
 import time
 from typing import Any
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
-from ..observability import log_model_request, log_model_response
+from ..observability import log_model_failure, log_model_request, log_model_response
 from ..parsing.pdf import render_pages
 from .base import ProgressCb
 
@@ -270,6 +271,7 @@ class LLMOCREngine:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
                     last_exc = exc
+                    log_model_failure(logger, kind, request_started, str(exc))
                     logger.warning(
                         "%s transport error attempt=%s/%s reason=%s",
                         kind, attempt + 1, self.max_retries + 1, exc,
@@ -281,12 +283,24 @@ class LLMOCREngine:
                             request=resp.request,
                             response=resp,
                         )
+                        log_model_failure(
+                            logger, kind, request_started,
+                            f"transient HTTP {resp.status_code}",
+                            status_code=resp.status_code,
+                        )
                         logger.warning(
                             "%s transient http status=%s attempt=%s/%s",
                             kind, resp.status_code, attempt + 1, self.max_retries + 1,
                         )
                     else:
-                        resp.raise_for_status()  # 4xx:不可重试,直接抛
+                        try:
+                            resp.raise_for_status()  # 4xx:不可重试,直接抛
+                        except httpx.HTTPStatusError as exc:
+                            log_model_failure(
+                                logger, kind, request_started, str(exc),
+                                status_code=resp.status_code,
+                            )
+                            raise
                         data = resp.json()
                         log_model_response(logger, kind, resp.status_code, data, request_started)
                         return data["choices"][0]["message"]["content"]
@@ -452,13 +466,16 @@ class _BoundedConcurrency:
 
     def submit(self, fn, *args) -> None:
         self._sem.acquire()
-        t = threading.Thread(target=self._run, args=(fn, args), daemon=True)
+        # 捕获当前 context(含 observability.current_llm_collector),让子线程能
+        # 继续把 LLM 调用记录 append 到任务收集器。threading.Thread 不会自动继承。
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=self._run, args=(ctx, fn, args), daemon=True)
         t.start()
         self._threads.append(t)
 
-    def _run(self, fn, args) -> None:
+    def _run(self, ctx, fn, args) -> None:
         try:
-            fn(*args)
+            ctx.run(fn, *args)
         except BaseException as exc:  # noqa: BLE001 — 收集后统一重抛
             self._exc.append(exc)
         finally:

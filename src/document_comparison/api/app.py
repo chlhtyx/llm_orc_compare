@@ -792,6 +792,23 @@ def create_app() -> FastAPI:
             "items": [db_repo.event_to_dict(e) for e in events],
         }
 
+    @app.get("/api/v1/tasks/{task_id}/llm-calls")
+    async def list_task_llm_calls(task_id: str):
+        """返回指定任务所有对话型 LLM 调用记录(按 id 升序,即调用发生顺序)。
+
+        每条含 kind / attempt / status_code / elapsed_ms / payload(图片已脱敏)/
+        response(截断 64KB)/ error。embedding 调用不入本表。用于「比对记录 →
+        模型调用明细」调试与审计。
+        """
+        rec = await asyncio.to_thread(db_repo.get_task, task_id)
+        if rec is None:
+            raise HTTPException(404, "task not found")
+        calls = await asyncio.to_thread(db_repo.get_task_llm_calls, task_id)
+        return {
+            "task_id": task_id,
+            "items": [db_repo.llm_call_to_dict(c) for c in calls],
+        }
+
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。
     if settings.static_dir and settings.static_dir.is_dir():

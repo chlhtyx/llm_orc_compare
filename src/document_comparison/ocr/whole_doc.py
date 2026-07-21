@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import contextvars
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -226,13 +227,16 @@ class _BoundedConcurrency:
 
     def submit(self, fn, *args) -> None:
         self._sem.acquire()
-        t = threading.Thread(target=self._run, args=(fn, args), daemon=True)
+        # 捕获当前 context(含 observability.current_llm_collector),让子线程能
+        # 继续把 LLM 调用记录 append 到任务收集器。threading.Thread 不会自动继承。
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=self._run, args=(ctx, fn, args), daemon=True)
         t.start()
         self._threads.append(t)
 
-    def _run(self, fn, args) -> None:
+    def _run(self, ctx, fn, args) -> None:
         try:
-            fn(*args)
+            ctx.run(fn, *args)
         except BaseException as exc:  # noqa: BLE001 — 收集后统一重抛
             self._exc.append(exc)
         finally:

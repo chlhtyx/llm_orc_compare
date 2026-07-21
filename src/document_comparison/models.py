@@ -13,7 +13,7 @@ DocType = Literal["word", "pdf"]
 MatchType = Literal["number", "field", "normalized_exact", "semantic", "unmatched"]
 DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
-OverallRisk = Literal["high", "medium", "low", "clean", "needs_review"]
+OverallRisk = Literal["high", "medium", "low", "changed", "clean", "needs_review"]
 RecognitionStatus = Literal["reliable", "needs_review"]
 ChangeVerdict = Literal["clean", "changed", "needs_review"]
 EvidenceConfidence = Literal["high", "medium", "low"]
@@ -95,6 +95,10 @@ class Alignment(BaseModel):
     pdf_clause_id: str | None = None
     match_type: MatchType
     similarity: float = 0.0
+    alignment_reason: str = Field(
+        default="",
+        description="未对齐时记录最近候选、阈值判断和主要字符差异；已对齐时为空",
+    )
 
 
 class DiffSegment(BaseModel):
@@ -151,6 +155,10 @@ class Diff(BaseModel):
     )
     page_regions: list[PageRegion] = Field(
         default_factory=list, description="该条款在 PDF 扫描件上的高亮区域"
+    )
+    alignment_reason: str = Field(
+        default="",
+        description="未对齐原因；旧报告及已对齐条款为空",
     )
     number: str = ""
     title: str = ""

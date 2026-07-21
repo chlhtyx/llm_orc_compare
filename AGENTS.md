@@ -6,14 +6,15 @@
 
 ## 目录与职责
 
-- `src/document_comparison/api/`：FastAPI 路由、SSE 进度和配置接口;`/api/v1/tasks*` 提供比对记录列表与里程碑时间线查询。
+- `src/document_comparison/api/`：FastAPI 路由、SSE 进度和配置接口;`/api/v1/tasks*` 提供比对记录列表、里程碑时间线与模型调用明细查询。
 - `src/document_comparison/pipeline.py`：结构化条款比对主流水线。
 - `src/document_comparison/raw_pipeline.py`：纯文本快速比对流水线；不要与主流水线混为一谈。
 - `src/document_comparison/statement_pipeline.py`：对帐单金额统计流水线(多文件串行);与 `raw_pipeline` 完全独立。
-- `src/document_comparison/db/`：SQLAlchemy ORM、引擎工厂、任务记录/里程碑事件 CRUD;Postgres 为硬依赖,未配置 `DATABASE_URL` 启动失败。
+- `src/document_comparison/observability.py`：阶段耗时 + 模型调用日志,也是**对话型 LLM 调用记录的单点拦截入口**(`log_model_request/response/failure` 经 `current_llm_collector` contextvar 收集)。
+- `src/document_comparison/db/`：SQLAlchemy ORM、引擎工厂、任务记录/里程碑事件/LLM 配置/LLM 调用记录 CRUD;Postgres 为硬依赖,未配置 `DATABASE_URL` 启动失败。
 - `alembic/`：数据库迁移脚本;生产用 `alembic upgrade head`,开发可用 `DC_DB_AUTO_CREATE=1`。
 - `src/document_comparison/statement/`：金额列定位、代码确定性求和、LLM 兜底列指认。
-- `src/document_comparison/parsing/`、`ocr/`：Word/PDF 解析与 OCR 降级策略。
+- `src/document_comparison/parsing/`、`ocr/`：Word/PDF 解析与 OCR 降级策略;`_BoundedConcurrency` 子线程经 `ctx.run` 显式传播 `current_llm_collector` contextvar。
 - `src/document_comparison/structure/`、`align/`、`compare/`：条款切分、对齐、差异和风险判定。
 - `src/document_comparison/report/`：JSON、PDF 和 DOCX 报告输出。
 - `web/`：Vue 前端；接口客户端在 `web/src/api/`，状态在 `web/src/stores/`。
@@ -28,7 +29,8 @@
 - 改动报告数据结构时，保持 JSON、PDF、DOCX 输出及前端展示的一致性。
 - 改动 API 合约时，同步检查 `web/src/api/`、相关 stores、视图和后端测试。
 - Postgres 双写规则:任务记录元数据 + 完整报告 JSONB + **仅里程碑事件**入库(白名单见 `tasks.py::_MILESTONE_STAGES`);高频进度事件只留在内存供 SSE 消费。写库失败只记日志,不抛、不阻塞任务主流程。改 ORM 模型时必须同步新增 Alembic 迁移并通过 `alembic check`。
-- 标准合同比对(`pipeline.py` / `build_report`)默认 `enable_risk_assessment=False`:仅列举字符级/表格级差异,不做风险分级、不抽取高风险要素、LLM 辅助说明不触发。`Diff.risk_level` 恒为 `"none"`、`risk_reasons` 空、`key_elements` 空;`status`/`verdict`/`confidence` 与 OCR 待复核标记照常产出;`overall_risk` 从 `change_status` 推导(changed→low、needs_review、clean)。`options.enable_risk_assessment=true` 时恢复完整风险逻辑。无标注比对与对帐单统计不受此开关影响。
+- 对话型 LLM 调用记录(`task_llm_calls` 表):每次 HTTP 调用(含重试中间态、失败 attempt)各一行,经 `observability.current_llm_collector` contextvar 收集,任务结束批量入库。**只收集对话型 kind**(ocr/ocr-whole/paddleocr/judge/llm-diff/statement-column),**embedding 不入**(文本→向量,非对话型)。payload 中图片 base64 由 `_safe_model_value` 脱敏为 `{data_url, base64_chars, sha256}`,response 截断 64KB。threading 子线程必须用 `ctx.run` 显式传播 contextvar(见 `_BoundedConcurrency.submit/_run`);新增 OCR/judge 类调用点时,失败分支必须补 `log_model_failure` 调用,否则失败 attempt 不会有记录。
+- 标准合同比对(`pipeline.py` / `build_report`)默认 `enable_risk_assessment=False`:仅列举字符级/表格级差异,不做风险分级、不抽取高风险要素、LLM 辅助说明不触发。`Diff.risk_level` 恒为 `"none"`、`risk_reasons` 空、`key_elements` 空;`status`/`verdict`/`confidence` 与 OCR 待复核标记照常产出;`overall_risk` 镜像 `change_status`(changed→changed、needs_review、clean),**不再出现 low/medium/high**;前端不再显示风险徽章,报告页统一用 `change_status` 文案(发现确认内容变化 / 存在待人工复核 / 未发现内容变化),per-diff 风险标签仅在 `risk_level !== 'none'` 时才渲染。`apply_recognition_gate` 默认 `enable_risk_assessment=False`,与 build_report 保持一致。`options.enable_risk_assessment=true` 时恢复完整风险逻辑(高/中/低风险分级 + per-diff 徽章)。无标注比对与对帐单统计不受此开关影响。
 
 ## 开发与验证
 

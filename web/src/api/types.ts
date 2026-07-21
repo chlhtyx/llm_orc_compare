@@ -5,7 +5,7 @@ export type DocType = 'word' | 'pdf'
 export type MatchType = 'number' | 'field' | 'normalized_exact' | 'semantic' | 'unmatched'
 export type DiffStatus = 'identical' | 'modified' | 'added' | 'deleted'
 export type RiskLevel = 'high' | 'medium' | 'low' | 'none'
-export type OverallRisk = 'high' | 'medium' | 'low' | 'clean' | 'needs_review'
+export type OverallRisk = 'high' | 'medium' | 'low' | 'changed' | 'clean' | 'needs_review'
 export type RecognitionStatus = 'reliable' | 'needs_review'
 export type ChangeVerdict = 'clean' | 'changed' | 'needs_review'
 export type EvidenceConfidence = 'high' | 'medium' | 'low'
@@ -47,6 +47,7 @@ export interface Diff {
   confidence: EvidenceConfidence
   judged_by: 'rule' | 'llm'
   page_regions: PageRegion[]
+  alignment_reason: string
   number: string
   title: string
 }

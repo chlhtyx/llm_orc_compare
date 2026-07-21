@@ -1,10 +1,12 @@
 """ORM 表定义(SQLAlchemy 2.0 Mapped 风格)。
 
-三张表:
+四张表:
 - `task_records`:每次比对/统计任务的轻量元数据 + 完整报告 JSONB。
 - `task_events`:任务里程碑事件(start / 各阶段 done / done / failed),用于
   历史时间线查看;不入全量进度事件(高频写入),只入里程碑。
 - `llm_config`:LLM/OCR 模型配置单行 JSONB(UI 设置页持久化,不再走文件)。
+- `task_llm_calls`:对话型 LLM 调用的输入/输出记录(OCR/judge/llm-diff/statement-column,
+  含失败/重试),供「对比记录」页面查看模型调用明细。embedding 不入。
 
 报告 JSONB 三选一(report_compare / report_raw / report_statement),按任务类型写入;
 查询端点和前端按 kind 判读。JSONB 同时支持后期按结构化字段查询。
@@ -123,4 +125,45 @@ class LlmConfigRecord(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TaskLlmCall(Base):
+    """单次对话型 LLM HTTP 调用记录(含成功/失败/重试中间态)。
+
+    由 observability.log_model_request/response/failure 经 contextvar 收集器产生,
+    任务结束时批量入库。embedding 调用不入本表(文本→向量,非对话型)。
+
+    payload 中的图片 base64 已在收集阶段由 _safe_model_value 脱敏为
+    {data_url, base64_chars, sha256},避免几 MB base64 撑爆 JSONB。
+    response 截断到 64KB;error 截断到 512 字符。
+    """
+
+    __tablename__ = "task_llm_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("task_records.task_id", ondelete="CASCADE"), index=True
+    )
+    # kind 与 observability._COLLECTED_KINDS 对齐:
+    # ocr | ocr-whole | paddleocr | judge | llm-diff | statement-column
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    # 第几次尝试(1-based;重试递增)。每次 attempt 各一行,便于看重试模式。
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # HTTP 状态码;连接级失败(超时/网络)为 None。
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 失败原因摘要(TransportError / HTTPStatusError / 4xx);成功为 None。
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    # 请求体(图片已脱敏);非空。
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # 响应体(截断 64KB);失败为 None。
+    response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        # 单任务调用明细:按 task_id + id 升序(调用发生顺序)
+        Index("ix_task_llm_calls_task_id_id", "task_id", "id"),
     )

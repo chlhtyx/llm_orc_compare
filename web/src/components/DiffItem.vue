@@ -37,7 +37,7 @@ const verdictText = computed(() => ({
     <header class="diff-head">
       <span class="diff-title">{{ heading }}</span>
       <div class="diff-tags">
-        <OverallBadge :level="diff.risk_level" />
+        <OverallBadge v-if="diff.risk_level !== 'none'" :level="diff.risk_level" />
         <span :class="['verdict-pill', `verdict-${diff.verdict}`]">{{ verdictText }}</span>
         <span class="status-pill">{{ diff.status }}</span>
       </div>
@@ -46,6 +46,10 @@ const verdictText = computed(() => ({
     <ul v-if="diff.risk_reasons.length" class="reasons">
       <li v-for="(r, i) in diff.risk_reasons" :key="i">⚠ {{ r }}</li>
     </ul>
+
+    <p v-if="diff.alignment_reason" class="alignment-reason">
+      <span>未对齐原因</span>{{ diff.alignment_reason }}
+    </p>
 
     <div v-if="hasInlineDiff" class="diff-body diff-text">
       <template v-for="(seg, i) in diff.segments" :key="i">
@@ -96,6 +100,20 @@ const verdictText = computed(() => ({
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+.alignment-reason {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.alignment-reason span {
+  margin-right: 8px;
+  color: var(--text);
+  font-weight: 600;
 }
 .diff-title {
   font-weight: 600;

@@ -571,6 +571,31 @@ def test_real_unmatched_clause_keeps_its_actual_text_in_report():
     )
 
 
+def test_unmatched_alignment_reason_is_preserved_in_report():
+    """对齐层给出的未对齐原因应进入 JSON/前端共用的 Diff 数据。"""
+    missing = Clause(clause_id="word-1", doc_type="word", text="合同必读")
+    reason = "最相近 PDF 条款语义相似度 0.840，低于对齐阈值 0.850"
+
+    report = build_report(
+        alignments=[Alignment(
+            word_clause_id="word-1",
+            pdf_clause_id=None,
+            match_type="unmatched",
+            similarity=0.84,
+            alignment_reason=reason,
+        )],
+        word_by={"word-1": missing},
+        pdf_by={},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    assert report.unmatched_clauses[0].alignment_reason == reason
+
+
 # —— 风险判别开关(enable_risk_assessment)——
 # 默认关闭:仅列举差异(status/verdict/segments 仍由 diff 决定),
 # 不做风险分级、不抽取高风险要素、overall 从 change_status 推导。
@@ -655,9 +680,9 @@ def test_build_report_risk_enabled_keeps_legacy_behavior():
 
 
 def test_build_report_risk_disabled_overall_uses_change_status():
-    """关闭风险 + 有差异 → overall_risk 从 change_status 推导,不再表达高/中/低。
+    """关闭风险 + 有差异 → overall_risk 镜像 change_status,不再表达高/中/低。
 
-    changed → low(表示「有差异」),clean → clean。
+    changed → changed(不再出现 low),clean → clean。
     """
     word_clause, pdf_clause = _amount_tamper_clauses()
     # 有差异
@@ -678,7 +703,7 @@ def test_build_report_risk_disabled_overall_uses_change_status():
         enable_risk_assessment=False,
     )
     assert report_changed.change_status == "changed"
-    assert report_changed.overall_risk == "low"  # 有差异占位
+    assert report_changed.overall_risk == "changed"  # 镜像 change_status
 
     # 无差异(两侧文本完全一致)
     same_word = Clause(clause_id="word-2", doc_type="word", number="2", text="甲方提供设备。")
@@ -702,3 +727,80 @@ def test_build_report_risk_disabled_overall_uses_change_status():
     assert report_clean.change_status == "clean"
     assert report_clean.overall_risk == "clean"
     assert report_clean.diffs == []
+
+
+def test_apply_recognition_gate_risk_off_returns_changed():
+    """apply_recognition_gate 在 risk-off 模式下:confirmed → overall_risk='changed'(不再 'low')。
+
+    回归保护:gate 会在 build_report 之后无条件运行并覆盖 overall_risk,
+    若不区分 flag,confirmed 分支会硬编码 'low'。本测试验证 risk-off 时镜像 change_status。
+
+    关键:必须存在 unreliable 页面才能让 gate 进入 confirmed/review 分支(全可靠时 gate 提前 return)。
+    diff 落在可靠页(page 0),unrelated 的不可靠页(page 1)用来触发 gate 主体逻辑但不影响该 diff。
+    """
+    from document_comparison.models import Diff, PageRegion, PageRecognitionDiagnostic
+    from document_comparison.ocr.quality import apply_recognition_gate
+
+    def _make_report(*, risk_level: str, initial_overall: str) -> TamperReport:
+        return TamperReport(
+            source="s.docx",
+            target="t.pdf",
+            overall_risk=initial_overall,
+            change_status="changed",
+            diffs=[
+                Diff(
+                    alignment_id="al1",
+                    status="modified",
+                    risk_level=risk_level,
+                    page_regions=[PageRegion(page_index=0, bbox=[0, 0, 1, 1])],
+                ),
+            ],
+        )
+
+    # page 0 可靠(diff 所在页)、page 1 不可靠(无关页,只为触发 gate 主体)
+    diagnostics = [
+        PageRecognitionDiagnostic(page_index=0, source="native", reliable=True, char_count=100),
+        PageRecognitionDiagnostic(page_index=1, source="fallback", reliable=False, char_count=50),
+    ]
+
+    # risk-off(默认):confirmed → 'changed',绝不出现 'low'
+    report = _make_report(risk_level="high", initial_overall="high")
+    apply_recognition_gate(report, diagnostics, enable_risk_assessment=False)
+    assert report.change_status == "changed"
+    assert report.overall_risk == "changed"
+
+    # risk-on:仍按 levels 取最高(这里 high)
+    report2 = _make_report(risk_level="high", initial_overall="clean")
+    apply_recognition_gate(report2, diagnostics, enable_risk_assessment=True)
+    assert report2.overall_risk == "high"
+
+
+def test_apply_recognition_gate_risk_off_empty_levels_returns_changed():
+    """risk-off + confirmed + 所有 diff.risk_level='none' → 'changed'(不再 'low')。
+
+    这正是默认比对的真实场景:diff.risk_level 恒为 none,gate 旧逻辑会返回 'low'。
+    同样需要 unrelated 不可靠页来触发 gate 主体。
+    """
+    from document_comparison.models import Diff, PageRegion, PageRecognitionDiagnostic
+    from document_comparison.ocr.quality import apply_recognition_gate
+
+    report = TamperReport(
+        source="s.docx",
+        target="t.pdf",
+        overall_risk="clean",
+        change_status="changed",
+        diffs=[
+            Diff(
+                alignment_id="al1",
+                status="modified",
+                risk_level="none",
+                page_regions=[PageRegion(page_index=0, bbox=[0, 0, 1, 1])],
+            ),
+        ],
+    )
+    diagnostics = [
+        PageRecognitionDiagnostic(page_index=0, source="native", reliable=True, char_count=100),
+        PageRecognitionDiagnostic(page_index=1, source="fallback", reliable=False, char_count=50),
+    ]
+    apply_recognition_gate(report, diagnostics)  # 默认 enable_risk_assessment=False
+    assert report.overall_risk == "changed"

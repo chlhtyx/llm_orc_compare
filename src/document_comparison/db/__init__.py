@@ -2,7 +2,7 @@
 
 包职责:
 - `engine`:引擎/会话工厂、连接健康检查、session_scope 上下文。
-- `models`:ORM 表定义(`task_records`、`task_events`、`llm_config`)。
+- `models`:ORM 表定义(`task_records`、`task_events`、`llm_config`、`task_llm_calls`)。
 - `repository`:同步数据访问 API,供 `tasks.py` / `api/app.py` 调用。
 
 写库走 `asyncio.to_thread`,与现有 storage.py 文件风格一致,
@@ -18,13 +18,14 @@ from .engine import (
     run_migrations,
     session_scope,
 )
-from .models import LlmConfigRecord, TaskEvent, TaskRecord
+from .models import LlmConfigRecord, TaskEvent, TaskLlmCall, TaskRecord
 from . import repository
 
 __all__ = [
     "Base",
     "LlmConfigRecord",
     "TaskEvent",
+    "TaskLlmCall",
     "TaskRecord",
     "check_connection",
     "create_all",

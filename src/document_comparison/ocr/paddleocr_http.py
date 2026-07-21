@@ -32,6 +32,7 @@ import base64
 import logging
 import random
 import re
+import contextvars
 import threading
 import time
 from collections import deque
@@ -43,7 +44,7 @@ import httpx
 
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
-from ..observability import log_model_request, log_model_response
+from ..observability import log_model_failure, log_model_request, log_model_response
 from ..parsing.pdf import render_pages
 from .base import ProgressCb
 
@@ -231,6 +232,7 @@ class PaddleOCREngine:
                     resp = client.post(url, json=payload, headers=headers)
                 except httpx.TransportError as exc:
                     last_exc = exc
+                    log_model_failure(logger, "paddleocr", request_started, str(exc))
                     logger.warning(
                         "paddleocr transport error attempt=%s/%s reason=%s",
                         attempt + 1, self.max_retries + 1, exc,
@@ -242,12 +244,24 @@ class PaddleOCREngine:
                             request=resp.request,
                             response=resp,
                         )
+                        log_model_failure(
+                            logger, "paddleocr", request_started,
+                            f"transient HTTP {resp.status_code}",
+                            status_code=resp.status_code,
+                        )
                         logger.warning(
                             "paddleocr transient http status=%s attempt=%s/%s",
                             resp.status_code, attempt + 1, self.max_retries + 1,
                         )
                     else:
-                        resp.raise_for_status()
+                        try:
+                            resp.raise_for_status()
+                        except httpx.HTTPStatusError as exc:
+                            log_model_failure(
+                                logger, "paddleocr", request_started, str(exc),
+                                status_code=resp.status_code,
+                            )
+                            raise
                         data = resp.json()
                         log_model_response(logger, "paddleocr", resp.status_code, data, request_started)
                         choice = data["choices"][0]
@@ -578,13 +592,16 @@ class _BoundedConcurrency:
 
     def submit(self, fn, *args) -> None:
         self._sem.acquire()
-        t = threading.Thread(target=self._run, args=(fn, args), daemon=True)
+        # 捕获当前 context(含 observability.current_llm_collector),让子线程能
+        # 继续把 LLM 调用记录 append 到任务收集器。threading.Thread 不会自动继承。
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=self._run, args=(ctx, fn, args), daemon=True)
         t.start()
         self._threads.append(t)
 
-    def _run(self, fn, args) -> None:
+    def _run(self, ctx, fn, args) -> None:
         try:
-            fn(*args)
+            ctx.run(fn, *args)
         except BaseException as exc:  # noqa: BLE001
             self._exc.append(exc)
         finally:

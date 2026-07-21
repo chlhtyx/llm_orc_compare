@@ -118,7 +118,7 @@ def test_pipeline_detects_amount_tamper(tmp_path):
 
 def test_pipeline_risk_disabled_by_default(tmp_path):
     """默认 enable_risk_assessment=False:同样的金额篡改,差异仍被报告,
-    但不做风险分级、不抽取 key_elements,overall 从 change_status 推导为 low。"""
+    但不做风险分级、不抽取 key_elements,overall 镜像 change_status(=changed,不再 low)。"""
     parts = [
         ("h1", "第二条 合同金额"),
         ("p", "金额为100万元。"),
@@ -140,9 +140,9 @@ def test_pipeline_risk_disabled_by_default(tmp_path):
     assert all(d.risk_reasons == [] for d in report.diffs)
     # 高风险要素未抽取
     assert report.key_elements == []
-    # overall 从 change_status 推导:有差异 → low(不再 high)
+    # overall 镜像 change_status:有差异 → changed(不再出现 low/medium/high)
     assert report.change_status == "changed"
-    assert report.overall_risk == "low"
+    assert report.overall_risk == "changed"
 
 
 def test_pipeline_header_field_alignment_no_false_positive(tmp_path):

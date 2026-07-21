@@ -113,7 +113,9 @@ def run_pipeline(
             enable_risk_assessment=enable_risk_assessment,
         )
         diagnostics = list(getattr(ocr, "last_diagnostics", []))
-        apply_recognition_gate(report, diagnostics)
+        apply_recognition_gate(
+            report, diagnostics, enable_risk_assessment=enable_risk_assessment,
+        )
     _progress("compare_done", 1.0)
 
     return report

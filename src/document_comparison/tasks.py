@@ -21,6 +21,7 @@ from .models import TaskInfo, TamperReport, TextDiffReport, StatementSummaryRepo
 from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
 from .statement_pipeline import run_statement_pipeline
+from .observability import llm_call_collector
 from . import webhook
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,13 @@ class TaskManager:
             task.info.task_id, stage, prog, dict(task.info.stage_timings),
         )
 
+    async def _save_llm_calls(self, task_id: str, records: list) -> None:
+        """把收集器收集到的对话型 LLM 调用记录批量入库(吞异常)。"""
+        if not records:
+            return
+        await self._db_thread(db_repo.save_llm_calls_batch, task_id, list(records))
+        logger.info("task %s collected %d llm call record(s)", task_id, len(records))
+
     async def run(
         self, task_id: str, word_path: str, pdf_path: str,
         *, enable_llm_judge: bool = False, ocr_backend: str | None = None,
@@ -212,13 +220,18 @@ class TaskManager:
                 task.info.status = "running"
                 # pipeline 为同步阻塞(OCR/解析),放工作线程
                 # 进度回调从工作线程实时推送(stage, fraction)
-                report = await asyncio.to_thread(
-                    run_pipeline, word_path, pdf_path, settings,
-                    on_progress=self._make_progress_cb(task),
-                    enable_llm_judge=enable_llm_judge,
-                    ocr_backend=ocr_backend,
-                    enable_risk_assessment=enable_risk_assessment,
-                )
+                # llm_call_collector 设 contextvar,to_thread 把它复制进工作线程;
+                # OCR 内部 threading.Thread 经 _BoundedConcurrency.ctx.run 再传到孙线程,
+                # 所有对话型 LLM 调用记录 append 到同一个 list,任务结束批量入库。
+                with llm_call_collector() as llm_calls:
+                    report = await asyncio.to_thread(
+                        run_pipeline, word_path, pdf_path, settings,
+                        on_progress=self._make_progress_cb(task),
+                        enable_llm_judge=enable_llm_judge,
+                        ocr_backend=ocr_backend,
+                        enable_risk_assessment=enable_risk_assessment,
+                    )
+                await self._save_llm_calls(task_id, llm_calls)
             task.report = report
             task.info.overall_risk = report.overall_risk
             task.info.status = "done"
@@ -285,12 +298,14 @@ class TaskManager:
         try:
             async with self._sem:
                 task.info.status = "running"
-                report = await asyncio.to_thread(
-                    run_raw_pipeline, word_path, pdf_path,
-                    on_progress=self._make_progress_cb(task),
-                    char_level=char_level,
-                    ocr_backend=ocr_backend,
-                )
+                with llm_call_collector() as llm_calls:
+                    report = await asyncio.to_thread(
+                        run_raw_pipeline, word_path, pdf_path,
+                        on_progress=self._make_progress_cb(task),
+                        char_level=char_level,
+                        ocr_backend=ocr_backend,
+                    )
+                await self._save_llm_calls(task_id, llm_calls)
             task.raw_report = report
             task.info.status = "done"
             task.push_event("done", 1.0)
@@ -356,13 +371,15 @@ class TaskManager:
         try:
             async with self._sem:
                 task.info.status = "running"
-                report = await asyncio.to_thread(
-                    run_statement_pipeline, pdf_paths, file_names,
-                    on_progress=self._make_progress_cb(task),
-                    ocr_backend=ocr_backend,
-                    amount_column_keywords=amount_column_keywords,
-                    enable_llm_column_detection=enable_llm_column_detection,
-                )
+                with llm_call_collector() as llm_calls:
+                    report = await asyncio.to_thread(
+                        run_statement_pipeline, pdf_paths, file_names,
+                        on_progress=self._make_progress_cb(task),
+                        ocr_backend=ocr_backend,
+                        amount_column_keywords=amount_column_keywords,
+                        enable_llm_column_detection=enable_llm_column_detection,
+                    )
+                await self._save_llm_calls(task_id, llm_calls)
             task.statement_report = report
             task.info.status = "done"
             task.push_event("done", 1.0)

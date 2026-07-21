@@ -34,6 +34,31 @@ export interface TaskEventItem {
   created_at: string | null
 }
 
+/** 对话型 LLM 调用 kind(后端 observability._COLLECTED_KINDS)。embedding 不入。 */
+export type LlmCallKind =
+  | 'ocr'
+  | 'ocr-whole'
+  | 'paddleocr'
+  | 'judge'
+  | 'llm-diff'
+  | 'statement-column'
+
+/** 单次 LLM 调用记录(后端 repository.llm_call_to_dict)。 */
+export interface LlmCallItem {
+  id: number
+  task_id: string
+  kind: LlmCallKind | string   // 容忍后端未来新增 kind 不崩前端
+  attempt: number
+  status_code: number | null   // null = 连接级失败(超时/网络)
+  elapsed_ms: number | null
+  error: string | null
+  /** payload 中图片 base64 已被脱敏为 {data_url, base64_chars, sha256} */
+  payload: Record<string, unknown>
+  /** response 截断到 64KB;失败为 null */
+  response: Record<string, unknown> | null
+  created_at: string | null    // ISO
+}
+
 export interface ListTasksParams {
   kind?: TaskKind
   status?: TaskStatus
@@ -58,6 +83,10 @@ export function listTasks(params: ListTasksParams = {}): Promise<ListTasksRespon
 
 export function getTaskEvents(taskId: string): Promise<{ task_id: string; items: TaskEventItem[] }> {
   return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/events`)
+}
+
+export function getTaskLlmCalls(taskId: string): Promise<{ task_id: string; items: LlmCallItem[] }> {
+  return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/llm-calls`)
 }
 
 /** 按 kind 推导该任务对应的「查看报告」路由路径。 */

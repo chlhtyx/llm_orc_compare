@@ -249,6 +249,10 @@ a:hover {
   background: var(--risk-low-bg);
   color: var(--risk-low);
 }
+.badge-changed {
+  background: var(--risk-medium-bg);
+  color: var(--risk-medium);
+}
 .badge-none,
 .badge-clean {
   background: var(--risk-none-bg);

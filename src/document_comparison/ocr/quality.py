@@ -10,6 +10,8 @@ _QUALITY_REASON = "识别质量不足，当前差异仅供人工复核"
 def apply_recognition_gate(
     report: TamperReport,
     diagnostics: list[PageRecognitionDiagnostic],
+    *,
+    enable_risk_assessment: bool = False,
 ) -> TamperReport:
     report.recognition_diagnostics = diagnostics
     unreliable = [item for item in diagnostics if not item.reliable]
@@ -39,8 +41,13 @@ def apply_recognition_gate(
     review = [diff for diff in all_diffs if diff.verdict == "needs_review"]
     if confirmed:
         report.change_status = "changed"
-        levels = [diff.risk_level for diff in all_diffs if diff.risk_level != "none"]
-        report.overall_risk = max_risk(levels) if levels else "low"
+        if enable_risk_assessment:
+            # 风险开启:按 diff.risk_level 取最高;全为 none 时占位 low。
+            levels = [diff.risk_level for diff in all_diffs if diff.risk_level != "none"]
+            report.overall_risk = max_risk(levels) if levels else "low"
+        else:
+            # 风险关闭:overall_risk 镜像 change_status,不出现 low。
+            report.overall_risk = "changed"
     elif review or unreliable:
         # 即使未观察到差异，坏页也意味着无法证明整份回收件 clean。
         report.change_status = "needs_review"

@@ -22,7 +22,7 @@ from ..models import (
     TaskStatus,
 )
 from .engine import session_scope
-from .models import LlmConfigRecord, TaskEvent, TaskRecord
+from .models import LlmConfigRecord, TaskEvent, TaskLlmCall, TaskRecord
 
 logger = logging.getLogger(__name__)
 
@@ -258,3 +258,64 @@ def save_llm_config(config: dict[str, Any]) -> None:
             s.add(LlmConfigRecord(id=_LLM_CONFIG_ROW_ID, config=payload))
         else:
             rec.config = payload
+
+
+# —— LLM 调用记录 CRUD(对话型调用 IO,embedding 不入)——
+
+
+def save_llm_calls_batch(
+    task_id: str, records: "list[Any]"
+) -> int:
+    """批量插入一个任务收集到的 LLM 调用记录(来自 observability 收集器)。
+
+    records 元素是 observability.LlmCallRecord dataclass。一次 session 批量 add,
+    失败由 session_scope 记日志并回滚(调用方 _safe_db 会再吞一次)。
+    返回写入条数(供 tasks.py 日志)。空列表直接返回 0。
+    """
+    if not records:
+        return 0
+    rows = [
+        TaskLlmCall(
+            task_id=task_id,
+            kind=rec.kind,
+            attempt=int(rec.attempt),
+            status_code=rec.status_code,
+            elapsed_ms=rec.elapsed_ms,
+            error=rec.error,
+            payload=rec.payload if rec.payload is not None else {},
+            response=rec.response,
+        )
+        for rec in records
+    ]
+    with session_scope() as s:
+        s.add_all(rows)
+    return len(rows)
+
+
+def get_task_llm_calls(task_id: str) -> list[TaskLlmCall]:
+    """返回该任务所有 LLM 调用记录(按 id 升序,即调用发生顺序)。"""
+    with session_scope() as s:
+        return list(s.scalars(
+            select(TaskLlmCall)
+            .where(TaskLlmCall.task_id == task_id)
+            .order_by(TaskLlmCall.id)
+        ))
+
+
+def llm_call_to_dict(rec: TaskLlmCall) -> dict[str, Any]:
+    """把 TaskLlmCall 序列化为 JSON 友好 dict(供 API 返回)。
+
+    payload/response 保持原结构(图片已脱敏、response 已截断)。
+    """
+    return {
+        "id": rec.id,
+        "task_id": rec.task_id,
+        "kind": rec.kind,
+        "attempt": rec.attempt,
+        "status_code": rec.status_code,
+        "elapsed_ms": rec.elapsed_ms,
+        "error": rec.error,
+        "payload": rec.payload,
+        "response": rec.response,
+        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+    }

@@ -11,6 +11,7 @@ const TEXT: Record<string, string> = {
   high: '高风险',
   medium: '中风险',
   low: '低风险',
+  changed: '有变化',
   none: '无风险',
   clean: '未见篡改',
   needs_review: '待人工复核',

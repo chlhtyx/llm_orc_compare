@@ -124,6 +124,39 @@ def test_normalized_exact_does_not_hide_identifier_change():
     assert len([a for a in alignments if a.match_type == "unmatched"]) == 2
 
 
+def test_unmatched_reason_identifies_threshold_and_text_changes():
+    """相近标题未达阈值时，应说明阈值和主要字符差异，而非只报 added/deleted。"""
+    class BelowThresholdEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, _left, _right):
+            return 0.84
+
+    word = [_clause(
+        "w1",
+        "",
+        "采 购 合 同(简易版)\n"
+        "申购单编号: QGSC260708010 合同编号: SSC2607130114 合同必读",
+    )]
+    pdf = [_clause(
+        "p1",
+        "",
+        "采购合同(简易版)\n"
+        "申购单编号:QGSC2607080010合同编号:SSC2607130114",
+        "pdf",
+    )]
+
+    alignments = align_clauses(word, pdf, BelowThresholdEmbedding(), threshold=0.85)
+
+    assert len(alignments) == 2
+    for alignment in alignments:
+        assert "0.840" in alignment.alignment_reason
+        assert "0.850" in alignment.alignment_reason
+        assert "Word 独有“合同必读”" in alignment.alignment_reason
+        assert "PDF 独有“0”" in alignment.alignment_reason
+
+
 def test_semantic_alignment_embeds_both_sides_in_one_batch():
     class CountingEmbedding(MockEmbedding):
         def __init__(self):

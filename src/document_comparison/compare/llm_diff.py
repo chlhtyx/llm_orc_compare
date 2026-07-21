@@ -27,7 +27,7 @@ import httpx
 
 from ..config import settings
 from ..models import DiffSegment, TextDiffHunk, TextDiffReport
-from ..observability import log_model_request, log_model_response
+from ..observability import log_model_failure, log_model_request, log_model_response
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +172,7 @@ def _post_judge_chat(system_prompt: str, user_content: str) -> str:
                 resp = client.post(url, json=payload, headers=headers)
             except httpx.TransportError as exc:
                 last_exc = exc
+                log_model_failure(logger, "llm-diff", request_started, str(exc))
                 logger.warning(
                     "llm-diff transport error attempt=%s/%s reason=%s",
                     attempt + 1, max_retries + 1, exc,
@@ -183,12 +184,24 @@ def _post_judge_chat(system_prompt: str, user_content: str) -> str:
                         request=resp.request,
                         response=resp,
                     )
+                    log_model_failure(
+                        logger, "llm-diff", request_started,
+                        f"transient HTTP {resp.status_code}",
+                        status_code=resp.status_code,
+                    )
                     logger.warning(
                         "llm-diff transient http status=%s attempt=%s/%s",
                         resp.status_code, attempt + 1, max_retries + 1,
                     )
                 else:
-                    resp.raise_for_status()  # 4xx:不可重试,直接抛
+                    try:
+                        resp.raise_for_status()  # 4xx:不可重试,直接抛
+                    except httpx.HTTPStatusError as exc:
+                        log_model_failure(
+                            logger, "llm-diff", request_started, str(exc),
+                            status_code=resp.status_code,
+                        )
+                        raise
                     data = resp.json()
                     log_model_response(logger, "llm-diff", resp.status_code, data, request_started)
                     return data["choices"][0]["message"]["content"]

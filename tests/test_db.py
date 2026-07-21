@@ -209,3 +209,104 @@ def test_llm_config_save_and_reload(db_isolated):
     db_repo.save_llm_config({"embed_backend": "mock"})
     got2 = db_repo.get_llm_config()
     assert got2 == {"embed_backend": "mock"}
+
+
+# —— LLM 调用记录 CRUD(task_llm_calls 表)——
+
+def test_save_llm_calls_batch_and_get(db_isolated):
+    """批量写入 LlmCallRecord,按 id 升序读回,字段完整;payload 图片已脱敏。"""
+    from document_comparison.observability import LlmCallRecord
+
+    db_repo.create_task("llm-1", "compare", target_names=["t.pdf"])
+    records = [
+        LlmCallRecord(
+            kind="ocr", attempt=1,
+            payload={"model": "m", "image": {"url": "data:image/png;base64,AAAA"}},
+        ),
+        LlmCallRecord(
+            kind="judge", attempt=2,
+            payload={"model": "j"},
+            status_code=429,
+            elapsed_ms=120,
+            error="transient HTTP 429",
+        ),
+        LlmCallRecord(
+            kind="ocr", attempt=1,
+            payload={"model": "m"},
+            status_code=200,
+            elapsed_ms=350,
+            response={"choices": [{"message": {"content": "page1"}}]},
+        ),
+    ]
+    # 这些 record 在收集时已经脱敏/补全,这里模拟「已脱敏」状态
+    records[0].payload["image"]["url"] = {
+        "data_url": "data:image/png;base64", "base64_chars": 4, "sha256": "abc123",
+    }
+
+    count = db_repo.save_llm_calls_batch("llm-1", records)
+    assert count == 3
+
+    got = db_repo.get_task_llm_calls("llm-1")
+    assert len(got) == 3
+    # 按 id 升序(写入顺序)
+    assert [c.kind for c in got] == ["ocr", "judge", "ocr"]
+    assert [c.attempt for c in got] == [1, 2, 1]
+    # 字段完整
+    assert got[0].status_code is None        # 第一条未补全(模拟请求发出但未记录响应)
+    assert got[1].status_code == 429
+    assert got[1].error == "transient HTTP 429"
+    assert got[2].status_code == 200
+    assert got[2].response["choices"][0]["message"]["content"] == "page1"
+    # 图片脱敏字段存住
+    img = got[0].payload["image"]["url"]
+    assert img["sha256"] == "abc123"
+    assert "AAAA" not in str(got[0].payload)
+
+
+def test_save_llm_calls_batch_empty_is_noop(db_isolated):
+    """空列表批量写入是 noop,返回 0。"""
+    db_repo.create_task("llm-2", "compare")
+    assert db_repo.save_llm_calls_batch("llm-2", []) == 0
+    assert db_repo.get_task_llm_calls("llm-2") == []
+
+
+def test_llm_calls_cascade_delete_with_task(db_isolated):
+    """删除 task 后,其 llm_calls 自动级联删除(ON DELETE CASCADE)。"""
+    from sqlalchemy import delete
+
+    from document_comparison.observability import LlmCallRecord
+    from document_comparison.db.models import TaskRecord
+
+    db_repo.create_task("llm-3", "compare")
+    db_repo.save_llm_calls_batch("llm-3", [
+        LlmCallRecord(kind="ocr", attempt=1, payload={"model": "m"}),
+    ])
+    assert len(db_repo.get_task_llm_calls("llm-3")) == 1
+
+    # 直接删 task_records(走 CASCADE)
+    from document_comparison.db.engine import session_scope
+    with session_scope() as s:
+        s.execute(delete(TaskRecord).where(TaskRecord.task_id == "llm-3"))
+    assert db_repo.get_task_llm_calls("llm-3") == []
+
+
+def test_llm_call_to_dict_serialization(db_isolated):
+    """llm_call_to_dict 字段齐全,JSON 友好(created_at ISO 化)。"""
+    from document_comparison.observability import LlmCallRecord
+
+    db_repo.create_task("llm-4", "compare")
+    db_repo.save_llm_calls_batch("llm-4", [
+        LlmCallRecord(
+            kind="ocr", attempt=1, payload={"model": "m"},
+            status_code=200, elapsed_ms=50,
+            response={"ok": True},
+        ),
+    ])
+    got = db_repo.get_task_llm_calls("llm-4")
+    d = db_repo.llm_call_to_dict(got[0])
+    assert d["task_id"] == "llm-4"
+    assert d["kind"] == "ocr"
+    assert d["status_code"] == 200
+    assert d["elapsed_ms"] == 50
+    assert d["response"] == {"ok": True}
+    assert "created_at" in d and isinstance(d["created_at"], str)

@@ -2,7 +2,6 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ProgressTracker from '@/components/ProgressTracker.vue'
-import OverallBadge from '@/components/OverallBadge.vue'
 import DiffList from '@/components/DiffList.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
@@ -140,8 +139,9 @@ function onSelectClause(id: string) {
         <section class="card">
         <div class="summary">
         <div class="sum-item">
-            <OverallBadge :level="reportStore.overallRisk" />
-            <span class="muted verdict-summary">{{ changeStatusText }}</span>
+            <span :class="['verdict-badge', `verdict-${reportStore.report?.change_status ?? 'clean'}`]">
+              {{ changeStatusText }}
+            </span>
         </div>
         <div class="sum-item">
             <span class="sum-num">{{ reportStore.counts.total }}</span>
@@ -264,9 +264,25 @@ display: flex;
 flex-direction: column;
 align-items: flex-start;
 }
-.verdict-summary {
-  margin-top: 4px;
-  font-size: 12px;
+.verdict-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.verdict-changed {
+  background: var(--risk-medium-bg);
+  color: var(--risk-medium);
+}
+.verdict-needs_review {
+  background: var(--risk-medium-bg);
+  color: var(--risk-medium);
+}
+.verdict-clean {
+  background: var(--risk-none-bg);
+  color: var(--risk-none);
 }
 .sum-num {
 font-size: 22px;

@@ -21,7 +21,7 @@ import httpx
 
 from ..config import settings
 from ..models import DiffSegment, RiskLevel
-from ..observability import log_model_request, log_model_response
+from ..observability import log_model_failure, log_model_request, log_model_response
 
 logger = logging.getLogger(__name__)
 
@@ -121,13 +121,26 @@ def llm_judge_diff(
                 resp = client.post(url, json=payload, headers=headers)
             except httpx.TransportError as exc:
                 last_exc = exc
+                log_model_failure(logger, "judge", request_started, str(exc))
                 logger.warning("llm judge transport error attempt=%s/%s %s", attempt + 1, max_retries + 1, exc)
             else:
                 if resp.status_code == 429 or resp.status_code >= 500:
                     last_exc = httpx.HTTPStatusError(f"HTTP {resp.status_code}", request=resp.request, response=resp)
+                    log_model_failure(
+                        logger, "judge", request_started,
+                        f"transient HTTP {resp.status_code}",
+                        status_code=resp.status_code,
+                    )
                     logger.warning("llm judge transient http=%s attempt=%s/%s", resp.status_code, attempt + 1, max_retries + 1)
                 else:
-                    resp.raise_for_status()
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        log_model_failure(
+                            logger, "judge", request_started, str(exc),
+                            status_code=resp.status_code,
+                        )
+                        raise
                     data = resp.json()
                     log_model_response(logger, "judge", resp.status_code, data, request_started)
                     content = data["choices"][0]["message"]["content"]
