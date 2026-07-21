@@ -1,13 +1,17 @@
 """运行时配置。
 
 基础设施(服务、认证、存储)从环境变量读取;
-LLM / OCR 相关配置统一持久化于 llm_config.json,不使用环境变量。
+LLM / OCR 相关配置统一持久化于 Postgres(llm_config 表),不使用环境变量。
+首次启动会从旧 llm_config.json 文件一次性导入并保留文件作为备份,之后不再读取。
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
@@ -106,6 +110,23 @@ class Settings:
     webhook_max_retries: int = 3
     webhook_timeout_seconds: float = 10.0
 
+    # —— Postgres(SQLAlchemy 引擎;硬依赖,未配置时启动失败)——
+    # 连接串示例:postgresql+psycopg://dc:dcpass@localhost:5432/doc_compare
+    database_url: str = field(default_factory=lambda: _env("DATABASE_URL", ""))
+    # 启动时自动跑 alembic upgrade head(默认开启,保证 docker compose up 即用)。
+    # 设为 0 可关闭,改由 CI/运维手动 `alembic upgrade head`。
+    db_auto_migrate: bool = field(
+        default_factory=lambda: _env("DC_DB_AUTO_MIGRATE", "1").lower() not in ("0", "false", "no")
+    )
+    # 是否启动时直接 CREATE TABLE IF NOT EXISTS(不走 alembic;仅测试场景用,
+    # 与 db_auto_migrate 二选一,此开关优先级更高)。
+    db_auto_create: bool = field(
+        default_factory=lambda: _env("DC_DB_AUTO_CREATE", "").lower() in ("1", "true", "yes")
+    )
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout: float = 30.0
+
     @property
     def uploads_dir(self) -> Path:
         return self.storage_dir / "uploads"
@@ -120,8 +141,10 @@ class Settings:
 
 settings = Settings()
 
-# —— LLM 配置持久化(唯一来源,不使用环境变量)——
-# 配置文件:.dc_data/llm_config.json,存放所有 LLM / OCR 相关字段。
+# —— LLM 配置持久化(Postgres llm_config 表;旧 llm_config.json 仅供一次性导入)——
+# 启动顺序:db 引擎由 api.app.create_app() 初始化,之后在那里显式调用
+# _maybe_import_legacy_llm_config_file() + apply_llm_overrides()。
+# 本模块 import 时不读 PG(此时引擎尚未初始化),避免在 settings 创建期触发 DB 访问。
 import json as _json
 
 _LLM_CONFIG_FIELDS = (
@@ -150,7 +173,7 @@ _LLM_CONFIG_FIELDS = (
     "max_pdf_pages",
 )
 
-# dataclass 字段默认值,供首次启动(无 json 文件)时写入种子配置。
+# dataclass 字段默认值,供 PG 无记录时合并使用(不再写入种子配置)。
 _LLM_DEFAULTS: dict = {
     "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "llm_api_key": "",
@@ -177,28 +200,34 @@ _LLM_DEFAULTS: dict = {
     "max_pdf_pages": 0,
 }
 
-def llm_config_path() -> Path:
+def _legacy_llm_config_path() -> Path:
+    """旧文件路径(仅供首次启动一次性导入使用,代码不再读写此文件)。"""
     return Path(_env("DC_STORAGE_DIR", "./.dc_data")) / "llm_config.json"
 
 def load_llm_overrides() -> dict:
-    """从持久化文件读取 LLM 配置。
+    """从 Postgres llm_config 表读取已持久化的 LLM 配置。
 
-    首次启动(文件不存在)时,用内置默认值创建种子文件并返回。
-    文件损坏时返回内置默认值。
+    无记录或 DB 未就位时返回内置默认值字典的拷贝,保证调用方总能拿到完整字段。
+    PG 读取异常(引擎未初始化 / 连接失败)只记日志并回退默认值,不抛错。
     """
-    path = llm_config_path()
-    if not path.exists():
-        return dict(_LLM_DEFAULTS)
     try:
-        data = _json.loads(path.read_text(encoding="utf-8"))
-        return {k: v for k, v in data.items() if k in _LLM_CONFIG_FIELDS}
-    except Exception:
+        from .db import repository as _repo  # 函数内懒导入,避免循环依赖
+        persisted = _repo.get_llm_config()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("load_llm_overrides: read from PG failed, fallback to defaults: %s", exc)
         return dict(_LLM_DEFAULTS)
+    # 与默认值合并,缺失字段回退到默认,保证下游 apply 字段齐全。
+    merged = dict(_LLM_DEFAULTS)
+    for k in _LLM_CONFIG_FIELDS:
+        if k in persisted:
+            merged[k] = persisted[k]
+    return merged
 
 def save_llm_overrides(overrides: dict) -> None:
-    """写入 LLM 配置(合并已有值)。空字符串字段会被剔除,回退到默认。"""
-    path = llm_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """写入 LLM 配置(合并已有 PG 记录)。空字符串/None 字段会被剔除,回退到默认。
+
+    白名单过滤在此完成;repository.save_llm_config 只做 upsert。
+    """
     merged = load_llm_overrides()
     for k in _LLM_CONFIG_FIELDS:
         if k in overrides:
@@ -207,11 +236,16 @@ def save_llm_overrides(overrides: dict) -> None:
                 merged.pop(k, None)
             else:
                 merged[k] = v
-    path.write_text(_json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    from .db import repository as _repo  # 懒导入
+    _repo.save_llm_config(merged)
     apply_llm_overrides()
 
 def apply_llm_overrides() -> None:
-    """把 llm_config.json 应用到运行时 settings 单例。启动时与保存后各调一次。"""
+    """把 PG llm_config 应用到运行时 settings 单例。
+
+    由 api.app.create_app() 在引擎初始化 + schema 就位后调用一次;
+    save_llm_overrides 写入后也会调用一次。模块 import 期不再自动调用。
+    """
     cfg = load_llm_overrides()
     if "llm_api_base" in cfg:
         settings.llm_api_base = cfg["llm_api_base"]
@@ -266,5 +300,53 @@ def apply_llm_overrides() -> None:
         except (TypeError, ValueError):
             pass
 
-# 启动时应用一次持久化覆盖
-apply_llm_overrides()
+
+def _maybe_import_legacy_llm_config_file() -> None:
+    """一次性数据迁移:PG 表空 且 本地旧 llm_config.json 存在时,把文件内容导入 PG。
+
+    幂等:PG 已有记录则直接返回,不再读文件。文件导入失败只记 warning,不抛、
+    不影响启动。文件保留不删,作为人工可恢复的备份;之后代码不再读取它。
+    """
+    try:
+        from .db import repository as _repo
+        existing = _repo.get_llm_config()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("legacy llm_config import skipped: cannot read PG: %s", exc)
+        return
+
+    if existing:
+        # PG 已有配置(可能来自更早迁移),尊重现状,不动文件。
+        return
+
+    path = _legacy_llm_config_path()
+    if not path.exists():
+        logger.info("legacy llm_config.json not found; starting fresh with defaults")
+        return
+
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "legacy llm_config.json at %s is unreadable, skipped import: %s", path, exc,
+        )
+        return
+
+    # 仅导入白名单字段且非空值(空值回退默认,不必存)
+    imported: dict = {}
+    for k in _LLM_CONFIG_FIELDS:
+        v = data.get(k)
+        if v is not None and v != "":
+            imported[k] = v
+    if not imported:
+        logger.info("legacy llm_config.json at %s had no usable fields, skipped import", path)
+        return
+
+    try:
+        _repo.save_llm_config(imported)
+        logger.info(
+            "imported %d llm config field(s) from legacy %s into Postgres; "
+            "file kept as backup (no longer read)",
+            len(imported), path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("legacy llm_config import failed to write PG: %s", exc)

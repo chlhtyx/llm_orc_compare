@@ -22,19 +22,25 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..config import (
-    llm_config_path,
+    _maybe_import_legacy_llm_config_file,
+    apply_llm_overrides,
     load_llm_overrides,
     save_llm_overrides,
     settings,
 )
+from .. import db as db_pkg
+from ..db import repository as db_repo
 from ..logging_config import setup_logging
-from ..models import CompareOptions, RawCompareOptions, StatementOptions
+from ..models import (
+    CompareOptions,
+    RawCompareOptions,
+    StatementOptions,
+    StatementSummaryReport,
+    TamperReport,
+    TextDiffReport,
+)
 from ..parsing.pdf import count_pages_from_bytes
 from ..storage import (
-    load_report,
-    load_raw_report,
-    load_statement_report,
-    report_path,
     save_upload,
     upload_path,
 )
@@ -55,8 +61,46 @@ def _mask_key(key: str) -> str:
     return "*" * (len(key) - 4) + key[-4:]
 
 
+def _task_record_to_task_info_dict(rec, *, kind: str) -> dict:
+    """把 PG TaskRecord 还原成 TaskInfo.model_dump 形状,附加对应报告字段。
+
+    用于进程重启后内存 Task 丢失时,查询端点从 PG 回兜的响应构造。
+    字段与 TaskInfo 对齐,前端 store.applyInfo 无感消费。
+    """
+    base = {
+        "task_id": rec.task_id,
+        "status": rec.status,
+        "stage": "",        # 历史 stage 不还原(避免误导前端进度条)
+        "progress": 1.0 if rec.status == "done" else 0.0,
+        "stage_timings": dict(rec.stage_timings or {}),
+        "overall_risk": rec.overall_risk,
+        "error": rec.error,
+        "elapsed": rec.elapsed,
+    }
+    if kind == "compare" and rec.report_compare is not None:
+        base["report"] = rec.report_compare
+    elif kind == "raw" and rec.report_raw is not None:
+        base["raw_report"] = rec.report_raw
+    elif kind == "statement" and rec.report_statement is not None:
+        base["statement_report"] = rec.report_statement
+    return base
+
+
 def create_app() -> FastAPI:
     setup_logging()  # 控制台 + 滚动文件,幂等
+    # PG 硬依赖:初始化引擎 + 健康检查。失败即抛错,让 uvicorn 拒绝启动。
+    db_pkg.init_engine()
+    db_pkg.check_connection()
+    # schema 就位:测试用 db_auto_create 直接 create_all;默认走 alembic upgrade head。
+    # 两者都失败抛错,避免运行时查询时才发现表缺失(曾导致 500 internal error)。
+    if settings.db_auto_create:
+        db_pkg.create_all()
+    elif settings.db_auto_migrate:
+        db_pkg.run_migrations()
+    # LLM 配置持久化迁移:首次启动若 PG 无记录且本地遗留 llm_config.json 存在,
+    # 把文件导入 PG(文件保留作备份),再把 PG 配置应用到运行时 settings 单例。
+    _maybe_import_legacy_llm_config_file()
+    apply_llm_overrides()
     app = FastAPI(
        title="文档比对 API",
         description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",
@@ -139,7 +183,6 @@ def create_app() -> FastAPI:
             "pdf_render_dpi": settings.pdf_render_dpi,
             "max_pdf_pages": settings.max_pdf_pages,
             "persisted": load_llm_overrides(),
-            "config_file": str(llm_config_path()),
         }
 
     @app.put("/api/v1/config/llm")
@@ -285,14 +328,16 @@ def create_app() -> FastAPI:
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
-        # 解析 options(可选);提取 enable_llm_judge / ocr_backend 透传到 pipeline
+        # 解析 options(可选);提取 enable_llm_judge / ocr_backend / enable_risk_assessment 透传到 pipeline
         enable_llm_judge = False
         ocr_backend: str | None = None
+        enable_risk_assessment = False
         if options:
             try:
                 opts = CompareOptions.model_validate_json(options)
                 enable_llm_judge = opts.enable_llm_judge
                 ocr_backend = opts.ocr_backend
+                enable_risk_assessment = opts.enable_risk_assessment
                 if (
                     opts.similarity_identical is not None
                     or opts.similarity_modified is not None
@@ -329,7 +374,14 @@ def create_app() -> FastAPI:
                     f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
                 )
 
-        task_id = task_manager.create(callback_url, callback_secret)
+        task_id = task_manager.create(
+            "compare",
+            source_name=source.filename or "",
+            target_names=[target.filename or ""],
+            ocr_backend=ocr_backend,
+            callback_url=callback_url,
+            callback_secret=callback_secret,
+        )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
         asyncio.create_task(
@@ -337,6 +389,7 @@ def create_app() -> FastAPI:
                 task_id, str(word_path), str(pdf_path),
                 enable_llm_judge=enable_llm_judge,
                 ocr_backend=ocr_backend,
+                enable_risk_assessment=enable_risk_assessment,
             )
         )
         return {"task_id": task_id, "status": "pending"}
@@ -347,15 +400,20 @@ def create_app() -> FastAPI:
     async def get_result(task_id: str):
         task = task_manager.get(task_id)
         if task is None:
-            raise HTTPException(404, "task not found")
+            # 进程重启后内存丢失,从 PG 回捞(轻量元数据 + 报告 JSONB)。
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is None:
+                raise HTTPException(404, "task not found")
+            resp = _task_record_to_task_info_dict(rec, kind="compare")
+            return resp
         resp = task.info.model_dump()
         if task.info.status == "done" and task.report is not None:
             resp["report"] = task.report.model_dump()
         elif task.info.status == "done":
-            # 进程重启后内存丢失,从存储回捞
-            report = load_report(task_id)
-            if report is not None:
-                resp["report"] = report.model_dump()
+            # 内存里 report 还没就绪时,从 PG JSONB 回捞。
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_compare is not None:
+                resp["report"] = rec.report_compare
         return resp
 
     @app.get(
@@ -380,7 +438,10 @@ def create_app() -> FastAPI:
         task = task_manager.get(task_id)
         report = task.report if task else None
         if report is None:
-            report = load_report(task_id)
+            # 从 PG JSONB 还原(进程重启或内存未就绪)
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_compare is not None:
+                report = TamperReport.model_validate(rec.report_compare)
         if report is None:
             raise HTTPException(404, "report not ready")
 
@@ -449,7 +510,9 @@ def create_app() -> FastAPI:
         report = (task_manager.get(task_id).report
                   if task_manager.get(task_id) is not None else None)
         if report is None:
-            report = load_report(task_id)
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_compare is not None:
+                report = TamperReport.model_validate(rec.report_compare)
         if report is None:
             raise HTTPException(404, "report not ready")
         return JSONResponse(content={"paragraphs": build_docx_preview(source_path, report)})
@@ -499,7 +562,14 @@ def create_app() -> FastAPI:
                     f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
                 )
 
-        task_id = task_manager.create(callback_url, callback_secret)
+        task_id = task_manager.create(
+            "raw",
+            source_name=source.filename or "",
+            target_names=[target.filename or ""],
+            ocr_backend=opts.ocr_backend,
+            callback_url=callback_url,
+            callback_secret=callback_secret,
+        )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
         asyncio.create_task(
@@ -514,14 +584,18 @@ def create_app() -> FastAPI:
     async def raw_get_result(task_id: str):
         task = task_manager.get(task_id)
         if task is None:
-            raise HTTPException(404, "task not found")
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is None:
+                raise HTTPException(404, "task not found")
+            resp = _task_record_to_task_info_dict(rec, kind="raw")
+            return resp
         resp = task.info.model_dump()
         if task.info.status == "done" and task.raw_report is not None:
             resp["raw_report"] = task.raw_report.model_dump()
         elif task.info.status == "done":
-            report = load_raw_report(task_id)
-            if report is not None:
-                resp["raw_report"] = report.model_dump()
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_raw is not None:
+                resp["raw_report"] = rec.report_raw
         return resp
 
     @app.get("/api/v1/raw-compare/{task_id}/events")
@@ -542,7 +616,9 @@ def create_app() -> FastAPI:
         task = task_manager.get(task_id)
         report = task.raw_report if task else None
         if report is None:
-            report = load_raw_report(task_id)
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_raw is not None:
+                report = TextDiffReport.model_validate(rec.report_raw)
         if report is None:
             raise HTTPException(404, "report not ready")
         return JSONResponse(content=report.model_dump())
@@ -597,7 +673,14 @@ def create_app() -> FastAPI:
                         f"超过上限 {settings.max_pdf_pages} 页",
                     )
 
-        task_id = task_manager.create(callback_url, callback_secret)
+        task_id = task_manager.create(
+            "statement",
+            source_name="",
+            target_names=[t.filename or f"target-{i}.pdf" for i, t in enumerate(target)],
+            ocr_backend=opts.ocr_backend,
+            callback_url=callback_url,
+            callback_secret=callback_secret,
+        )
         # 多文件保存:role="target" + index,避免覆盖
         pdf_paths: list[str] = []
         file_names: list[str] = []
@@ -619,15 +702,18 @@ def create_app() -> FastAPI:
     async def statement_get_result(task_id: str):
         task = task_manager.get(task_id)
         if task is None:
-            raise HTTPException(404, "task not found")
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is None:
+                raise HTTPException(404, "task not found")
+            resp = _task_record_to_task_info_dict(rec, kind="statement")
+            return resp
         resp = task.info.model_dump()
         if task.info.status == "done" and task.statement_report is not None:
             resp["statement_report"] = task.statement_report.model_dump()
         elif task.info.status == "done":
-            # 进程重启后内存丢失,从存储回捞
-            report = load_statement_report(task_id)
-            if report is not None:
-                resp["statement_report"] = report.model_dump()
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_statement is not None:
+                resp["statement_report"] = rec.report_statement
         return resp
 
     @app.get("/api/v1/statement/{task_id}/events")
@@ -648,10 +734,63 @@ def create_app() -> FastAPI:
         task = task_manager.get(task_id)
         report = task.statement_report if task else None
         if report is None:
-            report = load_statement_report(task_id)
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_statement is not None:
+                report = StatementSummaryReport.model_validate(rec.report_statement)
         if report is None:
             raise HTTPException(404, "report not ready")
         return JSONResponse(content=report.model_dump())
+
+    # —— 比对记录(任务历史列表 + 单任务里程碑时间线)——
+    @app.get("/api/v1/tasks")
+    async def list_tasks(
+        kind: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        """分页查询任务历史列表(按 created_at 倒序)。
+
+        查询参数:
+          kind   - compare | raw | statement(可选筛选)
+          status - pending | running | done | failed(可选筛选)
+          limit  - 默认 50,上限 200
+          offset - 分页偏移
+        返回 {items: [...轻量元数据], total: N}。不含报告 JSONB。
+        """
+        if limit < 1:
+            limit = 50
+        if limit > 200:
+            limit = 200
+        if offset < 0:
+            offset = 0
+        if kind is not None and kind not in ("compare", "raw", "statement"):
+            raise HTTPException(400, "kind 必须为 compare | raw | statement")
+        if status is not None and status not in ("pending", "running", "done", "failed"):
+            raise HTTPException(400, "status 必须为 pending | running | done | failed")
+
+        records, total = await asyncio.to_thread(
+            db_repo.list_tasks,
+            kind=kind, status=status, limit=limit, offset=offset,
+        )
+        items = [db_repo.to_dict(r, include_report=False) for r in records]
+        return {"items": items, "total": total}
+
+    @app.get("/api/v1/tasks/{task_id}/events")
+    async def list_task_events(task_id: str):
+        """返回指定任务的历史里程碑事件列表(按 id 升序)。
+
+        与 SSE events 不同:本端点返回已经持久化的历史事件(只含里程碑),
+        用于「比对记录 → 详情时间线」;SSE 仍是实时增量流。
+        """
+        rec = await asyncio.to_thread(db_repo.get_task, task_id)
+        if rec is None:
+            raise HTTPException(404, "task not found")
+        events = await asyncio.to_thread(db_repo.get_task_events, task_id)
+        return {
+            "task_id": task_id,
+            "items": [db_repo.event_to_dict(e) for e in events],
+        }
 
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。

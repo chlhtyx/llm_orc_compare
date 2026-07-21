@@ -93,6 +93,12 @@ export interface TamperReport {
 
 export interface CompareOptions {
   enable_llm_judge?: boolean
+  /**
+   * 是否启用风险判别(高风险要素抽取 + 严重度分级 + LLM 辅助说明)。
+   * 默认 false:仅列举字符级/表格级差异,不做风险判定。
+   * true 时恢复完整风险分级行为。
+   */
+  enable_risk_assessment?: boolean
   /** OCR 引擎选择(由对比页每次提交时选择);不传则用默认 llm */
   ocr_backend?: 'llm' | 'paddleocr'
 }

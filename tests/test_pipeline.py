@@ -110,10 +110,39 @@ def test_pipeline_detects_amount_tamper(tmp_path):
         "金额为200万元。",
     ])
     wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
-    report = run_pipeline(wpath, ppath)
+    report = run_pipeline(wpath, ppath, enable_risk_assessment=True)
     assert report.overall_risk == "high"
     # 金额变化应体现在 key_elements
     assert any(e.kind == "amount" and e.changed for e in report.key_elements)
+
+
+def test_pipeline_risk_disabled_by_default(tmp_path):
+    """默认 enable_risk_assessment=False:同样的金额篡改,差异仍被报告,
+    但不做风险分级、不抽取 key_elements,overall 从 change_status 推导为 low。"""
+    parts = [
+        ("h1", "第二条 合同金额"),
+        ("p", "金额为100万元。"),
+    ]
+    word_buf = _make_word(parts)
+    pdf_buf = _make_pdf_from_lines([
+        "第二条 合同金额",
+        "金额为200万元。",
+    ])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    # 不传 enable_risk_assessment(用默认 False)
+    report = run_pipeline(wpath, ppath)
+
+    # 差异仍被识别
+    assert len(report.diffs) >= 1
+    assert all(d.status == "modified" for d in report.diffs)
+    # 风险字段被短路
+    assert all(d.risk_level == "none" for d in report.diffs)
+    assert all(d.risk_reasons == [] for d in report.diffs)
+    # 高风险要素未抽取
+    assert report.key_elements == []
+    # overall 从 change_status 推导:有差异 → low(不再 high)
+    assert report.change_status == "changed"
+    assert report.overall_risk == "low"
 
 
 def test_pipeline_header_field_alignment_no_false_positive(tmp_path):
@@ -166,6 +195,7 @@ def test_pipeline_recovers_inline_pdf_boundaries_and_marks_only_real_change(tmp_
         ocr=_MergedTextLayerOCR(),
         embed=MockEmbedding(),
         on_progress=lambda stage, progress: progress_events.append((stage, progress)),
+        enable_risk_assessment=True,
     )
 
     assert not report.unmatched_clauses

@@ -7,7 +7,12 @@ from document_comparison.config import settings
 
 
 @pytest.fixture
-def client():
+def client(db_isolated):
+    """所有 API 测试在隔离的测试库中跑(避免污染开发库 doc_compare)。
+
+    db_isolated fixture 已 monkeypatch 了 settings.database_url 与引擎工厂,
+    所以 create_app() 内的 db_pkg.init_engine() 会连到测试库。
+    """
     return TestClient(create_app())
 
 
@@ -71,6 +76,49 @@ def test_compare_accepts_valid_files(client):
     )
     assert r.status_code == 200
     assert "task_id" in r.json()
+
+
+def test_compare_accepts_enable_risk_assessment_option(client, monkeypatch):
+    """options 携带 enable_risk_assessment 应被正确解析并透传到 task_manager.run。"""
+    import io
+    from docx import Document  # type: ignore[import-untyped]
+
+    from document_comparison.api.app import task_manager
+
+    # 捕获 run 调用参数,避免真实 OCR
+    captured: dict = {}
+    async def _spy_run(*args, **kwargs):
+        captured.update(kwargs)
+    monkeypatch.setattr(task_manager, "run", _spy_run)
+
+    doc = Document()
+    doc.add_paragraph("第一条 测试条款")
+    doc_buf = io.BytesIO()
+    doc.save(doc_buf)
+    doc_buf.seek(0)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page(width=595, height=842)
+    pdf.save(pdf_buf)
+    pdf_buf.seek(0)
+
+    r = client.post(
+        "/api/v1/compare",
+        files={
+            "source": ("contract.docx", doc_buf,
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            "target": ("scan.pdf", pdf_buf, "application/pdf"),
+        },
+        data={"options": '{"enable_risk_assessment": true, "enable_llm_judge": true}'},
+    )
+    assert r.status_code == 200, r.json()
+    assert captured.get("enable_risk_assessment") is True
+    assert captured.get("enable_llm_judge") is True
 
 
 def test_compare_rejects_bad_options(client):
@@ -259,15 +307,12 @@ def test_max_pdf_pages_zero_means_unlimited(client, monkeypatch):
     assert r.status_code == 200
 
 
-def test_llm_config_persists_max_pdf_pages(client, monkeypatch, tmp_path):
-    """PUT /api/v1/config/llm 应把 max_pdf_pages 写入持久化文件并应用到 settings。"""
-    import json
+def test_llm_config_persists_max_pdf_pages(client, monkeypatch):
+    """PUT /api/v1/config/llm 应把 max_pdf_pages 写入 PG llm_config 表并应用到 settings。"""
+    from document_comparison.db import repository as db_repo
 
-    cfg_path = tmp_path / "llm_config.json"
-    # save_llm_overrides 内部调用 config 模块命名空间下的 llm_config_path
-    monkeypatch.setattr(
-        "document_comparison.config.llm_config_path", lambda: cfg_path
-    )
+    # save_llm_overrides 内部合并已有 PG 记录,这里先清空避免被前序用例污染
+    db_repo.save_llm_config({})
 
     r = client.put("/api/v1/config/llm", json={"max_pdf_pages": 12})
     assert r.status_code == 200
@@ -276,8 +321,8 @@ def test_llm_config_persists_max_pdf_pages(client, monkeypatch, tmp_path):
     # 应用到运行时单例(app.py 复用同一个 settings 对象)
     assert settings.max_pdf_pages == 12
 
-    # 持久化文件也写入
-    persisted = json.loads(cfg_path.read_text(encoding="utf-8"))
+    # 持久化到 PG
+    persisted = db_repo.get_llm_config()
     assert persisted["max_pdf_pages"] == 12
 
 
@@ -393,4 +438,153 @@ def test_statement_task_not_found_404(client):
 
 def test_statement_report_not_found_404(client):
     r = client.get("/api/v1/statement/nonexistent/report")
+    assert r.status_code == 404
+
+
+# —— 比对记录历史端点 + 进程重启兜底测试(/api/v1/tasks)——
+
+def test_tasks_listing_returns_items(client):
+    """POST 提交后会写入 task_records,GET /api/v1/tasks 应能列出。"""
+    import io
+
+    from document_comparison.api.app import task_manager
+
+    # mock run 避免真实 OCR
+    async def _noop(*args, **kwargs):
+        return None
+    orig_run = task_manager.run
+    task_manager.run = _noop  # type: ignore[assignment]
+
+    try:
+        import pymupdf as fitz
+        pdf_buf = io.BytesIO()
+        pdf = fitz.open()
+        pdf.new_page(width=595, height=842)
+        pdf.save(pdf_buf)
+        pdf.close()
+        pdf_buf.seek(0)
+
+        from docx import Document  # type: ignore[import-untyped]
+        doc = Document()
+        doc.add_paragraph("第一条 测试条款")
+        doc_buf = io.BytesIO()
+        doc.save(doc_buf)
+        doc_buf.seek(0)
+
+        r = client.post(
+            "/api/v1/compare",
+            files={
+                "source": ("contract.docx", doc_buf,
+                           "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                "target": ("scan.pdf", pdf_buf, "application/pdf"),
+            },
+        )
+        assert r.status_code == 200
+    finally:
+        task_manager.run = orig_run  # type: ignore[assignment]
+
+    # 列表端点
+    r = client.get("/api/v1/tasks")
+    assert r.status_code == 200
+    body = r.json()
+    assert "items" in body and "total" in body
+    assert body["total"] >= 1
+    assert any(it["kind"] == "compare" for it in body["items"])
+
+
+def test_tasks_listing_filter_by_kind(client):
+    """kind 过滤生效:仅 compare。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("list-c1", "compare", target_names=["t.pdf"])
+    db_repo.create_task("list-r1", "raw", target_names=["t.pdf"])
+    db_repo.create_task("list-s1", "statement", target_names=["t.pdf"])
+
+    r = client.get("/api/v1/tasks?kind=compare")
+    assert r.status_code == 200
+    body = r.json()
+    assert all(it["kind"] == "compare" for it in body["items"])
+    assert any(it["task_id"] == "list-c1" for it in body["items"])
+    assert all(it["task_id"] != "list-r1" for it in body["items"])
+
+
+def test_tasks_listing_rejects_bad_kind(client):
+    r = client.get("/api/v1/tasks?kind=unknown")
+    assert r.status_code == 400
+
+
+def test_get_compare_result_survives_no_inmemory_task(client):
+    """进程重启模拟:清空内存 task_manager._tasks 后,GET 应从 PG 回兜返回 done 状态。"""
+    from document_comparison.db import repository as db_repo
+    from document_comparison.models import TamperReport
+    from document_comparison.api.app import task_manager
+
+    task_manager._tasks.clear()
+
+    db_repo.create_task("restart-1", "compare", target_names=["t.pdf"])
+    db_repo.update_task_status(
+        "restart-1", "done",
+        overall_risk="clean",
+        change_status="clean",
+        elapsed=1.23,
+        finished=True,
+    )
+    db_repo.save_compare_report(
+        "restart-1", TamperReport(source="a.docx", target="b.pdf", overall_risk="clean"),
+    )
+
+    r = client.get("/api/v1/compare/restart-1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["task_id"] == "restart-1"
+    assert body["status"] == "done"
+    assert body["overall_risk"] == "clean"
+    assert body["elapsed"] == pytest.approx(1.23)
+    assert body["report"]["overall_risk"] == "clean"
+
+
+def test_download_report_from_pg_after_inmemory_cleared(client):
+    """下载端点在内存 Task 不存在时应从 PG JSONB 还原报告(原文件兜底已移除)。
+
+    回归保护:此前 /report 端点三级兜底「内存→文件→PG」,本次改造去掉文件层,
+    仅靠 PG 必须仍能返回完整 JSON。
+    """
+    from document_comparison.db import repository as db_repo
+    from document_comparison.models import TamperReport
+    from document_comparison.api.app import task_manager
+
+    task_manager._tasks.clear()
+
+    db_repo.create_task("dl-1", "compare", target_names=["t.pdf"])
+    db_repo.update_task_status("dl-1", "done", finished=True)
+    db_repo.save_compare_report(
+        "dl-1",
+        TamperReport(source="a.docx", target="b.pdf", overall_risk="clean"),
+    )
+
+    r = client.get("/api/v1/compare/dl-1/report?format=json")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "a.docx"
+    assert body["target"] == "b.pdf"
+    assert body["overall_risk"] == "clean"
+
+
+def test_get_task_events_endpoint(client):
+    """/api/v1/tasks/{id}/events 返回持久化的里程碑事件。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("ev-1", "compare")
+    db_repo.save_milestone_event("ev-1", "start", 0.0, {})
+    db_repo.save_milestone_event("ev-1", "done", 1.0, {"word": 0.3})
+
+    r = client.get("/api/v1/tasks/ev-1/events")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["task_id"] == "ev-1"
+    assert [it["stage"] for it in body["items"]] == ["start", "done"]
+
+
+def test_get_task_events_unknown_404(client):
+    r = client.get("/api/v1/tasks/unknown-task/events")
     assert r.status_code == 404

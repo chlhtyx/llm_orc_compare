@@ -63,6 +63,15 @@ if (filter.value === 'modified') return list.filter((d) => d.status === 'modifie
 return list
 })
 
+// 是否存在任何带风险等级的 diff(关闭风险判别时所有 diff.risk_level 都是 'none',
+// 此时隐藏「有风险」筛选 chip;开启风险时若有非 none 风险才显示)。
+const hasRiskDiffs = computed<boolean>(() =>
+reportStore.diffs.some((d) => d.risk_level !== 'none'),
+)
+// 高风险要素校验区:仅在报告里实际抽取到要素时才渲染
+// (关闭风险判别时 key_elements 为空,该区自动隐藏)。
+const hasKeyElements = computed<boolean>(() => reportStore.keyElements.length > 0)
+
 const pdfUrl = computed(() => {
 return getSourcePdfUrl(props.taskId)
 })
@@ -153,7 +162,7 @@ function onSelectClause(id: string) {
        </div>
        </section>
 
-        <section class="card">
+        <section v-if="hasKeyElements" class="card">
         <h3 class="section-title">高风险要素校验</h3>
         <KeyElementTable :elements="reportStore.keyElements" />
         </section>
@@ -163,7 +172,7 @@ function onSelectClause(id: string) {
         <h3 class="section-title" style="margin: 0">条款差异</h3>
         <div class="filters">
             <button :class="['chip', { on: filter === 'all' }]" @click="filter = 'all'">全部</button>
-            <button :class="['chip', { on: filter === 'risk' }]" @click="filter = 'risk'">有风险</button>
+            <button v-if="hasRiskDiffs" :class="['chip', { on: filter === 'risk' }]" @click="filter = 'risk'">有风险</button>
             <button :class="['chip', { on: filter === 'modified' }]" @click="filter = 'modified'">已修改</button>
         </div>
         </div>

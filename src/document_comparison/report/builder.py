@@ -90,6 +90,21 @@ def _report_change_status(diffs: list[Diff]) -> str:
     return "clean"
 
 
+def _overall_risk_from_change_status(change_status: str) -> str:
+    """风险判别关闭时:overall_risk 从 change_status 推导,只反映「有无差异」。
+
+    - changed → low(有确认差异;前端徽章显示「低风险」可接受,或按 change_status 展示)
+    - needs_review → needs_review(待人工复核,与风险等级无关,直接保留语义)
+    - clean → clean(无差异)
+    不再用 high/medium 表达,因为风险判别已被关闭。
+    """
+    if change_status == "changed":
+        return "low"
+    if change_status == "needs_review":
+        return "needs_review"
+    return "clean"
+
+
 def _compact_clause_text(text: str) -> str:
     """条款边界判定用比较键：忽略排版空白，保留实际文字。"""
     return re.sub(r"\s+", "", normalize_text(text))
@@ -153,6 +168,7 @@ def build_report(
     source: str,
     target: str,
     enable_llm_judge: bool = False,
+    enable_risk_assessment: bool = False,
 ) -> TamperReport:
     pmeta = {m.page_index: m for m in page_metas}
     diffs: list[Diff] = []
@@ -194,13 +210,17 @@ def build_report(
 
         if al.match_type == "unmatched":
             if pc and not wc:  # added
-                risk, reason = _unmatched_risk(pc)
                 verdict, confidence = _unmatched_verdict(pc)
+                if enable_risk_assessment:
+                    risk, reason = _unmatched_risk(pc)
+                    risk_reasons = [reason]
+                else:
+                    risk, risk_reasons = "none", []
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="added",
                     risk_level=risk,
-                    risk_reasons=[reason],
+                    risk_reasons=risk_reasons,
                     verdict=verdict,
                     confidence=confidence,
                     segments=[DiffSegment(op="insert", text=pc.text)],
@@ -209,13 +229,17 @@ def build_report(
                     page_regions=_normalize_regions(pc.blocks, pmeta),
                 )
             else:  # deleted
-                risk, reason = _unmatched_risk(wc) if wc else ("high", "待核件缺失条款")
                 verdict, confidence = _unmatched_verdict(wc) if wc else ("needs_review", "low")
+                if enable_risk_assessment:
+                    risk, reason = _unmatched_risk(wc) if wc else ("high", "待核件缺失条款")
+                    risk_reasons = [reason]
+                else:
+                    risk, risk_reasons = "none", []
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="deleted",
                     risk_level=risk,
-                    risk_reasons=[reason],
+                    risk_reasons=risk_reasons,
                     verdict=verdict,
                     confidence=confidence,
                     segments=[DiffSegment(op="delete", text=wc.text)] if wc else [],
@@ -247,18 +271,24 @@ def build_report(
             sim_modified=thresholds["modified"],
         )
         status = decision.status
-        risk = decision.risk_level
-        reasons = decision.reasons
         segs = decision.segments
-        all_key_elements.extend([e for e in decision.key_elements if e.changed])
+        # 风险判别可选:关闭时仅保留 status / verdict / confidence(「是否变化」),
+        # 丢弃 risk_level / reasons / key_elements(「严重度」与「要素校验」)。
+        if enable_risk_assessment:
+            risk = decision.risk_level
+            reasons = decision.reasons
+            all_key_elements.extend([e for e in decision.key_elements if e.changed])
+        else:
+            risk = "none"
+            reasons = []
         status_counts[status] += 1
         if status == "identical":
             levels.append("none")
             continue  # 一致不入差异报告
 
-        # LLM 仅对 modified 条款补充说明；确定性规则是严重度下限。
+        # LLM 辅助说明仅在风险判别开启时才有意义(它产出严重度建议)。
         judged_by = "rule"
-        if enable_llm_judge and status == "modified":
+        if enable_risk_assessment and enable_llm_judge and status == "modified":
             judge_risk, judge_reasons = llm_judge_diff(wt, pt, segs, risk)
             risk, reasons = apply_judge_advice(
                 risk, reasons, judge_risk, judge_reasons
@@ -281,10 +311,15 @@ def build_report(
         diffs.append(d)
         levels.append(risk)
 
-    overall = overall_risk_from_diffs(bool(alignments), levels)
-    changed_elems = [e for e in all_key_elements if e.changed]
     all_report_diffs = [*diffs, *unmatched]
     change_status = _report_change_status(all_report_diffs)
+    if enable_risk_assessment:
+        overall = overall_risk_from_diffs(bool(alignments), levels)
+    else:
+        # 风险判别关闭:overall_risk 从 change_status 推导,只反映「有无差异」,
+        # 不再表达高/中/低风险。
+        overall = _overall_risk_from_change_status(change_status)
+    changed_elems = [e for e in all_key_elements if e.changed]
     summary = {
         "total_alignments": len(alignments) - len(covered_boundary_alignments),
         "status_counts": dict(status_counts),
@@ -293,9 +328,9 @@ def build_report(
         "verdict_distribution": dict(Counter(d.verdict for d in all_report_diffs)),
     }
     logger.info(
-        "report built diffs=%s unmatched=%s overall=%s status=%s risk_dist=%s",
+        "report built diffs=%s unmatched=%s overall=%s status=%s risk_dist=%s risk_assess=%s",
         len(diffs), len(unmatched), overall,
-        dict(status_counts), dict(Counter(levels)),
+        dict(status_counts), dict(Counter(levels)), enable_risk_assessment,
     )
     return TamperReport(
         source=source,
@@ -323,6 +358,20 @@ _RISK_STROKE = {
     "medium": (0.85, 0.6, 0.0),
     "low": (0.1, 0.4, 0.9),
     "none": (0.4, 0.45, 0.5),
+}
+# 风险判别关闭时(diff.risk_level 恒为 none),按 status 着色保持视觉区分:
+# modified=蓝、added=绿、deleted=红、identical=灰。
+_STATUS_FILL = {
+    "modified": (0.2, 0.55, 1.0),
+    "added": (0.15, 0.7, 0.35),
+    "deleted": (1.0, 0.35, 0.35),
+    "identical": (0.6, 0.65, 0.7),
+}
+_STATUS_STROKE = {
+    "modified": (0.1, 0.4, 0.9),
+    "added": (0.05, 0.5, 0.2),
+    "deleted": (0.85, 0.15, 0.15),
+    "identical": (0.4, 0.45, 0.5),
 }
 
 
@@ -363,8 +412,16 @@ def burn_pdf(
             right = x2 * pw
             bottom = y2 * ph
             rect = pymupdf.Rect(left, top, right, bottom)
-            color_fill = _RISK_FILL.get(d.risk_level, _RISK_FILL["none"])
-            color_stroke = _RISK_STROKE.get(d.risk_level, _RISK_STROKE["none"])
+            # 取色:risk_level 非 none 时按风险等级(醒目区分严重度);
+            # risk_level == none 时(风险判别关闭或低风险)按 status 区分增删改。
+            if d.risk_level != "none":
+                color_fill = _RISK_FILL.get(d.risk_level, _RISK_FILL["none"])
+                color_stroke = _RISK_STROKE.get(d.risk_level, _RISK_STROKE["none"])
+                tag = {"high": "高", "medium": "中", "low": "低"}.get(d.risk_level, "?")
+            else:
+                color_fill = _STATUS_FILL.get(d.status, _STATUS_FILL["modified"])
+                color_stroke = _STATUS_STROKE.get(d.status, _STATUS_STROKE["modified"])
+                tag = {"modified": "改", "added": "增", "deleted": "删"}.get(d.status, "-")
 
             # 半透明填充
             annot = page.add_rect_annot(rect)
@@ -373,10 +430,9 @@ def burn_pdf(
             annot.set_opacity(0.35)
             annot.update()
 
-            # 简短标签(编号 + 风险级缩写)
+            # 简短标签(编号 + 类型缩写)
             label = d.number or d.alignment_id[-6:]
-            risk_abbr = {"high": "高", "medium": "中", "low": "低", "none": "-"}.get(d.risk_level, "?")
-            label_text = f"{label} [{risk_abbr}]"
+            label_text = f"{label} [{tag}]"
             # 标签写在矩形右上角外侧
             label_rect = pymupdf.Rect(right + 2, top - 10, right + 80, top + 2)
             page.insert_textbox(

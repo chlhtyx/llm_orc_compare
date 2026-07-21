@@ -35,6 +35,7 @@ def run_pipeline(
     on_progress: ProgressCb | None = None,
     enable_llm_judge: bool = False,
     ocr_backend: str | None = None,
+    enable_risk_assessment: bool = False,
 ) -> TamperReport:
     cfg = cfg or settings
     ocr = ocr or get_ocr_engine(ocr_backend)
@@ -109,6 +110,7 @@ def run_pipeline(
             source=str(word_path),
             target=str(pdf_path),
             enable_llm_judge=enable_llm_judge,
+            enable_risk_assessment=enable_risk_assessment,
         )
         diagnostics = list(getattr(ocr, "last_diagnostics", []))
         apply_recognition_gate(report, diagnostics)

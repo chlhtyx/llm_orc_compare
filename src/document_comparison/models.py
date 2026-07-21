@@ -254,6 +254,10 @@ class CompareOptions(BaseModel):
     similarity_identical: float | None = Field(default=None, deprecated=True)
     similarity_modified: float | None = Field(default=None, deprecated=True)
     enable_llm_judge: bool = False
+    # 是否启用风险判别(高风险要素抽取 + 严重度分级 + LLM 辅助说明)。
+    # 默认 False:仅列举字符级/表格级差异,不做风险判定、不抽取高风险要素。
+    # True 时恢复完整风险分级行为(向后兼容)。
+    enable_risk_assessment: bool = False
     # OCR 引擎选择(每次提交时由对比页选择);None 表示用默认 llm。
     ocr_backend: Literal["llm", "paddleocr"] | None = None
 

@@ -40,11 +40,18 @@ RUN pip install --no-cache-dir \
     "pydantic>=2.6" \
     "python-docx>=1.1" \
     "PyMuPDF>=1.24" \
-    "httpx>=0.27"
+    "httpx>=0.27" \
+    "SQLAlchemy>=2.0" \
+    "psycopg[binary]>=3.1" \
+    "alembic>=1.13"
 
 # 拷后端源码
 COPY src/ ./src/
 RUN pip install --no-cache-dir --no-deps .
+
+# 拷 Alembic 迁移脚本(启动期自动 alembic upgrade head 需要)
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
 
 # 拷前端构建产物
 COPY --from=frontend-build /build/dist ./static

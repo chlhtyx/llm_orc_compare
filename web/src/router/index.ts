@@ -38,6 +38,12 @@ const router = createRouter({
       component: () => import('@/views/ModelConfigView.vue'),
     },
     {
+      // 比对记录:从 Postgres 查询历史任务列表与里程碑时间线。
+      path: '/history',
+      name: 'history',
+      component: () => import('@/views/HistoryView.vue'),
+    },
+    {
       path: '/report/:taskId',
       name: 'report',
       component: () => import('@/views/ReportView.vue'),

@@ -7,6 +7,7 @@ const activeName = computed(() => {
   const name = String(route.name ?? '')
   if (name === 'report' || name === 'raw-report' || name === 'statement-report') return name
   if (name === 'settings') return 'settings'
+  if (name === 'history') return 'history'
   if (name === 'raw-submit') return 'raw-submit'
   if (name === 'statement-submit') return 'statement-submit'
   return 'submit'
@@ -39,6 +40,9 @@ const reportHref = computed(() => {
           :class="{ active: activeName === 'report' || activeName === 'raw-report' || activeName === 'statement-report' }"
         >
           报告
+        </RouterLink>
+        <RouterLink to="/history" :class="{ active: activeName === 'history' }">
+          比对记录
         </RouterLink>
         <RouterLink to="/settings" :class="{ active: activeName === 'settings' }">
           设置

@@ -389,9 +389,6 @@ async function onReset(): Promise<void> {
         <span v-if="saved" class="ok">已保存</span>
       </div>
       <p v-if="saveError" class="err">{{ saveError }}</p>
-      <p v-if="store.config?.config_file" class="muted file-hint">
-        配置持久化于: <code>{{ store.config.config_file }}</code>
-      </p>
     </section>
   </div>
 </template>
@@ -457,16 +454,5 @@ async function onReset(): Promise<void> {
   color: var(--risk-high);
   margin-top: 8px;
   font-size: 13px;
-}
-.file-hint {
-  margin-top: 10px;
-  font-size: 12px;
-}
-code {
-  font-family: var(--mono);
-  font-size: 12px;
-  background: var(--surface-2);
-  padding: 1px 5px;
-  border-radius: 3px;
 }
 </style>

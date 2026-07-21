@@ -1,15 +1,47 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: llm-ocr-compare-db
+    restart: unless-stopped
+    # 不暴露端口:仅 compose 内部网络供应用访问。
+    # 应用通过 postgres:5432(容器内端口 + 服务名)连接。
+    # 如需从宿主机直连 DB(调试),取消注释下面 ports,端口用 25432 避免与本机 PG 冲突。
+    ports:
+      - "25432:5432"
+    environment:
+      POSTGRES_DB: doc_compare
+      POSTGRES_USER: dc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dcpass}
+      TZ: Asia/Shanghai
+    volumes:
+      # 绑定宿主目录:持久化数据库文件,容器重建后数据保留。
+      - ./data/pg:/var/lib/postgresql/data
+    healthcheck:
+      # 等待 PG 就绪后再拉起应用,避免应用启动时连接失败。
+      test: [ "CMD-SHELL", "pg_isready -U dc -d doc_compare" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   llm-ocr-compare:
     build:
       context: .
       dockerfile: Dockerfile
-    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.26
+    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.27
     container_name: llm-ocr-compare
     platform: linux/amd64
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
+      # 应用对外端口:DC_PORT 控制宿主机映射,容器内固定 8000。
       - "${DC_PORT:-3012}:8000"
+    environment:
+      # DATABASE_URL 内部走服务名 + 容器内端口 5432(不是宿主映射端口)。
+      DATABASE_URL: postgresql+psycopg://dc:${POSTGRES_PASSWORD:-dcpass}@postgres:5432/doc_compare
     volumes:
-      # 绑定宿主目录:持久化数据(uploads/reports/llm_config.json)与日志(logs/app.log)
+      # 绑定宿主目录:持久化 uploads 文件与日志(logs/app.log)
+      # LLM/OCR 配置写入同栈 Postgres(llm_config 表),不再读写此卷下的 llm_config.json
       # 宿主机直接 tail -f ./data/logs/app.log 即可查看日志
       - ./data:/app/.dc_data

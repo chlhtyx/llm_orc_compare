@@ -296,6 +296,7 @@ def test_field_anchor_recomputes_company_name_similarity():
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
     )
 
     assert len(report.diffs) == 1
@@ -334,6 +335,7 @@ def test_long_clause_actor_change_survives_near_identical_similarity():
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
     )
 
     assert report.change_status == "changed"
@@ -365,6 +367,7 @@ def test_ocr_confusable_critical_value_is_review_not_clean():
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
     )
 
     assert report.change_status == "needs_review"
@@ -399,6 +402,7 @@ def test_llm_judge_cannot_downgrade_confirmed_change(monkeypatch):
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
         enable_llm_judge=True,
     )
 
@@ -468,6 +472,7 @@ def test_missing_non_key_table_cell_is_reported_even_when_similarity_is_high():
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
     )
 
     assert report.overall_risk == "medium"
@@ -530,6 +535,7 @@ def test_unmatched_adjacent_fragment_already_covered_by_paired_pdf_is_suppressed
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
     )
 
     assert report.unmatched_clauses == []
@@ -555,6 +561,7 @@ def test_real_unmatched_clause_keeps_its_actual_text_in_report():
         thresholds={"identical": 0.98, "modified": 0.85},
         source="source.docx",
         target="target.pdf",
+        enable_risk_assessment=True,
     )
 
     assert len(report.unmatched_clauses) == 1
@@ -562,3 +569,136 @@ def test_real_unmatched_clause_keeps_its_actual_text_in_report():
         segment.op == "delete" and segment.text == missing_text
         for segment in report.unmatched_clauses[0].segments
     )
+
+
+# —— 风险判别开关(enable_risk_assessment)——
+# 默认关闭:仅列举差异(status/verdict/segments 仍由 diff 决定),
+# 不做风险分级、不抽取高风险要素、overall 从 change_status 推导。
+
+def _amount_tamper_clauses():
+    """构造一对金额被篡改的条款(高风险要素变更场景)。"""
+    word_clause = Clause(
+        clause_id="word-1",
+        doc_type="word",
+        number="1",
+        text="金额为100万元。",
+    )
+    pdf_clause = Clause(
+        clause_id="pdf-1",
+        doc_type="pdf",
+        number="1",
+        text="金额为200万元。",
+    )
+    return word_clause, pdf_clause
+
+
+def test_build_report_risk_disabled_fills_none():
+    """关闭风险判别:diff 仍报,status/verdict 保留,但 risk_level/reasons/key_elements 清空。"""
+    word_clause, pdf_clause = _amount_tamper_clauses()
+    report = build_report(
+        alignments=[Alignment(
+            word_clause_id="word-1",
+            pdf_clause_id="pdf-1",
+            match_type="number",
+            similarity=0.8,
+        )],
+        word_by={"word-1": word_clause},
+        pdf_by={"pdf-1": pdf_clause},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+        enable_risk_assessment=False,
+    )
+
+    assert len(report.diffs) == 1
+    d = report.diffs[0]
+    # 变化本身仍被识别
+    assert d.status == "modified"
+    assert d.verdict == "changed"
+    # 风险字段被短路
+    assert d.risk_level == "none"
+    assert d.risk_reasons == []
+    # 高风险要素未抽取
+    assert report.key_elements == []
+    assert report.summary["key_element_changes"] == 0
+
+
+def test_build_report_risk_enabled_keeps_legacy_behavior():
+    """开启风险判别:同一输入应恢复完整风险分级(金额变更 → high + key_elements)。"""
+    word_clause, pdf_clause = _amount_tamper_clauses()
+    report = build_report(
+        alignments=[Alignment(
+            word_clause_id="word-1",
+            pdf_clause_id="pdf-1",
+            match_type="number",
+            similarity=0.8,
+        )],
+        word_by={"word-1": word_clause},
+        pdf_by={"pdf-1": pdf_clause},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+        enable_risk_assessment=True,
+    )
+
+    assert len(report.diffs) == 1
+    d = report.diffs[0]
+    assert d.status == "modified"
+    assert d.risk_level == "high"
+    assert d.risk_reasons  # 非空
+    assert any(e.kind == "amount" and e.changed for e in report.key_elements)
+    assert report.overall_risk == "high"
+
+
+def test_build_report_risk_disabled_overall_uses_change_status():
+    """关闭风险 + 有差异 → overall_risk 从 change_status 推导,不再表达高/中/低。
+
+    changed → low(表示「有差异」),clean → clean。
+    """
+    word_clause, pdf_clause = _amount_tamper_clauses()
+    # 有差异
+    report_changed = build_report(
+        alignments=[Alignment(
+            word_clause_id="word-1",
+            pdf_clause_id="pdf-1",
+            match_type="number",
+            similarity=0.8,
+        )],
+        word_by={"word-1": word_clause},
+        pdf_by={"pdf-1": pdf_clause},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+        enable_risk_assessment=False,
+    )
+    assert report_changed.change_status == "changed"
+    assert report_changed.overall_risk == "low"  # 有差异占位
+
+    # 无差异(两侧文本完全一致)
+    same_word = Clause(clause_id="word-2", doc_type="word", number="2", text="甲方提供设备。")
+    same_pdf = Clause(clause_id="pdf-2", doc_type="pdf", number="2", text="甲方提供设备。")
+    report_clean = build_report(
+        alignments=[Alignment(
+            word_clause_id="word-2",
+            pdf_clause_id="pdf-2",
+            match_type="number",
+            similarity=1.0,
+        )],
+        word_by={"word-2": same_word},
+        pdf_by={"pdf-2": same_pdf},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+        enable_risk_assessment=False,
+    )
+    assert report_clean.change_status == "clean"
+    assert report_clean.overall_risk == "clean"
+    assert report_clean.diffs == []

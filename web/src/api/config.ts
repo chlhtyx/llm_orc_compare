@@ -37,7 +37,6 @@ export interface LlmConfig {
   /** PDF 页数上限(0 表示不限制);提交超过此页数的扫描件会被直接拒绝 */
   max_pdf_pages: number
   persisted: Record<string, unknown>
-  config_file?: string
 }
 
 /** 更新请求(PUT)。全部可选;不传的字段不修改。 */
