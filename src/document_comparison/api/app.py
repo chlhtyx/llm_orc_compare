@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 import uuid
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -84,6 +86,85 @@ def _safe_persisted_config() -> dict:
         if key.endswith(("_api_key", "_access_token")):
             persisted[key] = _mask_key(str(persisted[key]))
     return persisted
+
+
+def _extract_client_ip(request) -> str | None:
+    """解析调用方真实 IP:优先 X-Forwarded-For[0],次 X-Real-IP,末用 client.host。"""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        # 取链路最左(最原始调用方);剥空白
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first[:64]
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()[:64]
+    client = getattr(request, "client", None)
+    if client and client.host:
+        return client.host[:64]
+    return None
+
+
+def _api_key_fingerprint(raw_key: str | None) -> str | None:
+    """X-API-Key 的 sha256 十六进制指纹(64 字符);空 key 返回 None。不存明文。"""
+    if not raw_key:
+        return None
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+# 外部接口审计:按 HTTP 状态码映射固定的失败摘要,便于审计筛选。
+_EXTERNAL_ERROR_BY_STATUS: dict[int, str] = {
+    400: "bad request",
+    401: "invalid external API key",
+    403: "forbidden",
+    404: "not found",
+    413: "payload too large",
+    422: "validation error",
+    429: "too many requests",
+    500: "internal error",
+    503: "external api disabled",
+}
+
+
+async def _persist_external_call(*, request, status_code: int, elapsed_ms: int) -> None:
+    """异步写一条外部接口审计记录,绝不阻塞响应。
+
+    从 request.state 读取端点设置的 audit_endpoint / audit_task_id / audit_document_no
+    (401/422 等端点未执行场景下为 None)。写库失败只记日志(遵循 task_records 双写规则)。
+    """
+    endpoint = getattr(request.state, "audit_endpoint", None) or "unknown"
+    task_id = getattr(request.state, "audit_task_id", None)
+    document_no = getattr(request.state, "audit_document_no", None)
+    request_id = getattr(request.state, "request_id", "") or uuid.uuid4().hex[:12]
+    try:
+        await asyncio.to_thread(
+            db_repo.save_external_call,
+            task_id=task_id,
+            endpoint=endpoint,
+            method=request.method,
+            document_no=document_no,
+            client_ip=_extract_client_ip(request),
+            api_key_sha256=_api_key_fingerprint(request.headers.get("x-api-key")),
+            status_code=status_code,
+            elapsed_ms=elapsed_ms,
+            error=_EXTERNAL_ERROR_BY_STATUS.get(status_code),
+            request_id=request_id,
+            content_length=_parse_content_length(request.headers.get("content-length")),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "persist_external_call failed: endpoint=%s status=%s request_id=%s",
+            endpoint, status_code, request_id,
+        )
+
+
+def _parse_content_length(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _task_record_to_task_info_dict(rec, *, kind: str) -> dict:
@@ -188,36 +269,70 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def _external_audit_middleware(request, call_next):
+        """外部接口入站请求审计中间件。
+
+        仅对 `/api/v1/external/` 前缀生效:统一生成 request_id(写入 request.state
+        与响应头 X-Request-Id),测量耗时,在请求结束时异步落库一条审计记录。
+        覆盖成功(202/200)与失败(401 鉴权 / 422 校验 / 413 / 429 等)全链路。
+        非外部前缀请求零开销透传。
+        """
+        path = request.url.path
+        if not path.startswith("/api/v1/external/"):
+            return await call_next(request)
+
+        request.state.request_id = uuid.uuid4().hex[:12]
+        start = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-Id"] = request.state.request_id
+            return response
+        except Exception:
+            # Starlette 兜底会转成 500;这里记审计后重新抛出交全局 handler
+            status_code = 500
+            raise
+        finally:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            # 异步落库,不阻塞响应返回;异常已在 _persist_external_call 内吞并
+            asyncio.create_task(_persist_external_call(
+                request=request,
+                status_code=status_code,
+                elapsed_ms=elapsed_ms,
+            ))
+
     @app.exception_handler(HTTPException)
-    async def _http_exc_handler(_request, exc: HTTPException):
+    async def _http_exc_handler(request, exc: HTTPException):
         return JSONResponse(
             status_code=exc.status_code,
             content={
                 "code": exc.status_code,
                 "message": exc.detail,
-                "request_id": uuid.uuid4().hex[:12],
+                "request_id": getattr(request.state, "request_id", None) or uuid.uuid4().hex[:12],
             },
         )
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_exc_handler(_request, exc: RequestValidationError):
+    async def _validation_exc_handler(request, exc: RequestValidationError):
         return JSONResponse(
             status_code=422,
             content={
                 "code": 422,
                 "message": str(exc),
-                "request_id": uuid.uuid4().hex[:12],
+                "request_id": getattr(request.state, "request_id", None) or uuid.uuid4().hex[:12],
             },
         )
 
     @app.exception_handler(Exception)
-    async def _unhandled_exc_handler(_request, exc: Exception):  # noqa: BLE001
+    async def _unhandled_exc_handler(request, exc: Exception):  # noqa: BLE001
         return JSONResponse(
             status_code=500,
             content={
                 "code": 500,
                 "message": f"internal error: {exc}",
-                "request_id": uuid.uuid4().hex[:12],
+                "request_id": getattr(request.state, "request_id", None) or uuid.uuid4().hex[:12],
             },
         )
 
@@ -581,14 +696,20 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/external/contractCompare", status_code=202)
     async def external_compare(
+        request: Request,
         source: UploadFile = File(..., description="原始合同 Word(.docx)"),
         target: UploadFile = File(..., description="回收件 PDF(.pdf)"),
         document_no: str = Form(...),
-        callback_url: str = Form(...),
+        callback_url: str | None = Form(default=None),
         callback_secret: str | None = Form(default=None),
+        sync: bool = Form(default=False),
         _auth: None = Depends(require_external_api_key),
     ):
-        """供外部系统调用的标准合同比对异步入口。"""
+        """供外部系统调用的标准合同比对入口。
+
+        默认异步(`sync=false`):返回 task_id,结果经回调或查询端点获取。
+        `sync=true`:同步阻塞至比对完成,响应体内直接返回完整结果。
+        """
         if not (source.filename or "").lower().endswith(".docx"):
             raise HTTPException(400, "source 必须为 .docx")
         if not (target.filename or "").lower().endswith(".pdf"):
@@ -601,10 +722,15 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "document_no 不能超过 255 个字符")
         # callback_secret 可选(留空则回调不带 X-Signature 签名);空白规整化为 None。
         callback_secret = (callback_secret or "").strip() or None
-        try:
-            callback_url = validate_callback_url(callback_url)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        # callback_url:异步模式必填,同步模式可选(结果随响应返回)。
+        callback_url = (callback_url or "").strip() or None
+        if callback_url is None and not sync:
+            raise HTTPException(400, "异步模式必须提供 callback_url")
+        if callback_url is not None:
+            try:
+                callback_url = validate_callback_url(callback_url)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
 
         max_bytes = settings.external_max_upload_mb * 1024 * 1024
         if max_bytes <= 0:
@@ -650,33 +776,54 @@ def create_app() -> FastAPI:
             document_no=document_no,
             external_request=True,
         )
+        # 审计中间件读取:提交成功关联 task_id + document_no
+        request.state.audit_endpoint = "contractCompare.submit"
+        request.state.audit_task_id = task_id
+        request.state.audit_document_no = document_no
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
-        asyncio.create_task(
-            task_manager.run(
-                task_id,
-                str(word_path),
-                str(pdf_path),
-                enable_llm_judge=settings.external_enable_llm_judge,
-                ocr_backend=settings.external_ocr_backend,
-                enable_risk_assessment=settings.external_enable_risk_assessment,
-            )
+        run_coro = task_manager.run(
+            task_id,
+            str(word_path),
+            str(pdf_path),
+            enable_llm_judge=settings.external_enable_llm_judge,
+            ocr_backend=settings.external_ocr_backend,
+            enable_risk_assessment=settings.external_enable_risk_assessment,
         )
+        if sync:
+            # 同步模式:阻塞至比对完成,直接在响应体内返回完整结果。
+            # run 内部已兜底异常(失败只置 status=failed + error,不向调用方抛)。
+            await run_coro
+            return JSONResponse(
+                status_code=200,
+                content=await _external_task_response(task_id),
+            )
+        asyncio.create_task(run_coro)
         return {"task_id": task_id, "document_no": document_no, "status": "pending"}
 
     @app.get("/api/v1/external/contractCompare/{task_id}")
     async def get_external_result(
+        request: Request,
         task_id: str,
         _auth: None = Depends(require_external_api_key),
     ):
+        # 审计中间件读取:结果查询关联 task_id
+        request.state.audit_endpoint = "contractCompare.result"
+        request.state.audit_task_id = task_id
+        request.state.audit_document_no = None
         return await _external_task_response(task_id)
 
     @app.get("/api/v1/external/contractCompare/{task_id}/images/{page_number}")
     async def get_external_highlight_image(
+        request: Request,
         task_id: str,
         page_number: int,
         _auth: None = Depends(require_external_api_key),
     ):
+        # 审计中间件读取:图片请求关联 task_id
+        request.state.audit_endpoint = "contractCompare.image"
+        request.state.audit_task_id = task_id
+        request.state.audit_document_no = None
         if page_number < 1:
             raise HTTPException(404, "image not found")
         task = task_manager.get(task_id)
@@ -1161,6 +1308,53 @@ def create_app() -> FastAPI:
         return {
             "task_id": task_id,
             "items": [db_repo.llm_call_to_dict(c) for c in calls],
+        }
+
+    @app.get("/api/v1/tasks/{task_id}/external-calls")
+    async def list_task_external_calls(task_id: str):
+        """返回指定任务所有外部接口调用记录(按 id 升序,即调用发生顺序)。
+
+        每条含 endpoint / method / status_code / elapsed_ms / client_ip /
+        api_key_sha256(指纹,非明文)/ error / request_id / content_length。
+        用于「比对记录 → 外部调用」审计明细。覆盖 401 鉴权失败等无 task_id 场景时,
+        通过全局 `/api/v1/external-calls` 查询。
+        """
+        rec = await asyncio.to_thread(db_repo.get_task, task_id)
+        if rec is None:
+            raise HTTPException(404, "task not found")
+        calls = await asyncio.to_thread(db_repo.get_task_external_calls, task_id)
+        return {
+            "task_id": task_id,
+            "items": [db_repo.external_call_to_dict(c) for c in calls],
+        }
+
+    @app.get("/api/v1/external-calls")
+    async def list_external_calls(
+        endpoint: str | None = Query(default=None),
+        status_code: int | None = Query(default=None),
+        document_no: str | None = Query(default=None),
+        q: str | None = Query(default=None, description="task_id/document_no/client_ip/request_id 模糊匹配"),
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ):
+        """全局外部接口调用审计列表(按 created_at 倒序,分页)。
+
+        支持按 endpoint / status_code / document_no 精确过滤,以及 q 在
+        task_id/document_no/client_ip/request_id 上的模糊匹配。覆盖无 task_id 的
+        401 鉴权失败、422 校验失败等调用记录(这些调用没有关联 task_records)。
+        """
+        records, total = await asyncio.to_thread(
+            db_repo.list_external_calls,
+            endpoint=endpoint,
+            status_code=status_code,
+            document_no=document_no,
+            q=q.strip() if q else None,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "items": [db_repo.external_call_to_dict(r) for r in records],
+            "total": total,
         }
 
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——

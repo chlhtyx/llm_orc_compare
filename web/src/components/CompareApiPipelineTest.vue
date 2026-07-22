@@ -39,7 +39,7 @@ const exampleBaseUrl = computed(
   () => props.publicBaseUrl.trim().replace(/\/$/, '') || 'https://compare.example.com',
 )
 const callExample = computed(() => [
-  '# 1. 提交异步比对任务',
+  '# 1. 提交异步比对任务(加 -F sync=true 可改为同步,直接在响应体内拿结果)',
   `curl -X POST '${exampleBaseUrl.value}/api/v1/external/contractCompare' \\`,
   "  -H 'X-API-Key: <YOUR_API_KEY>' \\",
   "  -F 'source=@./original-contract.docx' \\",
@@ -48,7 +48,7 @@ const callExample = computed(() => [
   "  -F 'callback_url=https://business.example.com/callbacks/contract-compare' \\",
   "  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'  # 可选,留空则回调不带签名",
   '',
-  '# 2. 使用提交响应中的 task_id 查询结果',
+  '# 2. 使用提交响应中的 task_id 查询结果(同步模式无需此步)',
   `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
   `  '${exampleBaseUrl.value}/api/v1/external/contractCompare/<TASK_ID>'`,
   '',

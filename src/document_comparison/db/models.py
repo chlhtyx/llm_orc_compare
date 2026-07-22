@@ -1,12 +1,14 @@
 """ORM 表定义(SQLAlchemy 2.0 Mapped 风格)。
 
-四张表:
+五张表:
 - `task_records`:每次比对/统计任务的轻量元数据 + 完整报告 JSONB。
 - `task_events`:任务里程碑事件(start / 各阶段 done / done / failed),用于
   历史时间线查看;不入全量进度事件(高频写入),只入里程碑。
 - `llm_config`:LLM/OCR 模型配置单行 JSONB(UI 设置页持久化,不再走文件)。
 - `task_llm_calls`:对话型 LLM 调用的输入/输出记录(OCR/judge/llm-diff/statement-column,
   含失败/重试),供「对比记录」页面查看模型调用明细。embedding 不入。
+- `external_api_calls`:外部接口(/api/v1/external/*)入站 HTTP 请求审计记录,
+  覆盖提交/查询/图片请求以及 401 鉴权失败、422 校验失败等无 task_records 痕迹的调用。
 
 报告 JSONB 三选一(report_compare / report_raw / report_statement),按任务类型写入;
 查询端点和前端按 kind 判读。JSONB 同时支持后期按结构化字段查询。
@@ -186,4 +188,54 @@ class TaskLlmCall(Base):
     __table_args__ = (
         # 单任务调用明细:按 task_id + id 升序(调用发生顺序)
         Index("ix_task_llm_calls_task_id_id", "task_id", "id"),
+    )
+
+
+class ExternalApiCall(Base):
+    """外部接口(`/api/v1/external/*`)单次入站 HTTP 请求审计记录。
+
+    由 `api/app.py` 的审计中间件在每次 `/api/v1/external/` 前缀请求结束时写入,
+    覆盖成功(202/200)与失败(400/401/404/413/422/429/500/503)全链路。
+    与 `task_records` 解耦:`task_id` 可空且**不加外键**——401 鉴权失败、
+    422 参数校验失败发生在任务创建之前,审计记录必须独立留存;任务删除时
+    不级联清除审计记录(CASCADE 只在 task_records↔task_llm_calls 之间)。
+
+    敏感数据处理:`api_key_sha256` 只存 X-API-Key 的 sha256 指纹,不存明文 key;
+    `client_ip` 取 X-Forwarded-For[0] / X-Real-IP / client.host。
+    """
+
+    __tablename__ = "external_api_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 提交成功后关联 task_id;401/422/413/429 等任务创建前的失败为 None。
+    task_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True, default=None
+    )
+    # 语义端点标签:contractCompare.submit | .result | .image
+    endpoint: Mapped[str] = mapped_column(String(64), index=True)
+    method: Mapped[str] = mapped_column(String(8))
+    # 单据号(仅提交类端点经 request.state 传递;查询类为 None)
+    document_no: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True, default=None
+    )
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    # X-API-Key 的 sha256 十六进制指纹(64 字符),不存明文 key
+    api_key_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None
+    )
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 失败摘要(401 → "invalid external API key";503 → "external api disabled" 等);成功为 None
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    # 与响应体 JSON.request_id / 响应头 X-Request-Id 一致(12 位 hex)
+    request_id: Mapped[str] = mapped_column(String(12), index=True)
+    # 请求体字节数(排查 413);无 body 为 None
+    content_length: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        # 全局审计列表常用筛选:按端点 + 时间倒序
+        Index("ix_external_api_calls_endpoint_created", "endpoint", "created_at"),
     )

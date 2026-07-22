@@ -16,11 +16,41 @@ _MD_SEP_LINE = re.compile(r"^[\s:|\-]+$")
 # 单元格分隔:竖线或制表符。竖线前后的空白会在拆分后单独折叠。
 _CELL_SPLIT = re.compile(r"\s*\|\s*|\t")
 
+# OCR 公式识别(尤其 PaddleOCR-VL 的 useFormulaRecognition)会把中文「着重号」
+# (字下方一个圆点,合同里常用于强调甲/乙方)误判为数学下标,吐出 LaTeX 片段。
+# 合同文本中不应出现真正的数学公式,以下清洗仅处理 OCR 产生的确定性噪音,
+# 对 Word 侧是完全的 no-op(Word 永远不会产生 \underset / \( 这类语法)。
+#
+# 匹配顺序很重要:先处理「单字符下单点」的常见误判(保留主字符),再处理通用
+# \underset,最后剥除残余的 LaTeX 定界符。
+# \underset{\cdot}{X} 或 \underset{.}{X} —— X 为单字符(含中文),还原为 X。
+_LATEX_UNDERSET_DOT = re.compile(
+    r"\\underset\s*\{\s*(?:\\cdot|\.|\u2022|\\bullet)\s*\}\s*\{(?P<base>.)\}"
+)
+# 通用 \underset{下标}{主字符} —— 保留主字符,丢弃下标。
+# 下标允许一层大括号嵌套,以兼容 \underset{\mathrm{注}}{条} 这类内含命令参数的形式。
+_LATEX_UNDERSET = re.compile(
+    r"\\underset\s*\{(?:[^{}]|\{[^{}]*\})*\}\s*\{(?P<base>.)\}"
+)
+# 残余 LaTeX 行内/行间定界符:$$ \(\) \[\]。合同正文里无合法用途,直接剥除。
+_LATEX_DELIM = re.compile(r"\$\$|\\\(|\\\)|\\\[|\\\]")
+
+
+def _strip_latex_noise(text: str) -> str:
+    """剥离 OCR 公式识别产生的 LaTeX 噪音,还原为纯文字。"""
+    if "\\" not in text and "$" not in text:
+        return text
+    s = _LATEX_UNDERSET_DOT.sub(lambda m: m.group("base"), text)
+    s = _LATEX_UNDERSET.sub(lambda m: m.group("base"), s)
+    s = _LATEX_DELIM.sub("", s)
+    return s
+
 
 def normalize_text(text: str) -> str:
     if not text:
         return ""
-    s = unicodedata.normalize("NFKC", text)
+    s = _strip_latex_noise(text)
+    s = unicodedata.normalize("NFKC", s)
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = _INLINE_WS.sub(" ", s)  # 行内空白(含全角空格)→ 单空格
     s = _MULTI_NL.sub("\n", s)  # 多换行合并

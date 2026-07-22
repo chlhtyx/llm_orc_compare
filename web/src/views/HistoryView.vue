@@ -4,9 +4,11 @@ import { useRouter } from 'vue-router'
 import {
   ApiError,
   getTaskEvents,
+  getTaskExternalCalls,
   getTaskLlmCalls,
   listTasks,
   reportRouteFor,
+  type ExternalCallItem,
   type LlmCallItem,
   type TaskEventItem,
   type TaskKind,
@@ -27,11 +29,12 @@ const searchQuery = ref('')
 const PAGE_SIZE = 20
 const page = ref(0) // 0 基
 
-// 展开行:同一个任务下切换「时间线 / 模型调用」两个面板
+// 展开行:同一个任务下切换「时间线 / 模型调用 / 外部调用」面板
 const selectedTaskId = ref<string | null>(null)
-const detailTab = ref<'events' | 'llm-calls'>('events')
+const detailTab = ref<'events' | 'llm-calls' | 'external-calls'>('events')
 const selectedEvents = ref<TaskEventItem[]>([])
 const selectedLlmCalls = ref<LlmCallItem[]>([])
+const selectedExternalCalls = ref<ExternalCallItem[]>([])
 const eventsLoading = ref(false)
 /** 展开后每条 LLM 调用的 payload/response 折叠状态(id → 是否展开)。 */
 const expandedCalls = ref<Record<number, boolean>>({})
@@ -221,11 +224,28 @@ async function showLlmCalls(taskId: string): Promise<void> {
   }
 }
 
+async function showExternalCalls(taskId: string): Promise<void> {
+  selectedTaskId.value = taskId
+  detailTab.value = 'external-calls'
+  selectedExternalCalls.value = []
+  eventsLoading.value = true
+  try {
+    const resp = await getTaskExternalCalls(taskId)
+    selectedExternalCalls.value = resp.items
+  } catch (e) {
+    selectedExternalCalls.value = []
+    console.warn('[history] load external calls failed:', e)
+  } finally {
+    eventsLoading.value = false
+  }
+}
+
 function collapseDetail(): void {
   selectedTaskId.value = null
   detailTab.value = 'events'
   selectedEvents.value = []
   selectedLlmCalls.value = []
+  selectedExternalCalls.value = []
   expandedCalls.value = {}
 }
 
@@ -245,6 +265,20 @@ const llmKindText: Record<string, string> = {
   'judge': '辅助说明',
   'llm-diff': '整篇比对',
   'statement-column': '列定位',
+}
+
+/** 外部接口 endpoint → 中文标签。 */
+const externalEndpointText: Record<string, string> = {
+  'contractCompare.submit': '提交比对',
+  'contractCompare.result': '查询结果',
+  'contractCompare.image': '取高亮图',
+}
+
+/** 把 64 位 sha256 指纹截成「前 8…后 8」便于阅读(仅展示,非明文)。 */
+function shortFingerprint(sha: string | null): string {
+  if (!sha) return '—'
+  if (sha.length <= 16) return sha
+  return `${sha.slice(0, 8)}…${sha.slice(-8)}`
 }
 
 /** status_code → CSS 类(2xx 绿、4xx 黄、5xx 红、null 灰)。 */
@@ -420,9 +454,15 @@ onMounted(refresh)
                         type="button"
                         @click="showLlmCalls(item.task_id)"
                       >模型调用</button>
+                      <button
+                        v-if="item.external_request"
+                        :class="['tab', { 'tab-active': detailTab === 'external-calls' }]"
+                        type="button"
+                        @click="showExternalCalls(item.task_id)"
+                      >外部调用</button>
                     </div>
                     <div v-if="eventsLoading" class="muted detail-loading">
-                      {{ detailTab === 'events' ? '加载时间线…' : '加载模型调用…' }}
+                      {{ detailTab === 'events' ? '加载时间线…' : detailTab === 'llm-calls' ? '加载模型调用…' : '加载外部调用…' }}
                     </div>
                     <template v-else-if="detailTab === 'events'">
                       <ol v-if="selectedEvents.length" class="event-list">
@@ -436,7 +476,7 @@ onMounted(refresh)
                       </ol>
                       <p v-else class="muted">该任务没有已保存的里程碑事件(可能创建于本次持久化功能上线前)。</p>
                     </template>
-                    <template v-else>
+                    <template v-else-if="detailTab === 'llm-calls'">
                       <div v-if="!selectedLlmCalls.length" class="muted">
                         该任务没有已保存的模型调用记录(embedding 不记录;可能创建于本功能上线前)。
                       </div>
@@ -466,6 +506,46 @@ onMounted(refresh)
                               <div class="llm-block-title muted small">响应 response(截断 64KB)</div>
                               <pre class="llm-json">{{ jsonPreview(call.response) }}</pre>
                             </div>
+                          </div>
+                        </li>
+                      </ul>
+                    </template>
+                    <template v-else-if="detailTab === 'external-calls'">
+                      <div v-if="!selectedExternalCalls.length" class="muted">
+                        该任务没有已保存的外部接口调用记录(可能创建于本功能上线前)。
+                      </div>
+                      <ul v-else class="llm-call-list">
+                        <li
+                          v-for="call in selectedExternalCalls"
+                          :key="call.id"
+                          class="llm-call-item"
+                        >
+                          <div class="llm-call-head">
+                            <span class="llm-kind kind-external">
+                              {{ externalEndpointText[call.endpoint] ?? call.endpoint }}
+                            </span>
+                            <span :class="['http-tag', statusClass(call.status_code)]">
+                              {{ httpStatusText(call.status_code) }}
+                            </span>
+                            <span class="muted small">{{ call.method }}</span>
+                            <span class="muted small">{{ formatMs(call.elapsed_ms) }}</span>
+                            <span class="mono small ev-time">{{ formatTime(call.created_at) }}</span>
+                          </div>
+                          <div v-if="call.error" class="llm-call-err small">⚠ {{ call.error }}</div>
+                          <div class="ext-meta small">
+                            <span class="muted">IP:</span>
+                            <span class="mono">{{ call.client_ip || '—' }}</span>
+                            <span class="muted">Key:</span>
+                            <span class="mono" :title="call.api_key_sha256 ?? ''">
+                              {{ shortFingerprint(call.api_key_sha256) }}
+                            </span>
+                            <span v-if="call.document_no" class="muted">单据号:</span>
+                            <span v-if="call.document_no">{{ call.document_no }}</span>
+                            <span v-if="call.content_length != null" class="muted">
+                              大小:{{ call.content_length }} B
+                            </span>
+                            <span class="muted">请求 ID:</span>
+                            <span class="mono">{{ call.request_id }}</span>
                           </div>
                         </li>
                       </ul>

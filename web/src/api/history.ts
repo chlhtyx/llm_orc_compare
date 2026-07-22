@@ -69,6 +69,34 @@ export interface LlmCallItem {
   created_at: string | null    // ISO
 }
 
+/** 外部接口端点标签(后端审计中间件写入)。 */
+export type ExternalCallEndpoint =
+  | 'contractCompare.submit'
+  | 'contractCompare.result'
+  | 'contractCompare.image'
+  | string  // 容忍后端未来新增标签
+
+/** 单次外部接口入站调用审计记录(后端 repository.external_call_to_dict)。 */
+export interface ExternalCallItem {
+  id: number
+  /** 关联任务 id;401/422 等任务创建前的失败为 null */
+  task_id: string | null
+  endpoint: ExternalCallEndpoint
+  method: string
+  /** 单据号(仅提交类携带);查询类为 null */
+  document_no: string | null
+  client_ip: string | null
+  /** X-API-Key 的 sha256 指纹(64 位十六进制),非明文 */
+  api_key_sha256: string | null
+  status_code: number
+  elapsed_ms: number | null
+  error: string | null
+  /** 与响应头 X-Request-Id / 响应体 request_id 一致 */
+  request_id: string
+  content_length: number | null
+  created_at: string | null    // ISO
+}
+
 export interface ListTasksParams {
   kind?: TaskKind
   status?: TaskStatus
@@ -102,6 +130,12 @@ export function getTaskEvents(taskId: string): Promise<{ task_id: string; items:
 
 export function getTaskLlmCalls(taskId: string): Promise<{ task_id: string; items: LlmCallItem[] }> {
   return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/llm-calls`)
+}
+
+export function getTaskExternalCalls(
+  taskId: string,
+): Promise<{ task_id: string; items: ExternalCallItem[] }> {
+  return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/external-calls`)
 }
 
 /** 按 kind 推导该任务对应的「查看报告」路由路径。 */

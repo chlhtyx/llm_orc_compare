@@ -22,7 +22,7 @@ from ..models import (
     TaskStatus,
 )
 from .engine import session_scope
-from .models import LlmConfigRecord, TaskEvent, TaskLlmCall, TaskRecord
+from .models import ExternalApiCall, LlmConfigRecord, TaskEvent, TaskLlmCall, TaskRecord
 
 logger = logging.getLogger(__name__)
 
@@ -380,5 +380,120 @@ def llm_call_to_dict(rec: TaskLlmCall) -> dict[str, Any]:
         "error": rec.error,
         "payload": rec.payload,
         "response": rec.response,
+        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+    }
+
+
+# —— 外部接口调用记录 CRUD(入站 HTTP 请求审计)——
+
+
+def save_external_call(
+    *,
+    task_id: str | None,
+    endpoint: str,
+    method: str,
+    document_no: str | None,
+    client_ip: str | None,
+    api_key_sha256: str | None,
+    status_code: int,
+    elapsed_ms: int | None,
+    error: str | None,
+    request_id: str,
+    content_length: int | None,
+) -> None:
+    """追加一条外部接口入站请求审计记录。
+
+    由 api/app.py 审计中间件在请求结束时(异步、不阻塞响应)调用。写库失败
+    只记日志(session_scope 已吞并回滚),遵循 task_records 双写规则——审计
+    失败绝不影响请求主流程。
+    """
+    with session_scope() as s:
+        s.add(ExternalApiCall(
+            task_id=task_id,
+            endpoint=endpoint,
+            method=method,
+            document_no=document_no,
+            client_ip=client_ip,
+            api_key_sha256=api_key_sha256,
+            status_code=status_code,
+            elapsed_ms=elapsed_ms,
+            error=error[:512] if error else None,
+            request_id=request_id,
+            content_length=content_length,
+        ))
+
+
+def get_task_external_calls(task_id: str) -> list[ExternalApiCall]:
+    """返回该任务所有外部接口调用记录(按 id 升序,即调用发生顺序)。"""
+    with session_scope() as s:
+        return list(s.scalars(
+            select(ExternalApiCall)
+            .where(ExternalApiCall.task_id == task_id)
+            .order_by(ExternalApiCall.id)
+        ))
+
+
+def list_external_calls(
+    *,
+    endpoint: str | None = None,
+    status_code: int | None = None,
+    document_no: str | None = None,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[ExternalApiCall], int]:
+    """分页查询外部接口调用记录(全局审计视角),按 created_at 倒序。
+
+    支持 endpoint/status_code/document_no 精确过滤 + q 在 task_id/document_no/
+    client_ip/request_id 上的模糊匹配。覆盖无 task_id 的 401/422 失败记录。
+    返回 (records, total)。
+    """
+    base = select(ExternalApiCall)
+    count_q = select(func.count()).select_from(ExternalApiCall)
+    if endpoint:
+        base = base.where(ExternalApiCall.endpoint == endpoint)
+        count_q = count_q.where(ExternalApiCall.endpoint == endpoint)
+    if status_code is not None:
+        base = base.where(ExternalApiCall.status_code == status_code)
+        count_q = count_q.where(ExternalApiCall.status_code == status_code)
+    if document_no:
+        base = base.where(ExternalApiCall.document_no == document_no)
+        count_q = count_q.where(ExternalApiCall.document_no == document_no)
+    if q:
+        pat = f"%{q}%"
+        cond = or_(
+            ExternalApiCall.task_id.ilike(pat),
+            ExternalApiCall.document_no.ilike(pat),
+            ExternalApiCall.client_ip.ilike(pat),
+            ExternalApiCall.request_id.ilike(pat),
+        )
+        base = base.where(cond)
+        count_q = count_q.where(cond)
+
+    base = base.order_by(ExternalApiCall.created_at.desc()).limit(limit).offset(offset)
+    with session_scope() as s:
+        total = s.scalar(count_q) or 0
+        records = list(s.scalars(base))
+        return records, total
+
+
+def external_call_to_dict(rec: ExternalApiCall) -> dict[str, Any]:
+    """把 ExternalApiCall 序列化为 JSON 友好 dict(供 API 返回)。
+
+    api_key_sha256 仅返回指纹(本就非明文);secret/callback_secret 永不涉及。
+    """
+    return {
+        "id": rec.id,
+        "task_id": rec.task_id,
+        "endpoint": rec.endpoint,
+        "method": rec.method,
+        "document_no": rec.document_no,
+        "client_ip": rec.client_ip,
+        "api_key_sha256": rec.api_key_sha256,
+        "status_code": rec.status_code,
+        "elapsed_ms": rec.elapsed_ms,
+        "error": rec.error,
+        "request_id": rec.request_id,
+        "content_length": rec.content_length,
         "created_at": rec.created_at.isoformat() if rec.created_at else None,
     }

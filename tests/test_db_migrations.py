@@ -26,7 +26,10 @@ def test_run_migrations_creates_missing_tables(test_db_url, monkeypatch):
     # 1. drop 所有表(包含 alembic_version),确保库为空
     eng = create_engine(test_db_url, future=True)
     with eng.begin() as conn:
-        for table in ("task_llm_calls", "task_events", "task_records", "llm_config", "alembic_version"):
+        for table in (
+            "external_api_calls", "task_llm_calls", "task_events",
+            "task_records", "llm_config", "alembic_version",
+        ):
             conn.execute(text(f'DROP TABLE IF EXISTS "{table}" CASCADE'))
     assert inspect(eng).get_table_names() == []
 
@@ -39,6 +42,7 @@ def test_run_migrations_creates_missing_tables(test_db_url, monkeypatch):
     assert "task_events" in tables
     assert "llm_config" in tables
     assert "task_llm_calls" in tables
+    assert "external_api_calls" in tables
     assert "alembic_version" in tables
 
     eng.dispose()

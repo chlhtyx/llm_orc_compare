@@ -325,6 +325,116 @@ def test_external_upload_limit(external_client, monkeypatch):
     assert response.status_code == 413
 
 
+def test_external_sync_returns_inline_result_without_callback_url(
+    external_client, monkeypatch, tmp_path
+):
+    """sync=true:阻塞至完成,响应体内直接返回完整结果,且 callback_url 非必填。"""
+    from document_comparison.api.app import task_manager
+
+    report = _changed_report(page_count=1)
+    pdf_path = tmp_path / "sync-target.pdf"
+    pdf_path.write_bytes(_pdf_bytes().getvalue())
+
+    async def _fake_run(task_id, *_args, **_kwargs):
+        task = task_manager.get(task_id)
+        assert task is not None
+        task.report = report
+        task.info.status = "done"
+        # 同步模式下回调仅在 callback_url 非空时触发;这里未传 callback_url,
+        # 模拟 run 内部 _fire_callback 短路返回的行为(不实际发请求)。
+        return None
+
+    monkeypatch.setattr(task_manager, "run", _fake_run)
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "BILL-SYNC", "sync": "true"},
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    assert body["status"] == "done"
+    assert body["document_no"] == "BILL-SYNC"
+    assert body["result"]["change_status"] == "changed"
+    assert "result_text" in body["result"]
+    assert "highlight_images" in body
+    assert "result_url" in body
+    task = task_manager.get(body["task_id"])
+    assert task is not None and task.callback_url is None
+
+
+def test_external_async_still_requires_callback_url_when_sync_omitted(external_client):
+    """sync 缺省(异步)时 callback_url 仍必填。"""
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "BILL-ASYNC"},
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 400
+    assert "callback_url" in response.json()["message"]
+
+
+def test_external_sync_failure_returns_failed_status(external_client, monkeypatch):
+    """同步模式下比对失败:响应仍 200,体内 status=failed + error。"""
+    from document_comparison.api.app import task_manager
+
+    async def _failing_run(task_id, *_args, **_kwargs):
+        task = task_manager.get(task_id)
+        assert task is not None
+        task.info.status = "failed"
+        task.info.error = "OCR 解析失败"
+        return None
+
+    monkeypatch.setattr(task_manager, "run", _failing_run)
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "BILL-FAIL", "sync": "true"},
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"] == "OCR 解析失败"
+
+
+def test_external_sync_accepts_callback_url_alongside(external_client, monkeypatch):
+    """sync=true 同时传 callback_url 也应接受(回调照常触发,无害)。"""
+    from document_comparison.api.app import task_manager
+
+    async def _fake_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run", _fake_run)
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-SYNC-CB",
+            "callback_url": "http://10.0.0.8/callback",
+            "sync": "true",
+        },
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 200, response.json()
+    task = task_manager.get(response.json()["task_id"])
+    assert task is not None
+    assert task.callback_url == "http://10.0.0.8/callback"
+
+
 def test_external_query_and_image_download(external_client, monkeypatch, tmp_path):
     from document_comparison.api.app import task_manager
 

@@ -180,7 +180,7 @@ Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
 | `GET` | `/api/v1/compare/{task_id}/docx-preview` | 获取 Word 全文及差异标记 |
-| `POST` | `/api/v1/external/contractCompare` | 外部系统异步提交标准合同比对(`X-API-Key`) |
+| `POST` | `/api/v1/external/contractCompare` | 外部系统提交标准合同比对(`X-API-Key`);默认异步,`sync=true` 同步返回结果 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
@@ -192,11 +192,14 @@ Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 | `GET` | `/api/v1/tasks?kind=&status=&limit=&offset=` | 查询任务历史(支持按类型/状态筛选 + 分页) |
 | `GET` | `/api/v1/tasks/{task_id}/events` | 查询单任务的里程碑事件时间线 |
+| `GET` | `/api/v1/tasks/{task_id}/llm-calls` | 查询单任务的对话型 LLM 调用明细(OCR/judge/llm-diff 等) |
+| `GET` | `/api/v1/tasks/{task_id}/external-calls` | 查询单任务的外部接口入站调用审计记录 |
+| `GET` | `/api/v1/external-calls?endpoint=&status_code=&document_no=&q=&limit=&offset=` | 全局外部接口调用审计列表(含 401/422 等无 task_id 的失败调用) |
 
 ### 外部合同比对调用示例
 
 ```bash
-# 提交任务
+# 提交任务(默认异步:返回 task_id,结果经回调或查询端点获取)
 curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
   -H 'X-API-Key: <YOUR_API_KEY>' \
   -F 'source=@./original-contract.docx' \
@@ -205,7 +208,16 @@ curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
   -F 'callback_url=https://business.example.com/callbacks/contract-compare' \
   -F 'callback_secret=<YOUR_CALLBACK_SECRET>'   # 可选,留空则回调不带签名
 
-# 使用响应中的 task_id 查询完整结果
+# 同步模式(sync=true):HTTP 连接保持至比对完成,响应体内直接返回完整结果;
+# 此模式下 callback_url 非必填(不传则不触发回调)。
+curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
+  -H 'X-API-Key: <YOUR_API_KEY>' \
+  -F 'source=@./original-contract.docx' \
+  -F 'target=@./returned-contract.pdf' \
+  -F 'document_no=DOC-2026-0001' \
+  -F 'sync=true'
+
+# 使用响应中的 task_id 查询完整结果(异步模式)
 curl -H 'X-API-Key: <YOUR_API_KEY>' \
   'https://compare.example.com/api/v1/external/contractCompare/<TASK_ID>'
 
@@ -217,5 +229,21 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 
 “合同比对 API”页也提供相同示例和一键复制功能；页面会自动使用已保存的服务公开地址，
 但不会显示或写入真实 API Key、回调密钥。
+
+#### 外部接口调用审计
+
+每次对 `/api/v1/external/*` 的入站请求（提交、查询、图片下载，**含 401 鉴权失败、
+413/422 校验失败**）都会落库一条审计记录到 `external_api_calls` 表，字段包括：
+
+- `endpoint`（`contractCompare.submit` / `.result` / `.image`）、`method`、`status_code`、`elapsed_ms`
+- `client_ip`（取 `X-Forwarded-For[0]` / `X-Real-IP` / `client.host`）
+- `api_key_sha256`（X-API-Key 的 sha256 指纹，**不存明文 Key**）
+- `document_no`、`task_id`（提交成功时关联；401/422 等任务创建前失败为 `null`，且**不加外键**——任务删除不会清除审计记录）
+- `error`（按状态码映射固定摘要，如 `invalid external API key`）、`request_id`、`content_length`、`created_at`
+
+审计通过 HTTP 中间件统一写入，**异步落库、绝不阻塞响应**；写库失败只记日志。
+每个响应都会带 `X-Request-Id` 响应头（与响应体 `request_id` 一致），便于调用方与服务端联查。
+查询入口：按任务 `GET /api/v1/tasks/{task_id}/external-calls`（前端「比对记录 → 外部调用」tab），
+或全局 `GET /api/v1/external-calls`（支持按端点/状态码/单据号筛选）。
 
 完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)；对帐单金额统计的设计与边界见 [对帐单金额统计方案](docs/对帐单金额统计方案.md)。
