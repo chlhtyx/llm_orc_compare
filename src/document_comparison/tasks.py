@@ -170,6 +170,7 @@ class TaskManager:
             ocr_backend=ocr_backend,
             document_no=document_no,
             external_request=external_request,
+            callback_url=callback_url,
         )
         return task_id
 
@@ -480,13 +481,20 @@ class TaskManager:
         if not task or not task.callback_url or not task.callback_secret:
             return
         event, raw = webhook.build_event(task_id, status, payload)
-        await webhook.deliver(
+        result = await webhook.deliver(
             task.callback_url,
             raw,
             task.callback_secret,
             event["event_id"],
             max_retries=settings.webhook_max_retries,
             timeout=settings.webhook_timeout_seconds,
+        )
+        # 回写 callback 交付结果(吞异常,不阻塞任务主流程)。
+        await self._db_thread(
+            db_repo.update_callback_result, task_id,
+            success=result["success"],
+            http_status=result["http_status"],
+            error=result["error"],
         )
 
     async def event_stream(self, task_id: str):

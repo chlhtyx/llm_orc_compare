@@ -80,6 +80,41 @@ def looks_like_ocr_confusion(word_text: str, pdf_text: str) -> bool:
     )
 
 
+# 检测一端是另一端的严格前缀时，尾段的最大字符占比。
+# 超过该比例即视为实质新增内容，而非切分粘连的签章/抬头碎片。
+_SEGMENTATION_FRAGMENT_MAX_RATIO = 0.35
+
+
+def looks_like_segmentation_artifact(
+    word_text: str, pdf_text: str
+) -> tuple[bool, str]:
+    """识别切分边界不一致导致的「一端是另一端 + 短尾段」伪差异。
+
+    合同正文末尾的签章/抬头/落款（如「XX市恒信商贸有限公司」）在 PDF 抽取时
+    常因无编号/字段锚点而被拼到上一条款末尾，使该条款被判 modified。这里只识别
+    *一端去掉空白后是另一端的严格前缀*，且尾段占比低于阈值的情形，把结论降为
+    待复核而非确证变化。两侧表格差异不在此降级（由调用方保证 table_change_reason
+    已处理）。返回 (命中, 尾段文本)。
+    """
+    left = re.sub(r"\s+", "", word_text)
+    right = re.sub(r"\s+", "", pdf_text)
+    if not left or not right or left == right:
+        return False, ""
+    # 一端是另一端的严格前缀 → 尾段即为差异
+    if left.startswith(right):
+        tail = left[len(right):]
+        base_len = len(left)
+    elif right.startswith(left):
+        tail = right[len(left):]
+        base_len = len(right)
+    else:
+        return False, ""
+    # 尾段占比过大 → 视为实质内容，不降级
+    if len(tail) / base_len > _SEGMENTATION_FRAGMENT_MAX_RATIO:
+        return False, ""
+    return True, tail
+
+
 def _protected_field_change(word_clause: Clause, pdf_clause: Clause) -> KeyElement | None:
     field_key = word_clause.field_key or pdf_clause.field_key
     kind = _PROTECTED_FIELD_KINDS.get(field_key)
@@ -193,6 +228,15 @@ def adjudicate_clause_pair(
             verdict = "needs_review"
             confidence = "low"
             reasons = [*reasons, "仅存在低证据标点或标点伴随空格差异，需核对原始图像"]
+        elif (
+            # 切分粘连：一端是另一端 + 短尾段（如签章/抬头被拼到条款末尾）。
+            # 仅在无表格结构差异时降级，避免掩盖真实的表格增删。
+            not table_change_reason
+            and looks_like_segmentation_artifact(word_text, pdf_text)[0]
+        ):
+            verdict = "needs_review"
+            confidence = "low"
+            reasons = [*reasons, "疑似切分边界不一致导致的尾段粘连，需核对原始图像"]
 
     return ClauseAdjudication(
         status=status,

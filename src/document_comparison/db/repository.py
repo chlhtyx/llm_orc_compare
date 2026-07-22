@@ -38,12 +38,17 @@ def create_task(
     ocr_backend: str | None = None,
     document_no: str | None = None,
     external_request: bool = False,
+    callback_url: str | None = None,
 ) -> None:
     """任务提交时调用,创建一条 pending 记录。
 
     幂等性:若已存在同 task_id(同进程内极少发生),更新而非报错。
+    callback_url 存在时,初始 callback_status 置 "pending"(交付后由
+    update_callback_result 改写为 success/failed);无 callback 则保持 None。
     """
     targets = list(target_names) if target_names else []
+    # 有回调地址即视为待交付;callback_secret 永不落库。
+    cb_status = "pending" if callback_url else None
     with session_scope() as s:
         existing = s.get(TaskRecord, task_id)
         if existing is not None:
@@ -53,6 +58,8 @@ def create_task(
             existing.ocr_backend = ocr_backend
             existing.document_no = document_no
             existing.external_request = external_request
+            existing.callback_url = callback_url
+            existing.callback_status = cb_status
             existing.status = "pending"
             return
         s.add(TaskRecord(
@@ -64,6 +71,8 @@ def create_task(
             ocr_backend=ocr_backend,
             document_no=document_no,
             external_request=external_request,
+            callback_url=callback_url,
+            callback_status=cb_status,
         ))
 
 
@@ -98,6 +107,30 @@ def update_task_status(
             rec.error = error[:2048]
         if finished:
             rec.finished_at = datetime.now(timezone.utc)
+
+
+def update_callback_result(
+    task_id: str,
+    *,
+    success: bool,
+    http_status: int | None = None,
+    error: str | None = None,
+) -> None:
+    """回写 callback 交付结果(任务终态触发回调后调用)。
+
+    success=True → callback_status="success";否则 "failed"。
+    http_status 为最终 HTTP 状态码(连接级失败时为 None);error 截断 512。
+    记录不存在时只记日志(吞异常语义,不阻塞任务主流程)。
+    """
+    with session_scope() as s:
+        rec = s.get(TaskRecord, task_id)
+        if rec is None:
+            logger.warning("update_callback_result: task_id=%s not found", task_id)
+            return
+        rec.callback_status = "success" if success else "failed"
+        rec.callback_http_status = http_status
+        rec.callback_error = error[:512] if error else None
+        rec.callback_at = datetime.now(timezone.utc)
 
 
 def save_compare_report(task_id: str, report: TamperReport) -> None:
@@ -237,6 +270,11 @@ def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:
         "error": rec.error,
         "created_at": rec.created_at.isoformat() if rec.created_at else None,
         "finished_at": rec.finished_at.isoformat() if rec.finished_at else None,
+        "callback_url": rec.callback_url,
+        "callback_status": rec.callback_status,
+        "callback_http_status": rec.callback_http_status,
+        "callback_error": rec.callback_error,
+        "callback_at": rec.callback_at.isoformat() if rec.callback_at else None,
     }
     if include_report:
         data["report_compare"] = rec.report_compare

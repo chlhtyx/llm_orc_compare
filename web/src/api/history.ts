@@ -26,6 +26,12 @@ export interface TaskListItem {
   error: string | null
   created_at: string | null // ISO
   finished_at: string | null // ISO
+  /** 回调交付记录(null = 未配置回调;secret 永不返回)。 */
+  callback_url: string | null
+  callback_status: 'pending' | 'success' | 'failed' | null
+  callback_http_status: number | null
+  callback_error: string | null
+  callback_at: string | null // ISO
 }
 
 /** 单任务里程碑事件(后端 repository.event_to_dict)。 */

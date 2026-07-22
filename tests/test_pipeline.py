@@ -20,7 +20,6 @@ from document_comparison.models import (
 from document_comparison.parsing.pdf import extract_text_blocks
 from document_comparison.pipeline import run_pipeline
 from document_comparison.report.builder import burn_pdf
-from document_comparison.report.docx_burn import burn_docx
 
 
 def test_burn_pdf_includes_pdf_added_clause(tmp_path: Path):
@@ -248,8 +247,5 @@ def test_pipeline_recovers_inline_pdf_boundaries_and_marks_only_real_change(tmp_
     ]
 
     annotated_pdf = tmp_path / "annotated.pdf"
-    annotated_docx = tmp_path / "annotated.docx"
     burn_pdf(ppath, report, annotated_pdf)
-    burn_docx(wpath, report, annotated_docx)
     assert annotated_pdf.exists() and annotated_pdf.stat().st_size > 0
-    assert annotated_docx.exists() and annotated_docx.stat().st_size > 0

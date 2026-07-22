@@ -243,6 +243,80 @@ def test_structural_numeric_punctuation_remains_confirmed_change():
     assert decision.verdict == "changed"
 
 
+def test_segmentation_artifact_trailing_signature_is_review():
+    """PDF 抽取把签章/公司名粘到条款末尾 → 降为待复核，不判确证变化。
+
+    用户实际场景：条款 3.1 金额条款正文完全一致，但 PDF 侧末尾多出
+    「XX市恒信商贸有限公司」落款，此前被判 modified/changed。
+    """
+    body = "本合同合作总费用为人民币(大写)人民币伍万元整(¥50000.00元),该费用包含完成本合同约定全部服务/产品的所有成本、人工、物料、税费等全部费用,无其他隐形费用。"
+    decision = adjudicate_clause_pair(
+        Clause(clause_id="w", doc_type="word", number="3.1", text=body),
+        Clause(clause_id="p", doc_type="pdf", number="3.1", text=body + "XX市恒信商贸有限公司"),
+        similarity=0.99,
+        sim_identical=0.98,
+        sim_modified=0.85,
+    )
+
+    assert decision.status == "modified"
+    assert decision.verdict == "needs_review"
+    assert decision.confidence == "low"
+    assert any("切分" in reason or "粘连" in reason for reason in decision.reasons)
+
+
+def test_segmentation_artifact_symmetric_word_side_trailing():
+    """Word 侧多出尾段（切分多切）也应降级。"""
+    body = "甲方应按期交付全部货物并保证质量合格。"
+    decision = adjudicate_clause_pair(
+        Clause(clause_id="w", doc_type="word", number="1", text=body + "乙方"),
+        Clause(clause_id="p", doc_type="pdf", number="1", text=body),
+        similarity=0.99,
+        sim_identical=0.98,
+        sim_modified=0.85,
+    )
+
+    assert decision.verdict == "needs_review"
+    assert decision.confidence == "low"
+
+
+def test_segmentation_artifact_large_tail_remains_confirmed_change():
+    """尾段占比超过阈值 → 视为实质新增内容，仍判确证变化。"""
+    decision = adjudicate_clause_pair(
+        Clause(clause_id="w", doc_type="word", number="1", text="甲方应付款。"),
+        Clause(
+            clause_id="p", doc_type="pdf", number="1",
+            text="甲方应付款。乙方应在三日内完成验收并签署确认书，否则视为验收合格。",
+        ),
+        similarity=0.6,
+        sim_identical=0.98,
+        sim_modified=0.85,
+    )
+
+    assert decision.verdict == "changed"
+
+
+def test_segmentation_artifact_with_table_change_remains_confirmed():
+    """存在表格结构差异时不降级，避免掩盖真实表格增删。"""
+    from document_comparison.models import TableStructure
+
+    word_table = TableStructure(headers=["项"], rows=[["原值"]])
+    pdf_table = TableStructure(headers=["项"], rows=[["新值"]])
+    body = "付款信息如下表所示。"
+    decision = adjudicate_clause_pair(
+        Clause(clause_id="w", doc_type="word", number="1", text=body, tables=[word_table]),
+        Clause(
+            clause_id="p", doc_type="pdf", number="1",
+            text=body + "XX市恒信商贸有限公司", tables=[pdf_table],
+        ),
+        similarity=0.99,
+        sim_identical=0.98,
+        sim_modified=0.85,
+    )
+
+    # 表格单元格变化优先，不因尾段粘连降级
+    assert decision.verdict == "changed"
+
+
 def test_table_spacing_only_change_is_review_not_confirmed_change():
     decision = adjudicate_clause_pair(
         Clause(

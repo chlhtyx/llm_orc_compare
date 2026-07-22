@@ -41,7 +41,7 @@ const reportHref = computed(() => {
           报告
         </RouterLink>
         <RouterLink to="/history" :class="{ active: activeName === 'history' }">
-          比对记录
+          合同对比记录
         </RouterLink>
         <RouterLink to="/settings" :class="{ active: activeName === 'settings' }">
           设置

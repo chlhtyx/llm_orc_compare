@@ -51,6 +51,21 @@ const statusText: Record<TaskStatus, string> = {
   failed: '失败',
 }
 
+const callbackText: Record<NonNullable<TaskListItem['callback_status']>, string> = {
+  pending: '待回调',
+  success: '成功',
+  failed: '失败',
+}
+
+/** 回调列单元格 title:汇总 HTTP 状态码/错误/时间,供悬浮查看交付明细。 */
+function callbackTitle(item: TaskListItem): string {
+  const parts: string[] = []
+  if (item.callback_http_status != null) parts.push(`HTTP ${item.callback_http_status}`)
+  if (item.callback_error) parts.push(item.callback_error)
+  if (item.callback_at) parts.push(formatTime(item.callback_at))
+  return parts.join(' · ') || '—'
+}
+
 /** 是否有任意过滤条件(搜索 / 类型 / 状态)在生效,用于区分空状态文案。 */
 const hasActiveFilter = computed(
   () => !!searchQuery.value.trim() || !!kindFilter.value || !!statusFilter.value,
@@ -267,7 +282,7 @@ onMounted(refresh)
     <section class="card toolbar">
       <div class="head-row">
         <div class="head-left">
-          <h2 class="page-title">比对记录</h2>
+          <h2 class="page-title">合同对比记录</h2>
           <p class="muted page-desc">查看历史比对与统计任务,点击「查看报告」打开结果,或点击行查看时间线与模型调用。</p>
         </div>
         <div class="head-actions">
@@ -319,7 +334,7 @@ onMounted(refresh)
 
     <section class="card">
       <div v-if="!loading && items.length === 0" class="empty muted">
-        {{ hasActiveFilter ? '没有符合条件的记录,试试调整搜索或筛选条件。' : '还没有比对记录。' }}
+        {{ hasActiveFilter ? '没有符合条件的记录,试试调整搜索或筛选条件。' : '还没有合同对比记录。' }}
       </div>
 
       <div v-else class="table-wrap">
@@ -332,6 +347,7 @@ onMounted(refresh)
               <th>文件</th>
               <th>状态</th>
               <th>结果</th>
+              <th>回调</th>
               <th>耗时</th>
               <th class="col-actions">操作</th>
             </tr>
@@ -368,6 +384,15 @@ onMounted(refresh)
                     {{ riskText(item.overall_risk) }}
                   </span>
                 </td>
+                <td :title="item.callback_status ? callbackTitle(item) : '—'">
+                  <span
+                    v-if="item.callback_status"
+                    :class="['cb-tag', `cb-${item.callback_status}`]"
+                  >
+                    {{ callbackText[item.callback_status] }}
+                  </span>
+                  <span v-else>—</span>
+                </td>
                 <td>{{ formatElapsed(item.elapsed) }}</td>
                 <td class="col-actions" @click.stop>
                   <button class="chip" type="button" @click="viewReport(item)">查看报告</button>
@@ -382,7 +407,7 @@ onMounted(refresh)
                 </td>
               </tr>
               <tr v-if="selectedTaskId === item.task_id" class="event-row">
-                <td colspan="8">
+                <td colspan="9">
                   <div class="detail-panel">
                     <div class="detail-tabs">
                       <button
@@ -632,6 +657,17 @@ table.task-table {
 .status-tag[data-status='running'] { background: var(--risk-medium-bg); color: var(--risk-medium); }
 .status-tag[data-status='failed'] { background: var(--risk-high-bg); color: var(--risk-high); }
 .status-tag[data-status='pending'] { background: var(--surface-2); color: var(--text-muted); }
+
+/* 回调状态标签 */
+.cb-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+.cb-success { background: var(--risk-low-bg); color: var(--risk-low); }
+.cb-failed { background: var(--risk-high-bg); color: var(--risk-high); }
+.cb-pending { background: var(--surface-2); color: var(--text-muted); }
 
 .risk-tag { color: var(--text-muted); }
 .risk-tag.risk-high { color: var(--risk-high); font-weight: 600; }

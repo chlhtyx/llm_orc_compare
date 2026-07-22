@@ -251,6 +251,67 @@ def test_to_dict_excludes_report_by_default(db_isolated):
     assert full["report_compare"] is not None
 
 
+def test_callback_url_and_status_persisted(db_isolated):
+    """提交带 callback_url 时初始 callback_status="pending";to_dict 暴露 5 字段。"""
+    db_repo.create_task(
+        "cb1", "compare",
+        target_names=["t.pdf"],
+        callback_url="http://internal/hook",
+    )
+    rec = db_repo.get_task("cb1")
+    assert rec is not None
+    assert rec.callback_url == "http://internal/hook"
+    assert rec.callback_status == "pending"
+
+    data = db_repo.to_dict(rec)
+    assert data["callback_url"] == "http://internal/hook"
+    assert data["callback_status"] == "pending"
+    assert data["callback_http_status"] is None
+    assert data["callback_error"] is None
+    assert data["callback_at"] is None
+
+
+def test_callback_url_absent_leaves_status_none(db_isolated):
+    """未配置回调时 callback_url/status 保持 None。"""
+    db_repo.create_task("cb2", "compare", target_names=["t.pdf"])
+    rec = db_repo.get_task("cb2")
+    assert rec is not None
+    assert rec.callback_url is None
+    assert rec.callback_status is None
+
+
+def test_update_callback_result_success(db_isolated):
+    """成功交付回写 success + HTTP 状态码 + 时间。"""
+    db_repo.create_task("cb3", "compare", callback_url="http://x/hook")
+    db_repo.update_callback_result("cb3", success=True, http_status=200)
+    rec = db_repo.get_task("cb3")
+    assert rec is not None
+    assert rec.callback_status == "success"
+    assert rec.callback_http_status == 200
+    assert rec.callback_error is None
+    assert rec.callback_at is not None
+
+
+def test_update_callback_result_failed_truncates_error(db_isolated):
+    """失败交付回写 failed + 错误信息(截断 512);连接级失败 http_status=None。"""
+    db_repo.create_task("cb4", "compare", callback_url="http://x/hook")
+    long_err = "E" * 600
+    db_repo.update_callback_result(
+        "cb4", success=False, http_status=None, error=long_err,
+    )
+    rec = db_repo.get_task("cb4")
+    assert rec is not None
+    assert rec.callback_status == "failed"
+    assert rec.callback_http_status is None
+    assert len(rec.callback_error or "") == 512
+
+
+def test_update_callback_result_unknown_task_is_noop(db_isolated, caplog):
+    """任务记录不存在时只记日志,不抛。"""
+    db_repo.update_callback_result("nope", success=True, http_status=200)
+    assert any("not found" in r.message for r in caplog.records)
+
+
 # —— LLM 配置 JSONB CRUD(单行表,id 固定为 1)——
 
 def test_llm_config_get_empty_when_fresh(db_isolated):

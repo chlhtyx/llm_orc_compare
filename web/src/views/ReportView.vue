@@ -5,7 +5,7 @@ import ProgressTracker from '@/components/ProgressTracker.vue'
 import DiffList from '@/components/DiffList.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
-import { ApiError, getAnnotatedDocxUrl, getSourcePdfUrl } from '@/api/compare'
+import { ApiError, getSourcePdfUrl } from '@/api/compare'
 import { useTaskStore } from '@/stores/task'
 import { useReportStore } from '@/stores/report'
 import type { Diff, TamperReport } from '@/api/types'
@@ -73,8 +73,6 @@ const pdfUrl = computed(() => {
 return getSourcePdfUrl(props.taskId)
 })
 
-const annotatedDocxUrl = computed(() => getAnnotatedDocxUrl(props.taskId))
-
 /** 点击条款 → 选中 + 展开 PDF 预览 + 滚动到对应页 */
 function onSelectClause(id: string) {
   selectedClauseId.value = id
@@ -103,14 +101,6 @@ function onSelectClause(id: string) {
         />
         </div>
         <div class="head-actions">
-        <a
-          v-if="reportStore.diffs.length || reportStore.unmatched.length"
-          class="btn btn-primary"
-          :href="annotatedDocxUrl"
-          download
-        >
-          下载高亮 Word
-        </a>
         <button class="btn" type="button" @click="router.push('/')">新建比对</button>
         </div>
     </header>

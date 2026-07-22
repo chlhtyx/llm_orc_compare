@@ -87,35 +87,11 @@ export function getSourcePdfUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/source`)
 }
 
-/** 返回带差异高亮的 Word 报告下载 URL（整段黄底标注被篡改条款）。 */
-export function getAnnotatedDocxUrl(taskId: string): string {
-  return apiUrl(
-    `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=docx`,
-  )
-}
-
 /** 返回带差异高亮框的 PDF 报告下载 URL（扫描件需 OCR/Spotting 提供坐标）。 */
 export function getAnnotatedPdfUrl(taskId: string): string {
   return apiUrl(
     `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=pdf`,
   )
-}
-
-/** docx 高亮预览段落（后端 /docx-preview 接口返回）。 */
-export interface PreviewParagraph {
-  text: string
-  highlight: '' | 'modified' | 'deleted'
-  status: string
-  risk_level: string
-  number: string
-}
-
-/** 拉取源 docx 的全段落 + 差异标记，供 HTML 渲染在线高亮预览。 */
-export async function getDocxPreview(taskId: string): Promise<PreviewParagraph[]> {
-  const data = await request<{ paragraphs: PreviewParagraph[] }>(
-    `/api/v1/compare/${encodeURIComponent(taskId)}/docx-preview`,
-  )
-  return data.paragraphs
 }
 
 export interface ProgressHandlers {

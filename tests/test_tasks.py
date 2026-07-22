@@ -61,6 +61,17 @@ async def test_external_task_callback_contract(monkeypatch):
     ):
         monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
 
+    callback_results: list[dict] = []
+
+    def _update_callback_result(task_id_, *, success, http_status=None, error=None):
+        callback_results.append(
+            {"task_id": task_id_, "success": success, "http_status": http_status, "error": error}
+        )
+
+    monkeypatch.setattr(
+        tasks_module.db_repo, "update_callback_result", _update_callback_result
+    )
+
     delivered: dict = {}
 
     async def _deliver(url, raw, secret, event_id, **_kwargs):
@@ -70,7 +81,7 @@ async def test_external_task_callback_contract(monkeypatch):
             secret=secret,
             event_id=event_id,
         )
-        return True
+        return {"success": True, "http_status": 200, "error": None}
 
     monkeypatch.setattr(tasks_module.webhook, "deliver", _deliver)
     manager = TaskManager()
@@ -92,6 +103,10 @@ async def test_external_task_callback_contract(monkeypatch):
     assert body["highlight_images"][0]["page_number"] == 1
     assert body["result_url"] == "https://example.test/result"
     assert delivered["event_id"] == body["event_id"]
+    # 交付结果应回写为成功
+    assert callback_results == [
+        {"task_id": task_id, "success": True, "http_status": 200, "error": None}
+    ]
 
 
 async def test_external_image_failure_sends_failed_callback(monkeypatch):
@@ -112,11 +127,15 @@ async def test_external_image_failure_sends_failed_callback(monkeypatch):
     ):
         monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
 
+    monkeypatch.setattr(
+        tasks_module.db_repo, "update_callback_result", lambda *_a, **_kw: None
+    )
+
     delivered: dict = {}
 
     async def _deliver(_url, raw, _secret, _event_id, **_kwargs):
         delivered.update(json.loads(raw))
-        return True
+        return {"success": True, "http_status": 200, "error": None}
 
     monkeypatch.setattr(tasks_module.webhook, "deliver", _deliver)
     manager = TaskManager()
