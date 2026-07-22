@@ -106,13 +106,13 @@ def external_client(db_isolated, monkeypatch, tmp_path):
 
 
 def test_external_auth_missing_wrong_and_unconfigured(external_client, monkeypatch):
-    assert external_client.get("/api/v1/external/compare/missing").status_code == 401
+    assert external_client.get("/api/v1/external/contractCompare/missing").status_code == 401
     assert external_client.get(
-        "/api/v1/external/compare/missing", headers={"X-API-Key": "wrong"}
+        "/api/v1/external/contractCompare/missing", headers={"X-API-Key": "wrong"}
     ).status_code == 401
     monkeypatch.setattr(settings, "external_api_key", "")
     assert external_client.get(
-        "/api/v1/external/compare/missing", headers={"X-API-Key": "external-test-key"}
+        "/api/v1/external/contractCompare/missing", headers={"X-API-Key": "external-test-key"}
     ).status_code == 503
 
 
@@ -134,7 +134,7 @@ def test_external_submit_echoes_document_no_and_allows_duplicates(
 
     def submit():
         return external_client.post(
-            "/api/v1/external/compare",
+            "/api/v1/external/contractCompare",
             headers=headers,
             data=data,
             files={
@@ -152,6 +152,44 @@ def test_external_submit_echoes_document_no_and_allows_duplicates(
     task = task_manager.get(first.json()["task_id"])
     assert task is not None and task.external_request is True
     assert task.document_no == "BILL-2026-001"
+
+
+def test_external_submit_accepts_missing_or_blank_callback_secret(
+    external_client, monkeypatch
+):
+    """callback_secret 非必填:缺失或空白均应接受,且归一化为 None。"""
+    from document_comparison.api.app import task_manager
+
+    async def _no_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run", _no_run)
+    headers = {"X-API-Key": "external-test-key"}
+
+    def submit(secret_value):
+        data = {
+            "document_no": "BILL-NO-SECRET",
+            "callback_url": "http://10.0.0.8/callback",
+        }
+        if secret_value is not None:
+            data["callback_secret"] = secret_value
+        return external_client.post(
+            "/api/v1/external/contractCompare",
+            headers=headers,
+            data=data,
+            files={
+                "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+                "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+            },
+        )
+
+    for secret_value in (None, "   "):
+        response = submit(secret_value)
+        assert response.status_code == 202, response.json()
+        task = task_manager.get(response.json()["task_id"])
+        assert task is not None
+        assert task.callback_url == "http://10.0.0.8/callback"
+        assert task.callback_secret is None
 
 
 def test_compare_page_api_test_reuses_external_artifact_flow_without_callback(
@@ -208,7 +246,7 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
         },
     )
     external_response = external_client.post(
-        "/api/v1/external/compare",
+        "/api/v1/external/contractCompare",
         headers={"X-API-Key": "external-test-key"},
         data={
             "document_no": "BILL-OPTIONS",
@@ -247,7 +285,6 @@ def test_compare_page_api_test_requires_complete_external_config(external_client
     [
         ({"document_no": "   "}, "document_no"),
         ({"callback_url": "ftp://internal/callback"}, "HTTP/HTTPS"),
-        ({"callback_secret": "   "}, "callback_secret"),
     ],
 )
 def test_external_submit_validation(external_client, data_override, expected):
@@ -258,7 +295,7 @@ def test_external_submit_validation(external_client, data_override, expected):
         **data_override,
     }
     response = external_client.post(
-        "/api/v1/external/compare",
+        "/api/v1/external/contractCompare",
         headers={"X-API-Key": "external-test-key"},
         data=data,
         files={
@@ -273,7 +310,7 @@ def test_external_submit_validation(external_client, data_override, expected):
 def test_external_upload_limit(external_client, monkeypatch):
     monkeypatch.setattr(settings, "external_max_upload_mb", 1)
     response = external_client.post(
-        "/api/v1/external/compare",
+        "/api/v1/external/contractCompare",
         headers={"X-API-Key": "external-test-key"},
         data={
             "document_no": "BILL-1",
@@ -308,7 +345,7 @@ def test_external_query_and_image_download(external_client, monkeypatch, tmp_pat
 
     headers = {"X-API-Key": "external-test-key"}
     response = external_client.get(
-        f"/api/v1/external/compare/{task_id}", headers=headers
+        f"/api/v1/external/contractCompare/{task_id}", headers=headers
     )
     assert response.status_code == 200
     body = response.json()
@@ -317,7 +354,7 @@ def test_external_query_and_image_download(external_client, monkeypatch, tmp_pat
     assert len(body["highlight_images"]) == 2
 
     image = external_client.get(
-        f"/api/v1/external/compare/{task_id}/images/1", headers=headers
+        f"/api/v1/external/contractCompare/{task_id}/images/1", headers=headers
     )
     assert image.status_code == 200
     assert image.headers["content-type"] == "image/png"

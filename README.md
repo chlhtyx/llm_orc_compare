@@ -180,9 +180,9 @@ Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
 | `GET` | `/api/v1/compare/{task_id}/docx-preview` | 获取 Word 全文及差异标记 |
-| `POST` | `/api/v1/external/compare` | 外部系统异步提交标准合同比对(`X-API-Key`) |
-| `GET` | `/api/v1/external/compare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
-| `GET` | `/api/v1/external/compare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
+| `POST` | `/api/v1/external/contractCompare` | 外部系统异步提交标准合同比对(`X-API-Key`) |
+| `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
+| `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
 | `POST` | `/api/v1/statement` | 提交对帐单金额统计(支持多文件,`target` 字段同键多值) |
 | `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
@@ -197,22 +197,22 @@ Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 
 ```bash
 # 提交任务
-curl -X POST 'https://compare.example.com/api/v1/external/compare' \
+curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
   -H 'X-API-Key: <YOUR_API_KEY>' \
   -F 'source=@./original-contract.docx' \
   -F 'target=@./returned-contract.pdf' \
   -F 'document_no=DOC-2026-0001' \
   -F 'callback_url=https://business.example.com/callbacks/contract-compare' \
-  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'
+  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'   # 可选,留空则回调不带签名
 
 # 使用响应中的 task_id 查询完整结果
 curl -H 'X-API-Key: <YOUR_API_KEY>' \
-  'https://compare.example.com/api/v1/external/compare/<TASK_ID>'
+  'https://compare.example.com/api/v1/external/contractCompare/<TASK_ID>'
 
 # 下载第 1 页高亮 PNG
 curl -H 'X-API-Key: <YOUR_API_KEY>' \
   -o page-0001.png \
-  'https://compare.example.com/api/v1/external/compare/<TASK_ID>/images/1'
+  'https://compare.example.com/api/v1/external/contractCompare/<TASK_ID>/images/1'
 ```
 
 “合同比对 API”页也提供相同示例和一键复制功能；页面会自动使用已保存的服务公开地址，

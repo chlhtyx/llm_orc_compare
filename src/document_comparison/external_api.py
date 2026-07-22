@@ -177,7 +177,7 @@ def build_external_result(
                 "page_number": page_number,
                 "has_highlight": page_number - 1 in highlighted,
                 "url": _absolute_external_url(
-                    f"/api/v1/external/compare/{task_id}/images/{page_number}"
+                    f"/api/v1/external/contractCompare/{task_id}/images/{page_number}"
                 ),
             }
         )
@@ -189,5 +189,5 @@ def build_external_result(
         "summary": report.summary,
         "result_text": build_result_text(document_no, report),
         "highlight_images": images,
-        "result_url": _absolute_external_url(f"/api/v1/external/compare/{task_id}"),
+        "result_url": _absolute_external_url(f"/api/v1/external/contractCompare/{task_id}"),
     }

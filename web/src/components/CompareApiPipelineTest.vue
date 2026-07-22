@@ -40,22 +40,22 @@ const exampleBaseUrl = computed(
 )
 const callExample = computed(() => [
   '# 1. 提交异步比对任务',
-  `curl -X POST '${exampleBaseUrl.value}/api/v1/external/compare' \\`,
+  `curl -X POST '${exampleBaseUrl.value}/api/v1/external/contractCompare' \\`,
   "  -H 'X-API-Key: <YOUR_API_KEY>' \\",
   "  -F 'source=@./original-contract.docx' \\",
   "  -F 'target=@./returned-contract.pdf' \\",
   "  -F 'document_no=DOC-2026-0001' \\",
   "  -F 'callback_url=https://business.example.com/callbacks/contract-compare' \\",
-  "  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'",
+  "  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'  # 可选,留空则回调不带签名",
   '',
   '# 2. 使用提交响应中的 task_id 查询结果',
   `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
-  `  '${exampleBaseUrl.value}/api/v1/external/compare/<TASK_ID>'`,
+  `  '${exampleBaseUrl.value}/api/v1/external/contractCompare/<TASK_ID>'`,
   '',
   '# 3. 下载指定页高亮 PNG',
   `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
   "  -o page-0001.png \\",
-  `  '${exampleBaseUrl.value}/api/v1/external/compare/<TASK_ID>/images/1'`,
+  `  '${exampleBaseUrl.value}/api/v1/external/contractCompare/<TASK_ID>/images/1'`,
 ].join('\n'))
 
 function stopPolling(): void {

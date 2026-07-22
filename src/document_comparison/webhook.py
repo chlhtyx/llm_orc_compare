@@ -41,23 +41,23 @@ def build_event(task_id: str, status: str, payload: dict) -> tuple[dict, bytes]:
 async def deliver(
     url: str,
     raw_body: bytes,
-    secret: str,
+    secret: str | None,
     event_id: str,
     *,
     max_retries: int = 3,
     timeout: float = 10.0,
 ) -> DeliveryResult:
-    """POST 事件到 url,带 X-Signature;失败按指数退避重试。
+    """POST 事件到 url;secret 非空时带 X-Signature,失败按指数退避重试。
 
     返回 DeliveryResult(成功与否 / 最终 HTTP 状态码 / 错误原因),
     供调用方回写 task_records 的 callback 交付状态。
     """
-    signature = sign(raw_body, secret)
-    headers = {
+    headers: dict[str, str] = {
         "Content-Type": "application/json",
-        "X-Signature": signature,
         "X-Event-Id": event_id,
     }
+    if secret:
+        headers["X-Signature"] = sign(raw_body, secret)
     backoff = (1, 4, 16)  # 秒
     logger.info("webhook deliver start event_id=%s url=%s", event_id, url)
     last_status: int | None = None

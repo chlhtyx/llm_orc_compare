@@ -154,3 +154,66 @@ async def test_external_image_failure_sends_failed_callback(monkeypatch):
     assert delivered["document_no"] == "BILL-2"
     assert "highlight_images" not in delivered
     assert delivered["error"] == "image render failed"
+
+
+async def test_external_callback_fires_without_secret(monkeypatch):
+    """callback_secret 非必填:留空时回调仍触发,deliver 收到 secret=None。"""
+    from document_comparison import tasks as tasks_module
+    from document_comparison.models import TamperReport
+    from document_comparison.tasks import TaskManager
+
+    report = TamperReport(
+        source="source.docx",
+        target="target.pdf",
+        overall_risk="clean",
+        change_status="clean",
+        summary={"status_counts": {}},
+    )
+    monkeypatch.setattr(tasks_module, "run_pipeline", lambda *_a, **_kw: report)
+    monkeypatch.setattr(tasks_module, "render_external_highlight_images", lambda *_a: [])
+    monkeypatch.setattr(
+        tasks_module,
+        "build_external_result",
+        lambda *_a: {
+            "change_status": "clean",
+            "recognition_status": "reliable",
+            "location_status": "complete",
+            "summary": {"status_counts": {}},
+            "result_text": "未发现内容变化",
+            "highlight_images": [],
+            "result_url": "https://example.test/result",
+        },
+    )
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_compare_report", "save_llm_calls_batch", "update_callback_result",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    delivered: dict = {}
+
+    async def _deliver(url, raw, secret, event_id, **_kwargs):
+        delivered.update(
+            url=url,
+            body=json.loads(raw),
+            secret=secret,
+            event_id=event_id,
+        )
+        return {"success": True, "http_status": 200, "error": None}
+
+    monkeypatch.setattr(tasks_module.webhook, "deliver", _deliver)
+    manager = TaskManager()
+    # 提交时不带 callback_secret
+    task_id = manager.create(
+        "compare",
+        callback_url="http://internal/hook",
+        document_no="BILL-NO-SECRET",
+        external_request=True,
+    )
+
+    await manager.run(task_id, "source.docx", "target.pdf")
+
+    # 回调仍触发,且 deliver 收到的 secret 为 None(调用方据此省略 X-Signature)
+    assert delivered["url"] == "http://internal/hook"
+    assert delivered["body"]["task_id"] == task_id
+    assert delivered["secret"] is None

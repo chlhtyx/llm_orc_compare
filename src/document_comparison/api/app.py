@@ -1,7 +1,7 @@
 """FastAPI 应用:比对端点 + 对外集成(§7、§14)。
 
 端点:
-  POST /api/v1/compare              提交(支持 callback_url/callback_secret)
+  POST /api/v1/compare              提交(支持 callback_url/callback_secret,均可选)
   GET  /api/v1/compare/{task_id}    查询结果
   GET  /api/v1/compare/{task_id}/events   SSE 进度(§7.3)
   GET  /api/v1/compare/{task_id}/report   下载报告(json/pdf)
@@ -579,13 +579,13 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "image not found")
         return FileResponse(path, media_type="image/png")
 
-    @app.post("/api/v1/external/compare", status_code=202)
+    @app.post("/api/v1/external/contractCompare", status_code=202)
     async def external_compare(
         source: UploadFile = File(..., description="原始合同 Word(.docx)"),
         target: UploadFile = File(..., description="回收件 PDF(.pdf)"),
         document_no: str = Form(...),
         callback_url: str = Form(...),
-        callback_secret: str = Form(...),
+        callback_secret: str | None = Form(default=None),
         _auth: None = Depends(require_external_api_key),
     ):
         """供外部系统调用的标准合同比对异步入口。"""
@@ -599,9 +599,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "document_no 不能为空")
         if len(document_no) > 255:
             raise HTTPException(400, "document_no 不能超过 255 个字符")
-        callback_secret = callback_secret.strip()
-        if not callback_secret:
-            raise HTTPException(400, "callback_secret 不能为空")
+        # callback_secret 可选(留空则回调不带 X-Signature 签名);空白规整化为 None。
+        callback_secret = (callback_secret or "").strip() or None
         try:
             callback_url = validate_callback_url(callback_url)
         except ValueError as exc:
@@ -665,14 +664,14 @@ def create_app() -> FastAPI:
         )
         return {"task_id": task_id, "document_no": document_no, "status": "pending"}
 
-    @app.get("/api/v1/external/compare/{task_id}")
+    @app.get("/api/v1/external/contractCompare/{task_id}")
     async def get_external_result(
         task_id: str,
         _auth: None = Depends(require_external_api_key),
     ):
         return await _external_task_response(task_id)
 
-    @app.get("/api/v1/external/compare/{task_id}/images/{page_number}")
+    @app.get("/api/v1/external/contractCompare/{task_id}/images/{page_number}")
     async def get_external_highlight_image(
         task_id: str,
         page_number: int,

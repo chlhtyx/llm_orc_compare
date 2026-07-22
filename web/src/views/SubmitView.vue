@@ -27,7 +27,7 @@ const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWi
 const targetValid = computed(() => !!targetFile.value?.name.toLowerCase().endsWith('.pdf'))
 const endpoint = computed(() => {
   const base = form.external_public_base_url.trim().replace(/\/$/, '')
-  return `${base || 'https://compare.example.com'}/api/v1/external/compare`
+  return `${base || 'https://compare.example.com'}/api/v1/external/contractCompare`
 })
 
 function syncFromConfig(config: LlmConfig | null): void {

@@ -478,7 +478,7 @@ class TaskManager:
 
     async def _fire_callback(self, task_id: str, status: str, payload: dict) -> None:
         task = self._tasks.get(task_id)
-        if not task or not task.callback_url or not task.callback_secret:
+        if not task or not task.callback_url:
             return
         event, raw = webhook.build_event(task_id, status, payload)
         result = await webhook.deliver(
