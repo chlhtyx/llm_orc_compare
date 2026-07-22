@@ -394,7 +394,15 @@ def burn_pdf(
     pmeta = {m.page_index: m for m in report.page_meta}
     # 逐页收集标注
     page_regions: dict[int, list[tuple[Diff, PageRegion]]] = {}
-    for d in report.diffs:
+    targets = [
+        *report.diffs,
+        *(
+            diff
+            for diff in report.unmatched_clauses
+            if diff.status == "added" and diff.page_regions
+        ),
+    ]
+    for d in targets:
         for r in d.page_regions:
             page_regions.setdefault(r.page_index, []).append((d, r))
 

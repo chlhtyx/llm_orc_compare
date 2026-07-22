@@ -1,4 +1,4 @@
-"""PaddleOCR-VL 引擎:通过 OpenAI 兼容 /chat/completions 接口调用 PaddleOCR-VL 模型。
+"""PaddleOCR-VL 引擎:可切换 vLLM Chat Completions 与 PaddleOCR 官方 SDK。
 
 PaddleOCR-VL 是专用 OCR 模型,**不遵循 system prompt 的 JSON 格式指令**。
 其实际输出取决于模型版本与调用方式,本引擎按返回内容自适应解析:
@@ -8,8 +8,8 @@ PaddleOCR-VL 是专用 OCR 模型,**不遵循 system prompt 的 JSON 格式指�
    → 由 `_parse_plain_content` 解析:连续 `|` 行归为一个 `label=table` 的 Block
      (构造 TableStructure),其余行归为 `label=text` 的 Block。
 
-2. **文字行 + `<|LOC_|>` 坐标标记**(早期约定):
-   每行文字后跟 8 个 `<|LOC_N|>` token,构成四角点坐标:
+2. **文字行 + `<|LOC_|>` 坐标标记**:
+   每行文字后跟偶数个 `<|LOC_N|>` token,构成矩形/四边形/多边形坐标:
        [x1, y1, x2, y1, x2, y2, x1, y2](0-1000 归一化空间)
    → 由 `_parse_loc_content` 解析,每行一个带 bbox 的 Block。
 
@@ -17,14 +17,16 @@ PaddleOCR-VL 是专用 OCR 模型,**不遵循 system prompt 的 JSON 格式指�
 对 PaddleOCR-VL 各版本兼容。
 
 关键调用约定:
-- user 消息只发图片 + 简短「OCR」指令(不发复杂 system prompt,模型不遵循)
+- 内容调用使用官方「OCR:」任务；标准合同比对在内容缺少坐标时追加一次
+  「Spotting:」调用，并在本地按阅读顺序挂载 bbox。Spotting 失败不阻断正文比对。
 - **必须限制 `max_tokens`**:PaddleOCR-VL 在表格行上不自我停止,会重复 hallucination
   直到 token 上限,导致合计行/后续内容丢失(实测 200DPI 大图 385 行死循环)。
 - 不带 `response_format`(强制 JSON 会让该模型陷入构造死循环)
 
-配置:独立使用 paddleocr_*(paddleocr_api_base / paddleocr_api_key / paddleocr_model),
+配置:独立使用 paddleocr_*。原 vLLM 配置与
+paddleocr_official_* 官方 SDK 配置分开保存,
 与 llm 后端的配置完全隔离。当 ocr_backend=paddleocr 时由 get_ocr_engine() 路由到
-本引擎。未配置 paddleocr_api_base 时直接报错,不回退 llm_*。
+本引擎。vllm 模式要求 API Base;官方 SDK 模式可留空 Base 使用官方默认地址。
 """
 from __future__ import annotations
 
@@ -35,17 +37,22 @@ import re
 import contextvars
 import threading
 import time
+import tempfile
 from collections import deque
+from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import requests
 
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
 from ..observability import log_model_failure, log_model_request, log_model_response
 from ..parsing.pdf import render_pages
+from ..structure.normalize import normalize_text
 from .base import ProgressCb
 
 logger = logging.getLogger(__name__)
@@ -70,31 +77,105 @@ _TABLE_LINE_RE = re.compile(r"\||\t")
 _HTML_TABLE_RE = re.compile(r"<table\b[\s\S]*?</table\s*>", re.IGNORECASE)
 _MD_SEPARATOR_RE = re.compile(r"^[\s:|\-]+$")
 _REPEATED_ROW_THRESHOLD = 4
+_COMPLETE_BBOX_COVERAGE = 0.95
+_OFFICIAL_DEFAULT_MODEL = "PaddleOCR-VL-1.6"
+# 官方文档解析是异步任务。排队或复杂 PDF 可能超过通用 OCR 的 300 秒请求
+# 超时；不能用该较短默认值覆盖 SDK 的总轮询时间。较大的用户配置仍然生效。
+_OFFICIAL_MIN_POLL_TIMEOUT = 900.0
+
+# AI Studio 官方 ``layout-parsing`` 示例参数。该同步服务与
+# PaddleOCRClient 的异步 ``/api/v2/ocr/jobs`` 队列是两条独立调用链路。
+_LAYOUT_PARSING_OPTIONS: dict[str, Any] = {
+    "markdownIgnoreLabels": [
+        "header",
+        "header_image",
+        "footer",
+        "footer_image",
+        "number",
+        "footnote",
+        "aside_text",
+    ],
+    "useChartRecognition": False,
+    "useRegionDetection": True,
+    "useDocOrientationClassify": False,
+    "useDocUnwarping": False,
+    "useTextlineOrientation": False,
+    "useSealRecognition": True,
+    "useFormulaRecognition": True,
+    "useTableRecognition": True,
+    "layoutThreshold": 0.5,
+    "layoutNms": True,
+    "layoutUnclipRatio": 1,
+    "textDetLimitType": "min",
+    "textDetLimitSideLen": 64,
+    "textDetThresh": 0.3,
+    "textDetBoxThresh": 0.6,
+    "textDetUnclipRatio": 1.5,
+    "textRecScoreThresh": 0,
+    "sealDetLimitType": "min",
+    "sealDetLimitSideLen": 736,
+    "sealDetThresh": 0.2,
+    "sealDetBoxThresh": 0.6,
+    "sealDetUnclipRatio": 0.5,
+    "sealRecScoreThresh": 0,
+    "useTableOrientationClassify": True,
+    "useOcrResultsWithTableCells": True,
+    "useE2eWiredTableRecModel": False,
+    "useE2eWirelessTableRecModel": False,
+    "useWiredTableCellsTransToHtml": False,
+    "useWirelessTableCellsTransToHtml": False,
+    "parseLanguage": "default",
+}
 
 
 class PaddleOCREngine:
-    """通过 OpenAI 兼容 /chat/completions 调用 PaddleOCR-VL。
+    """调用 PaddleOCR-VL,运行时可选 vLLM 或 PaddleOCR 官方 SDK。
 
     与 LLMOCREngine 的区别:
     - 请求:user 消息只发图片 + 简单指令(不发 system prompt 要求 JSON 格式)
-    - 响应:解析 `<|LOC_|>` 标记格式,而非 JSON blocks
+    - 内容:解析 OCR 纯文本/Markdown；可选 Spotting 响应只用于补充坐标
     - 坐标:LOC 坐标 0-1000 → 换算为 PDF pt(复用 _to_pt_bbox 逻辑)
     """
 
     def __init__(
         self,
+        api_mode: str | None = None,
         api_base: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        official_api_base: str | None = None,
+        official_access_token: str | None = None,
+        official_model: str | None = None,
         timeout: float | None = None,
         max_concurrency: int | None = None,
         max_retries: int | None = None,
+        enable_spotting: bool = False,
     ) -> None:
-        # paddleocr 后端使用独立的 paddleocr_* 配置(与 llm 后端同协议、同连接方式,
-        # 但配置项完全隔离,不复用 llm_*)。
+        # paddleocr 后端使用独立配置,不复用 llm_*。
+        self.api_mode = api_mode or settings.paddleocr_api_mode
+        if self.api_mode not in {"vllm", "official_sdk"}:
+            raise ValueError(
+                f"未知 paddleocr_api_mode: {self.api_mode};"
+                "仅支持 vllm | official_sdk"
+            )
         self.api_base = api_base or settings.paddleocr_api_base
         self.api_key = api_key if api_key is not None else settings.paddleocr_api_key
         self.model = model or settings.paddleocr_model
+        self.official_api_base = (
+            official_api_base
+            if official_api_base is not None
+            else settings.paddleocr_official_api_base
+        )
+        self.official_access_token = (
+            official_access_token
+            if official_access_token is not None
+            else settings.paddleocr_official_access_token
+        )
+        self.official_model = (
+            official_model
+            if official_model is not None
+            else settings.paddleocr_official_model
+        )
         self.timeout = timeout if timeout is not None else settings.paddleocr_timeout
         self.max_concurrency = (
             max_concurrency if max_concurrency is not None else settings.paddleocr_max_concurrency
@@ -102,6 +183,7 @@ class PaddleOCREngine:
         self.max_retries = (
             max_retries if max_retries is not None else settings.paddleocr_max_retries
         )
+        self.enable_spotting = enable_spotting
         self._dpi = settings.pdf_render_dpi
 
     # —— 公共接口(与 LLMOCREngine 对称)——
@@ -112,6 +194,10 @@ class PaddleOCREngine:
         *,
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
+        if self.api_mode == "official_sdk":
+            return self._recognize_official_document(
+                pdf_path, page_metas, on_progress=on_progress
+            )
         if not self.api_base:
             raise RuntimeError(
                 "paddleocr_api_base 未配置,请在设置页填写专用 OCR 模型的推理服务地址"
@@ -144,6 +230,37 @@ class PaddleOCREngine:
 
         return results
 
+    def _recognize_official_document(
+        self,
+        pdf_path: Path,
+        page_metas: list[PageMeta],
+        *,
+        on_progress: ProgressCb | None = None,
+    ) -> list[list[Block]]:
+        """通过官方 SDK 一次提交 PDF,按返回页映射为 Block。"""
+        if on_progress:
+            on_progress("ocr", 0.10)
+        result = self._official_parse_document(pdf_path)
+        pages = list(getattr(result, "pages", []) or [])
+        if len(pages) != len(page_metas):
+            logger.warning(
+                "paddleocr official sdk page count mismatch expected=%s actual=%s",
+                len(page_metas),
+                len(pages),
+            )
+        blocks_by_page: list[list[Block]] = []
+        for page_index, meta in enumerate(page_metas):
+            if page_index < len(pages):
+                blocks = _parse_official_page(pages[page_index], page_index, meta)
+            else:
+                blocks = []
+            blocks_by_page.append(blocks)
+            if on_progress:
+                on_progress(
+                    "ocr", 0.10 + ((page_index + 1) / max(1, len(page_metas))) * 0.60
+                )
+        return blocks_by_page
+
     # —— 单页识别 ——
     def _recognize_page(
         self,
@@ -156,13 +273,41 @@ class PaddleOCREngine:
         done_count: list[int] | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
-        content = self._chat(data_url)
+        content = self._chat(data_url, prompt="OCR:")
         # 自适应解析:含 <|LOC_ 标记走 LOC 分支(带 bbox),否则走 plain 分支
         # (Markdown 表格/段落文本,PaddleOCR-VL-1.5 的实际输出格式)。
         if "<|LOC_" in content:
             blocks = _parse_loc_content(content, page_index, meta)
         else:
             blocks = _parse_plain_content(content, page_index, meta)
+        coverage = _bbox_coverage(blocks)
+        if self.enable_spotting and coverage < _COMPLETE_BBOX_COVERAGE:
+            try:
+                spotting_content = self._chat(data_url, prompt="Spotting:")
+            except Exception as exc:  # noqa: BLE001
+                # 坐标补全属于报告增强；失败不能让已成功的 OCR 内容比对失败。
+                logger.warning(
+                    "paddleocr spotting failed page=%s error_type=%s",
+                    page_index,
+                    type(exc).__name__,
+                )
+            else:
+                if "<|LOC_" in spotting_content:
+                    spotting_blocks = _parse_loc_content(
+                        spotting_content, page_index, meta
+                    )
+                    blocks = _attach_spotting_bboxes(blocks, spotting_blocks)
+                else:
+                    logger.warning(
+                        "paddleocr spotting returned no LOC tokens page=%s chars=%s",
+                        page_index,
+                        len(spotting_content),
+                    )
+        logger.info(
+            "paddleocr page location page=%s bbox_coverage=%.3f",
+            page_index,
+            _bbox_coverage(blocks),
+        )
         out[page_index] = blocks
         if on_progress:
             done_count[0] += 1
@@ -180,19 +325,170 @@ class PaddleOCREngine:
 
         `client` 可传入共享的 httpx.Client 以复用连接池(并发场景)。
         """
+        if self.api_mode == "official_sdk":
+            # 官方 SDK 只接受 file_path/file_url;使用短生命临时文件,
+            # 不复用上层为 vLLM 准备的 httpx.Client。
+            with tempfile.TemporaryDirectory(prefix="dc-paddle-sdk-") as temp_dir:
+                image_path = Path(temp_dir) / "page.png"
+                image_path.write_bytes(image_bytes)
+                result = self._official_parse_document(image_path)
+            return "\n".join(
+                str(getattr(page, "markdown_text", "") or "")
+                for page in (getattr(result, "pages", []) or [])
+            )
         if not self.api_base:
             raise RuntimeError(
                 "paddleocr_api_base 未配置,请在设置页填写专用 OCR 模型的推理服务地址"
             )
         data_url = _to_data_url(image_bytes)
-        content = self._chat(data_url, max_tokens=_MAX_TOKENS, client=client)
+        content = self._chat(
+            data_url, prompt="OCR:", max_tokens=_MAX_TOKENS, client=client
+        )
         # 剥除可能的 <|LOC_N|> 坐标标记,只留文字
         return _LOC_RE.sub("", content)
+
+    def _official_parse_document(self, file_path: Path):
+        """调用 PaddleOCR 官方同步 API 或 SDK,并记录脱敏的任务级信息。"""
+        if not self.official_access_token:
+            raise RuntimeError(
+                "PaddleOCR 官方 API/SDK 模式未配置 Access Token;"
+                "请在设置页填写 AI Studio Access Token"
+            )
+        if _is_layout_parsing_endpoint(self.official_api_base):
+            return self._official_layout_parse(file_path)
+
+        return self._official_sdk_parse(file_path)
+
+    def _official_layout_parse(self, file_path: Path):
+        """调用 AI Studio 示例中的同步 ``/layout-parsing`` API。"""
+        endpoint = self.official_api_base.rstrip("/")
+        file_bytes = file_path.read_bytes()
+        payload = {
+            "file": base64.b64encode(file_bytes).decode("ascii"),
+            "fileType": 0 if file_path.suffix.lower() == ".pdf" else 1,
+            **_LAYOUT_PARSING_OPTIONS,
+        }
+        safe_payload = {
+            "transport": "official_layout_api",
+            "file": {
+                "name": file_path.name,
+                "size_bytes": len(file_bytes),
+                "file_type": payload["fileType"],
+            },
+            "options": _LAYOUT_PARSING_OPTIONS,
+        }
+        request_started = log_model_request(
+            logger, "paddleocr", endpoint, safe_payload, 1
+        )
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers={
+                    "Authorization": f"token {self.official_access_token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=float(self.timeout),
+            )
+            response.raise_for_status()
+            response_data = response.json()
+            pages = _layout_api_pages(response_data)
+        except Exception as exc:  # noqa: BLE001 -- 官方 API 统一错误边界
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            log_model_failure(
+                logger,
+                "paddleocr",
+                request_started,
+                str(exc),
+                status_code=status_code,
+            )
+            raise
+
+        log_model_response(
+            logger,
+            "paddleocr",
+            response.status_code,
+            {
+                "transport": "official_layout_api",
+                "pages": len(pages),
+                "markdown_chars": sum(
+                    len(str(getattr(page, "markdown_text", "") or ""))
+                    for page in pages
+                ),
+            },
+            request_started,
+        )
+        return SimpleNamespace(job_id="", pages=pages)
+
+    def _official_sdk_parse(self, file_path: Path):
+        """调用异步任务型 PaddleOCRClient.parse_document。"""
+        PaddleOCRClient, PaddleOCRVLOptions = _load_official_sdk()
+        model = self.official_model or _OFFICIAL_DEFAULT_MODEL
+        client_kwargs: dict[str, Any] = {
+            "token": self.official_access_token,
+            "request_timeout": float(self.timeout),
+            "poll_timeout": max(
+                float(self.timeout), _OFFICIAL_MIN_POLL_TIMEOUT
+            ),
+        }
+        if self.official_api_base:
+            client_kwargs["base_url"] = self.official_api_base
+        options = PaddleOCRVLOptions(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_layout_detection=True,
+            format_block_content=True,
+            temperature=0,
+            max_new_tokens=_MAX_TOKENS,
+            prettify_markdown=False,
+            return_markdown_images=False,
+            visualize=False,
+        )
+        payload = {
+            "transport": "official_sdk",
+            "model": model,
+            "file": {
+                "name": file_path.name,
+                "size_bytes": file_path.stat().st_size,
+            },
+        }
+        request_started = log_model_request(
+            logger,
+            "paddleocr",
+            self.official_api_base or "paddleocr://official-api",
+            payload,
+            1,
+        )
+        try:
+            with PaddleOCRClient(**client_kwargs) as sdk_client:
+                result = sdk_client.parse_document(
+                    file_path=str(file_path), model=model, options=options
+                )
+        except Exception as exc:  # noqa: BLE001 -- SDK 统一错误边界
+            log_model_failure(logger, "paddleocr", request_started, str(exc))
+            raise
+        pages = list(getattr(result, "pages", []) or [])
+        log_model_response(
+            logger,
+            "paddleocr",
+            200,
+            {
+                "job_id": getattr(result, "job_id", ""),
+                "pages": len(pages),
+                "markdown_chars": sum(
+                    len(str(getattr(page, "markdown_text", "") or ""))
+                    for page in pages
+                ),
+            },
+            request_started,
+        )
+        return result
 
     def _chat(
         self,
         data_url: str,
         *,
+        prompt: str = "OCR:",
         max_tokens: int = _MAX_TOKENS,
         client: httpx.Client | None = None,
     ) -> str:
@@ -208,7 +504,7 @@ class PaddleOCREngine:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "OCR"},
+                        {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
                     ],
                 }
@@ -291,6 +587,159 @@ class PaddleOCREngine:
 # —— 解析函数 ——
 
 
+def _is_layout_parsing_endpoint(api_base: str) -> bool:
+    """完整 ``/layout-parsing`` 地址启用官方同步 API。"""
+    return api_base.rstrip("/").endswith("/layout-parsing")
+
+
+def _layout_api_pages(response_data: Any) -> list[SimpleNamespace]:
+    """把官方同步 API 响应适配为 SDK page 的最小公共接口。"""
+    if not isinstance(response_data, dict):
+        raise RuntimeError("PaddleOCR 官方同步 API 返回格式错误:响应不是 JSON 对象")
+    result = response_data.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("PaddleOCR 官方同步 API 返回格式错误:缺少 result")
+    raw_pages = result.get("layoutParsingResults")
+    if not isinstance(raw_pages, list):
+        raise RuntimeError(
+            "PaddleOCR 官方同步 API 返回格式错误:缺少 layoutParsingResults"
+        )
+
+    pages: list[SimpleNamespace] = []
+    for raw_page in raw_pages:
+        if not isinstance(raw_page, dict):
+            continue
+        markdown = raw_page.get("markdown")
+        markdown_text = (
+            str(markdown.get("text") or "") if isinstance(markdown, dict) else ""
+        )
+        pruned_result = raw_page.get("prunedResult")
+        if not isinstance(pruned_result, dict):
+            pruned_result = raw_page.get("pruned_result")
+        if not isinstance(pruned_result, dict):
+            pruned_result = {}
+        pages.append(
+            SimpleNamespace(
+                markdown_text=markdown_text,
+                pruned_result=pruned_result,
+            )
+        )
+    return pages
+
+
+def _load_official_sdk():
+    """延迟导入官方 SDK,使 vLLM 模式不依赖 PaddleOCR 导入路径。"""
+    try:
+        from paddleocr import PaddleOCRClient, PaddleOCRVLOptions
+    except ImportError as exc:  # pragma: no cover - 生产依赖缺失才触发
+        raise RuntimeError(
+            "PaddleOCR 官方 SDK 未安装;"
+            "请安装 paddleocr>=3.7,<3.8 或重建项目镜像"
+        ) from exc
+    return PaddleOCRClient, PaddleOCRVLOptions
+
+
+def _parse_official_page(page: Any, page_index: int, meta: PageMeta) -> list[Block]:
+    """把官方 SDK DocParsingPage 转为项目 Block,优先保留版面坐标。"""
+    pruned = getattr(page, "pruned_result", None)
+    if not isinstance(pruned, dict):
+        pruned = {}
+    parsing_items = pruned.get("parsing_res_list")
+    if not isinstance(parsing_items, list):
+        parsing_items = []
+
+    width = _positive_float(pruned.get("width")) or float(meta.width_px or 0)
+    height = _positive_float(pruned.get("height")) or float(meta.height_px or 0)
+    w_pt = meta.pdf_width_pt or (meta.width_px * 72.0 / settings.pdf_render_dpi)
+    h_pt = meta.pdf_height_pt or (meta.height_px * 72.0 / settings.pdf_render_dpi)
+
+    blocks: list[Block] = []
+    for item_index, item in enumerate(parsing_items):
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("block_content") or "").strip()
+        if not content:
+            continue
+        label = str(item.get("block_label") or "text")
+        table = _plain_text_to_table(content) if label == "table" else None
+        blocks.append(
+            Block(
+                block_id=f"p{page_index}-paddle-sdk-{item_index}",
+                page_index=page_index,
+                label=label,
+                bbox=_official_bbox_to_pt(
+                    item.get("block_bbox"), width, height, w_pt, h_pt
+                ),
+                content=content,
+                table=table,
+            )
+        )
+    if blocks:
+        logger.info(
+            "paddleocr official sdk parsed page=%s blocks=%s located=%s",
+            page_index,
+            len(blocks),
+            sum(len(block.bbox) >= 4 for block in blocks),
+        )
+        return blocks
+
+    # SDK 保证 markdown_text,但某些模型/版本可能不返回精简结构。
+    markdown = str(getattr(page, "markdown_text", "") or "")
+    return _parse_plain_content(markdown, page_index, meta)
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+
+def _official_bbox_to_pt(
+    raw_bbox: Any,
+    width: float,
+    height: float,
+    w_pt: float,
+    h_pt: float,
+) -> list[float]:
+    """把 SDK 像素 rect/quad/poly 转为 PDF pt 外接矩形。"""
+    if width <= 0 or height <= 0 or w_pt <= 0 or h_pt <= 0:
+        return []
+
+    numbers: list[float] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                collect(child)
+        elif isinstance(value, (int, float)):
+            numbers.append(float(value))
+
+    collect(raw_bbox)
+    if len(numbers) < 4:
+        return []
+    if len(numbers) == 4:
+        x1, y1, x2, y2 = numbers
+    elif len(numbers) % 2 == 0:
+        xs = numbers[0::2]
+        ys = numbers[1::2]
+        x1, x2 = min(xs), max(xs)
+        y1, y2 = min(ys), max(ys)
+    else:
+        return []
+    x1, x2 = sorted((max(0.0, x1), min(width, x2)))
+    y1, y2 = sorted((max(0.0, y1), min(height, y2)))
+    if x2 <= x1 or y2 <= y1:
+        return []
+    return [
+        x1 * w_pt / width,
+        y1 * h_pt / height,
+        x2 * w_pt / width,
+        y2 * h_pt / height,
+    ]
+
+
 def _to_data_url(png_bytes: bytes) -> str:
     b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
@@ -301,7 +750,7 @@ def _parse_loc_content(
 ) -> list[Block]:
     """解析 PaddleOCR-VL 的「文字行 + <|LOC_|> 标记」格式为 Block 列表。
 
-    格式:每行 = 文字 + 8个 <|LOC_N|> token(四角点坐标,0-1000 空间)
+    格式:每行 = 文字 + 偶数个 <|LOC_N|> token(rect/quad/poly,0-1000 空间)
     示例:合同标题<|LOC_146|><|LOC_89|><|LOC_499|><|LOC_89|><|LOC_499|><|LOC_121|><|LOC_146|><|LOC_121|>
     """
     # 页面尺寸:优先用 PDF 点坐标;若为 0 退回像素(并按 DPI 反算)
@@ -313,12 +762,14 @@ def _parse_loc_content(
         locs = _LOC_RE.findall(line)
         text = _LOC_RE.sub("", line).strip()
         bbox_pt: list[float] = []
-        if len(locs) >= 8:
-            # 四角点:[x1,y1, x2,y1, x2,y2, x1,y2] → 取 [x1,y1,x2,y2]
-            nums = [int(v) for v in locs[:8]]
-            x1, y1 = nums[0], nums[1]
-            # x2,y2 在第 4、6 个位置(nums[4]=x2, nums[5]=y2)
-            x2, y2 = nums[4], nums[5]
+        if len(locs) >= 4 and len(locs) % 2 == 0:
+            # 兼容 rect/quad/poly：把全部顶点保守转换成轴对齐外接矩形。
+            nums = [int(v) for v in locs]
+            points = list(zip(nums[0::2], nums[1::2]))
+            x1 = min(point[0] for point in points)
+            y1 = min(point[1] for point in points)
+            x2 = max(point[0] for point in points)
+            y2 = max(point[1] for point in points)
             # LOC 空间 0-1000 → PDF pt
             bbox_pt = [
                 x1 * w_pt / _LOC_SPACE,
@@ -332,6 +783,87 @@ def _parse_loc_content(
     blocks = _lines_to_blocks(lines, page_index)
     _log_parse_stats("loc", page_index, blocks)
     return blocks
+
+
+def _location_key(text: str) -> str:
+    """坐标挂载用比较键；只忽略排版空白和表格分隔符。"""
+    return re.sub(r"[\s|]+", "", normalize_text(text))
+
+
+def _bbox_coverage(blocks: list[Block]) -> float:
+    total = sum(len(_location_key(block.content)) for block in blocks)
+    if total <= 0:
+        return 0.0
+    located = sum(
+        len(_location_key(block.content))
+        for block in blocks
+        if len(block.bbox) >= 4
+    )
+    return located / total
+
+
+def _attach_spotting_bboxes(
+    content_blocks: list[Block], spotting_blocks: list[Block]
+) -> list[Block]:
+    """按阅读顺序把 Spotting 行坐标挂到 OCR 内容块。
+
+    OCR 内容仍是比对权威来源；Spotting 只提供 bbox。匹配保持单调，避免合同中
+    重复短语把后续坐标抢走。低相似候选不挂载，宁可报告定位不完整也不画错框。
+    """
+    located = [block for block in spotting_blocks if len(block.bbox) >= 4]
+    if not located:
+        return content_blocks
+
+    result = [block.model_copy(deep=True) for block in content_blocks]
+    spot_keys = [_location_key(block.content) for block in located]
+    cursor = 0
+    for block in result:
+        target = _location_key(block.content)
+        if not target:
+            continue
+        match = _best_spotting_window(target, spot_keys, cursor)
+        if match is None:
+            continue
+        start, end = match
+        if len(block.bbox) < 4:
+            block.bbox = _union_bbox(
+                [candidate.bbox for candidate in located[start:end]]
+            )
+        cursor = end
+    return result
+
+
+def _best_spotting_window(
+    target: str, spot_keys: list[str], cursor: int
+) -> tuple[int, int] | None:
+    best: tuple[float, int, int] | None = None
+    max_window = 24
+    for start in range(cursor, len(spot_keys)):
+        combined = ""
+        for end in range(start, min(len(spot_keys), start + max_window)):
+            combined += spot_keys[end]
+            if not combined:
+                continue
+            if combined == target:
+                return start, end + 1
+            length_ratio = min(len(target), len(combined)) / max(
+                len(target), len(combined)
+            )
+            if length_ratio < 0.65:
+                if len(combined) > len(target) * 1.6:
+                    break
+                continue
+            ratio = SequenceMatcher(None, target, combined, autojunk=False).ratio()
+            if target in combined or combined in target:
+                ratio = max(ratio, length_ratio)
+            candidate = (ratio, -start, end + 1)
+            if best is None or candidate > best:
+                best = candidate
+            if len(combined) > len(target) * 1.6:
+                break
+    if best is None or best[0] < 0.90:
+        return None
+    return -best[1], best[2]
 
 
 def _parse_plain_content(

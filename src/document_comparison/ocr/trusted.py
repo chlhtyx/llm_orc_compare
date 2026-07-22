@@ -117,6 +117,18 @@ def assess_fallback_page(
     reasons: list[str] = []
     content = "\n".join(block.content for block in blocks if block.content)
     char_count = len(re.sub(r"\s+", "", content))
+    located_chars = sum(
+        len(re.sub(r"\s+", "", block.content))
+        for block in blocks
+        if block.content and len(block.bbox) >= 4
+    )
+    bbox_coverage = located_chars / char_count if char_count else 0.0
+    if bbox_coverage >= 0.95:
+        location_status = "complete"
+    elif bbox_coverage > 0:
+        location_status = "partial"
+    else:
+        location_status = "missing"
     tables = [block.table for block in blocks if block.table is not None]
     if char_count < 8:
         reasons.append("OCR 返回内容为空或字符过少")
@@ -152,5 +164,6 @@ def assess_fallback_page(
         reasons=list(dict.fromkeys(reasons)),
         char_count=char_count,
         table_count=len(tables),
+        location_status=location_status,
+        bbox_coverage=bbox_coverage,
     )
-

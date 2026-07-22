@@ -5,7 +5,6 @@ import ProgressTracker from '@/components/ProgressTracker.vue'
 import DiffList from '@/components/DiffList.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
-import DocxPreview from '@/components/DocxPreview.vue'
 import { ApiError, getAnnotatedDocxUrl, getSourcePdfUrl } from '@/api/compare'
 import { useTaskStore } from '@/stores/task'
 import { useReportStore } from '@/stores/report'
@@ -45,7 +44,6 @@ taskStore.dispose()
 })
 
 const showPdf = ref(false)
-const showDocx = ref(true)
 const filter = ref<'all' | 'risk' | 'modified'>('all')
 const selectedClauseId = ref<string | null>(null)
 
@@ -136,6 +134,22 @@ function onSelectClause(id: string) {
           </ul>
         </section>
 
+        <section
+          v-if="reportStore.report.location_status !== 'complete'"
+          class="card recognition-warning"
+        >
+          <h3 class="section-title">部分页面无法完整定位高亮</h3>
+          <p>这只影响 PDF 标注位置，不改变文字比对和合同变化结论。</p>
+          <ul>
+            <li
+              v-for="item in reportStore.report.recognition_diagnostics.filter((d) => d.location_status !== 'complete')"
+              :key="`location-${item.page_index}`"
+            >
+              第 {{ item.page_index + 1 }} 页：坐标覆盖率 {{ Math.round(item.bbox_coverage * 100) }}%
+            </li>
+          </ul>
+        </section>
+
         <section class="card">
         <div class="summary">
         <div class="sum-item">
@@ -193,19 +207,6 @@ function onSelectClause(id: string) {
         />
         </section>
 
-        <section class="card">
-        <div class="list-head">
-        <h3 class="section-title" style="margin: 0">原文高亮预览</h3>
-        <button class="chip" @click="showDocx = !showDocx">{{ showDocx ? '收起' : '展开' }}</button>
-        </div>
-        <p v-if="!showDocx" class="muted">展开查看整篇合同，被篡改条款整段高亮（扫描件 PDF 无坐标时仍可在此看到改动位置）。</p>
-        <DocxPreview
-          v-else
-          :task-id="taskId"
-          @select="onSelectClause"
-        />
-        </section>
-
         <section v-if="reportStore.hasPdfHighlights" class="card">
         <div class="list-head">
         <h3 class="section-title" style="margin: 0">PDF 预览</h3>
@@ -215,7 +216,7 @@ function onSelectClause(id: string) {
         v-if="showPdf"
         :pdf-url="pdfUrl"
         :page-meta="reportStore.report.page_meta"
-        :diffs="reportStore.diffs"
+        :diffs="reportStore.pdfHighlights"
         :selected-clause-id="selectedClauseId"
         @select-clause="onSelectClause"
         />

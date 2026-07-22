@@ -76,6 +76,8 @@ export interface PageRecognitionDiagnostic {
   reasons: string[]
   char_count: number
   table_count: number
+  location_status: 'complete' | 'partial' | 'missing'
+  bbox_coverage: number
 }
 
 export interface TamperReport {
@@ -90,6 +92,7 @@ export interface TamperReport {
   page_meta: PageMeta[]
   recognition_status: RecognitionStatus
   recognition_diagnostics: PageRecognitionDiagnostic[]
+  location_status: 'complete' | 'partial' | 'missing'
 }
 
 export interface CompareOptions {

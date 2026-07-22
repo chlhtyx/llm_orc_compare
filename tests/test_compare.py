@@ -804,3 +804,33 @@ def test_apply_recognition_gate_risk_off_empty_levels_returns_changed():
     ]
     apply_recognition_gate(report, diagnostics)  # 默认 enable_risk_assessment=False
     assert report.overall_risk == "changed"
+
+
+def test_location_gap_is_reported_without_changing_contract_verdict():
+    from document_comparison.models import PageRecognitionDiagnostic
+    from document_comparison.ocr.quality import apply_recognition_gate
+
+    report = TamperReport(
+        source="s.docx",
+        target="t.pdf",
+        overall_risk="clean",
+        change_status="clean",
+    )
+    diagnostics = [
+        PageRecognitionDiagnostic(
+            page_index=0,
+            source="fallback",
+            reliable=True,
+            location_status="partial",
+            bbox_coverage=0.72,
+            char_count=100,
+        )
+    ]
+
+    apply_recognition_gate(report, diagnostics)
+
+    assert report.change_status == "clean"
+    assert report.recognition_status == "reliable"
+    assert report.location_status == "partial"
+    assert report.summary["location_quality"] == "partial"
+    assert report.summary["unlocated_pages"] == [1]

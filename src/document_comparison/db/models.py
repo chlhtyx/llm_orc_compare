@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -47,6 +48,13 @@ class TaskRecord(Base):
     # target 对帐单多文件用 list;compare/raw 单文件放在 list[0]
     target_names: Mapped[list[str]] = mapped_column(JSONB, default=list)
     ocr_backend: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    # 外部系统核对字段；同一单据号允许多次提交，因此索引不唯一。
+    document_no: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True, default=None
+    )
+    external_request: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True
+    )
 
     # 任务终结结果摘要(供列表页快速判定)
     overall_risk: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True, default=None)

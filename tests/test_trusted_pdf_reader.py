@@ -128,6 +128,35 @@ def test_trusted_reader_sends_only_non_native_pages_to_fallback(tmp_path: Path):
     assert "OCR text recovered" in pages[1][0].content
     assert [item.source for item in engine.last_diagnostics] == ["native", "fallback"]
     assert all(item.reliable for item in engine.last_diagnostics)
+    assert all(item.location_status == "complete" for item in engine.last_diagnostics)
+
+
+def test_fallback_diagnostic_tracks_location_without_changing_recognition_quality():
+    from document_comparison.ocr.trusted import assess_fallback_page
+
+    diagnostic = assess_fallback_page(
+        [
+            Block(
+                block_id="located",
+                page_index=0,
+                label="text",
+                bbox=[10, 10, 100, 30],
+                content="已定位文字",
+            ),
+            Block(
+                block_id="missing",
+                page_index=0,
+                label="text",
+                bbox=[],
+                content="这一段文字没有坐标但识别内容仍然可靠",
+            ),
+        ],
+        0,
+    )
+
+    assert diagnostic.reliable is True
+    assert diagnostic.location_status == "partial"
+    assert 0 < diagnostic.bbox_coverage < 1
 
 
 def test_unreliable_recognition_marks_only_related_diff_for_review():

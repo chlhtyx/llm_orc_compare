@@ -22,6 +22,7 @@ from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
 from .statement_pipeline import run_statement_pipeline
 from .observability import llm_call_collector
+from .external_api import build_external_result, render_external_highlight_images
 from . import webhook
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,8 @@ class Task:
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
     callback_secret: str | None = None
+    document_no: str | None = None
+    external_request: bool = False
     start_time: float = field(default_factory=time.monotonic)
     active_timing_stage: str | None = None
     active_timing_started_at: float | None = None
@@ -138,6 +141,8 @@ class TaskManager:
         ocr_backend: str | None = None,
         callback_url: str | None = None,
         callback_secret: str | None = None,
+        document_no: str | None = None,
+        external_request: bool = False,
     ) -> str:
         """创建任务:内存登记 + PG 写入 pending 记录。
 
@@ -149,6 +154,8 @@ class TaskManager:
             kind=kind,
             callback_url=callback_url,
             callback_secret=callback_secret,
+            document_no=document_no,
+            external_request=external_request,
         )
         logger.info(
             "task created task_id=%s kind=%s callback=%s",
@@ -161,6 +168,8 @@ class TaskManager:
             source_name=source_name,
             target_names=target_names,
             ocr_backend=ocr_backend,
+            document_no=document_no,
+            external_request=external_request,
         )
         return task_id
 
@@ -233,12 +242,18 @@ class TaskManager:
                     )
                 await self._save_llm_calls(task_id, llm_calls)
             task.report = report
-            task.info.overall_risk = report.overall_risk
-            task.info.status = "done"
-            task.push_event("done", 1.0)
             await self._db_thread(
                 db_repo.save_compare_report, task_id, report
             )
+            # 外部任务把“全页高亮 PNG”作为成功结果的一部分。先持久化报告，
+            # 再生成图片；渲染失败会进入 failed 回调，但报告仍保留便于排查。
+            if task.external_request:
+                await asyncio.to_thread(
+                    render_external_highlight_images, task_id, pdf_path, report
+                )
+            task.info.overall_risk = report.overall_risk
+            task.info.status = "done"
+            task.push_event("done", 1.0)
             await self._db_thread(
                 db_repo.update_task_status, task_id, "done",
                 overall_risk=report.overall_risk,
@@ -251,11 +266,27 @@ class TaskManager:
                 task_id, report.overall_risk,
                 len(report.diffs), len(report.unmatched_clauses),
             )
-            await self._fire_callback(task_id, "done", {
-                "overall_risk": report.overall_risk,
-                "summary": report.summary,
-                "report_url": f"/api/v1/compare/{task_id}/report?format=json",
-            })
+            if task.external_request and task.document_no:
+                external = build_external_result(task_id, task.document_no, report)
+                await self._fire_callback(task_id, "done", {
+                    "event_type": "contract.compare.completed",
+                    "document_no": task.document_no,
+                    "result": {
+                        key: external[key]
+                        for key in (
+                            "change_status", "recognition_status", "location_status",
+                            "summary", "result_text",
+                        )
+                    },
+                    "highlight_images": external["highlight_images"],
+                    "result_url": external["result_url"],
+                })
+            else:
+                await self._fire_callback(task_id, "done", {
+                    "overall_risk": report.overall_risk,
+                    "summary": report.summary,
+                    "report_url": f"/api/v1/compare/{task_id}/report?format=json",
+                })
         except Exception as e:  # noqa: BLE001
             task.info.status = "failed"
             task.info.error = str(e)
@@ -267,7 +298,14 @@ class TaskManager:
                 stage_timings=dict(task.info.stage_timings),
             )
             self._record_milestone(task, "failed", task.info.progress)
-            await self._fire_callback(task_id, "failed", {"error": str(e)})
+            if task.external_request:
+                await self._fire_callback(task_id, "failed", {
+                    "event_type": "contract.compare.failed",
+                    "document_no": task.document_no,
+                    "error": str(e),
+                })
+            else:
+                await self._fire_callback(task_id, "failed", {"error": str(e)})
         finally:
             task.done.set()
             task.finalize_elapsed()

@@ -6,7 +6,7 @@
 
 - 解析 Word 正文和表格，并保留条款结构。
 - 优先读取 PDF 原生文本；扫描页自动调用多模态 OCR。
-- 支持 OpenAI 兼容的多模态模型，也可切换到独立部署的 PaddleOCR-VL HTTP 服务。
+- 支持 OpenAI 兼容的多模态模型，也可切换到 PaddleOCR-VL Chat Completions 服务；标准合同比对会用 `OCR:` 识别内容，并在缺少坐标时用 `Spotting:` 补充扫描 PDF 高亮位置。
 - 通过编号、字段和语义向量对齐条款，执行字符级及表格单元格级 diff。
 - 对金额、日期、主体、账号、责任等高风险要素进行 canonical 强校验，并可启用纯文本 LLM 辅助说明。
 - **合同比对默认仅列举差异**(字符级 / 表格单元格级),不做风险判别;在提交选项里传 `enable_risk_assessment=true` 可恢复完整风险分级 + 高风险要素校验 + LLM 辅助说明。
@@ -14,7 +14,7 @@
 - **对帐单金额统计**:一次可上传多个对帐单 PDF(扫描件),OCR 识别表格后用确定性代码抽取并累加金额,聚合输出所有文件的总金额;自动核对「合计/小计」声明值;列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
 - 通过 SSE 实时展示任务进度、各阶段耗时，并支持任务完成 Webhook。
 - 输出 JSON 报告、带差异标注的 PDF，以及带整段高亮的 Word 报告。
-- 报告页可在线查看原始 Word 全文及差异高亮；PDF 有坐标信息时可同步查看 PDF 标注。
+- 报告页可在线查看带坐标的 PDF 差异标注，并可下载高亮 Word 报告。
 - **比对记录持久化**:每次任务(合同比对 / 无标注比对 / 对帐单统计)的元数据、里程碑事件与完整报告 JSON 都写入 Postgres;进程重启后报告仍可打开,并提供独立的「比对记录」页查询历史。
 
 ## 快速开始
@@ -106,9 +106,21 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 
 | 配置组 | 用途 | 可选后端 |
 | --- | --- | --- |
-| OCR | 扫描页文字与版面识别 | `llm`、`paddleocr` |
+| OCR | 扫描页文字与版面识别 | `llm`；`paddleocr` 可切换 vLLM 兼容调用/官方 SDK |
 | Embedding | 无编号条款的语义对齐 | `qwen`、`bge`、`mock` |
 | Judge | 对疑似修改条款做语义复核 | OpenAI 兼容的纯文本模型 |
+
+PaddleOCR 的“官方 API / SDK”模式使用 AI Studio Access Token。填写官方示例提供的
+完整 `/layout-parsing` 地址时，使用与网页端一致的同步版面解析 API；API 地址留空时
+使用 `PaddleOCRClient` 异步任务服务，模型留空时默认 `PaddleOCR-VL-1.6`。切回
+`vllm` 即继续使用原有 OpenAI 兼容 `/chat/completions` 路径；两套
+Base/凭据/模型配置分开保存，切换不会覆盖另一套。
+异步 SDK 文档解析任务的单次 HTTP 请求沿用 PaddleOCR 请求超时，总轮询时间
+不少于 900 秒；如服务排队时间更长，可在设置页将请求超时提高到 3600 秒。
+
+“合同比对 API”页集中维护外部调用 API Key、服务公开地址、单文件上传上限、高亮
+图片 DPI 以及 OCR/LLM 比对选项；保存后立即生效，Key 只以脱敏值回显。该页也可
+上传 DOCX/PDF 运行完整管线测试，验证结果文本和逐页高亮图片，且不发送真实回调。
 
 服务端基础配置仍通过环境变量提供：
 
@@ -123,6 +135,13 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(对应 `dc` 用户) |
 | `DC_DB_AUTO_MIGRATE` | `1` | 启动时自动跑 `alembic upgrade head`(默认开);设为 `0` 改由 CI/运维手动控制 |
 | `DC_DB_AUTO_CREATE` | 空 | 设为 `1` 时跳过 alembic 直接 `CREATE TABLE IF NOT EXISTS`(仅测试用) |
+| `DC_EXTERNAL_API_KEY` | 空 | 外部 API Key 的首次启动/灾备默认值；管理端设置可持久化覆盖 |
+| `DC_EXTERNAL_PUBLIC_BASE_URL` | 空 | 服务公开地址的首次启动/灾备默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_MAX_UPLOAD_MB` | `50` | 外部接口单文件上限默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_IMAGE_DPI` | `144` | 外部高亮 PNG DPI 默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_OCR_BACKEND` | `paddleocr` | 外部正式调用与页面测试共用的 OCR 引擎默认值 |
+| `DC_EXTERNAL_ENABLE_LLM_JUDGE` | `0` | 是否默认启用 LLM 辅助说明；仅在风险评估开启时生效 |
+| `DC_EXTERNAL_ENABLE_RISK_ASSESSMENT` | `0` | 是否为外部 API 开启风险分级；默认仍仅判定内容变化 |
 
 ## 目录结构
 
@@ -161,6 +180,9 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
 | `GET` | `/api/v1/compare/{task_id}/docx-preview` | 获取 Word 全文及差异标记 |
+| `POST` | `/api/v1/external/compare` | 外部系统异步提交标准合同比对(`X-API-Key`) |
+| `GET` | `/api/v1/external/compare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
+| `GET` | `/api/v1/external/compare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
 | `POST` | `/api/v1/statement` | 提交对帐单金额统计(支持多文件,`target` 字段同键多值) |
 | `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
@@ -170,5 +192,30 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 | `GET` | `/api/v1/tasks?kind=&status=&limit=&offset=` | 查询任务历史(支持按类型/状态筛选 + 分页) |
 | `GET` | `/api/v1/tasks/{task_id}/events` | 查询单任务的里程碑事件时间线 |
+
+### 外部合同比对调用示例
+
+```bash
+# 提交任务
+curl -X POST 'https://compare.example.com/api/v1/external/compare' \
+  -H 'X-API-Key: <YOUR_API_KEY>' \
+  -F 'source=@./original-contract.docx' \
+  -F 'target=@./returned-contract.pdf' \
+  -F 'document_no=DOC-2026-0001' \
+  -F 'callback_url=https://business.example.com/callbacks/contract-compare' \
+  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'
+
+# 使用响应中的 task_id 查询完整结果
+curl -H 'X-API-Key: <YOUR_API_KEY>' \
+  'https://compare.example.com/api/v1/external/compare/<TASK_ID>'
+
+# 下载第 1 页高亮 PNG
+curl -H 'X-API-Key: <YOUR_API_KEY>' \
+  -o page-0001.png \
+  'https://compare.example.com/api/v1/external/compare/<TASK_ID>/images/1'
+```
+
+“合同比对 API”页也提供相同示例和一键复制功能；页面会自动使用已保存的服务公开地址，
+但不会显示或写入真实 API Key、回调密钥。
 
 完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)；对帐单金额统计的设计与边界见 [对帐单金额统计方案](docs/对帐单金额统计方案.md)。

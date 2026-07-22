@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   ApiError,
@@ -23,6 +23,7 @@ const loadError = ref<string | null>(null)
 
 const kindFilter = ref<TaskKind | ''>('')
 const statusFilter = ref<TaskStatus | ''>('')
+const searchQuery = ref('')
 const PAGE_SIZE = 20
 const page = ref(0) // 0 基
 
@@ -49,6 +50,11 @@ const statusText: Record<TaskStatus, string> = {
   done: '已完成',
   failed: '失败',
 }
+
+/** 是否有任意过滤条件(搜索 / 类型 / 状态)在生效,用于区分空状态文案。 */
+const hasActiveFilter = computed(
+  () => !!searchQuery.value.trim() || !!kindFilter.value || !!statusFilter.value,
+)
 
 function riskText(risk: OverallRisk | null): string {
   switch (risk) {
@@ -95,6 +101,11 @@ function fileNamesDisplay(item: TaskListItem): string {
   return `${src} → ${tgt}`
 }
 
+/** 详情是否可展开(仅终态任务有里程碑/调用记录)。 */
+function detailAvailable(item: TaskListItem): boolean {
+  return item.status === 'done' || item.status === 'failed'
+}
+
 async function refresh(): Promise<void> {
   loading.value = true
   loadError.value = null
@@ -102,6 +113,7 @@ async function refresh(): Promise<void> {
     const resp = await listTasks({
       kind: kindFilter.value || undefined,
       status: statusFilter.value || undefined,
+      q: searchQuery.value || undefined,
       limit: PAGE_SIZE,
       offset: page.value * PAGE_SIZE,
     })
@@ -120,6 +132,21 @@ async function onFilterChange(): Promise<void> {
   await refresh()
 }
 
+// 搜索框:防抖 350ms,触发时重置分页并折叠详情
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+watch(searchQuery, () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    page.value = 0
+    collapseDetail()
+    void refresh()
+  }, 350)
+})
+
+function clearSearch(): void {
+  searchQuery.value = ''
+}
+
 async function prevPage(): Promise<void> {
   if (page.value <= 0) return
   page.value -= 1
@@ -136,12 +163,17 @@ function viewReport(item: TaskListItem): void {
   router.push(reportRouteFor(item))
 }
 
-async function showEvents(taskId: string): Promise<void> {
-  if (selectedTaskId.value === taskId && detailTab.value === 'events') {
-    // 折叠
+/** 整行点击:切换详情展开(默认时间线 tab)。终态任务才可展开。 */
+async function toggleRow(item: TaskListItem): Promise<void> {
+  if (!detailAvailable(item)) return
+  if (selectedTaskId.value === item.task_id) {
     collapseDetail()
     return
   }
+  await showEvents(item.task_id)
+}
+
+async function showEvents(taskId: string): Promise<void> {
   selectedTaskId.value = taskId
   detailTab.value = 'events'
   selectedEvents.value = []
@@ -158,10 +190,6 @@ async function showEvents(taskId: string): Promise<void> {
 }
 
 async function showLlmCalls(taskId: string): Promise<void> {
-  if (selectedTaskId.value === taskId && detailTab.value === 'llm-calls') {
-    collapseDetail()
-    return
-  }
   selectedTaskId.value = taskId
   detailTab.value = 'llm-calls'
   selectedLlmCalls.value = []
@@ -189,6 +217,10 @@ function collapseDetail(): void {
 function toggleCall(id: number): void {
   expandedCalls.value = { ...expandedCalls.value, [id]: !expandedCalls.value[id] }
 }
+
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+})
 
 /** LLM 调用 kind → 中文标签。 */
 const llmKindText: Record<string, string> = {
@@ -232,14 +264,33 @@ onMounted(refresh)
 
 <template>
   <div class="history">
-    <section class="card">
+    <section class="card toolbar">
       <div class="head-row">
-        <h2 class="page-title">比对记录</h2>
-        <button class="btn" :disabled="loading" @click="refresh">
-          {{ loading ? '刷新中…' : '刷新' }}
-        </button>
+        <div class="head-left">
+          <h2 class="page-title">比对记录</h2>
+          <p class="muted page-desc">查看历史比对与统计任务,点击「查看报告」打开结果,或点击行查看时间线与模型调用。</p>
+        </div>
+        <div class="head-actions">
+          <div class="search-box">
+            <input
+              v-model="searchQuery"
+              class="input search-input"
+              type="search"
+              placeholder="搜索任务号 / 单据号 / 文件名"
+            />
+            <button
+              v-if="searchQuery"
+              class="search-clear"
+              type="button"
+              title="清除搜索"
+              @click="clearSearch"
+            >×</button>
+          </div>
+          <button class="btn" :disabled="loading" @click="refresh">
+            {{ loading ? '刷新中…' : '刷新' }}
+          </button>
+        </div>
       </div>
-      <p class="muted page-desc">查看历史比对与统计任务,点击「查看」可重新打开对应报告页。</p>
 
       <div class="filters">
         <div class="field">
@@ -268,7 +319,7 @@ onMounted(refresh)
 
     <section class="card">
       <div v-if="!loading && items.length === 0" class="empty muted">
-        没有符合条件的记录。
+        {{ hasActiveFilter ? '没有符合条件的记录,试试调整搜索或筛选条件。' : '还没有比对记录。' }}
       </div>
 
       <div v-else class="table-wrap">
@@ -277,6 +328,7 @@ onMounted(refresh)
             <tr>
               <th>创建时间</th>
               <th>类型</th>
+              <th>单据号 / 任务号</th>
               <th>文件</th>
               <th>状态</th>
               <th>结果</th>
@@ -286,10 +338,19 @@ onMounted(refresh)
           </thead>
           <tbody>
             <template v-for="item in items" :key="item.task_id">
-              <tr>
+              <tr
+                :class="['task-row', { 'row-expanded': selectedTaskId === item.task_id, 'row-clickable': detailAvailable(item) }]"
+                @click="toggleRow(item)"
+              >
                 <td class="mono small">{{ formatTime(item.created_at) }}</td>
                 <td>
                   <span class="kind-tag" :data-kind="item.kind">{{ kindText[item.kind] }}</span>
+                </td>
+                <td class="id-cell">
+                  <div class="doc-no" :title="item.document_no ?? ''">
+                    {{ item.document_no || '—' }}
+                  </div>
+                  <div class="task-id mono" :title="item.task_id">{{ item.task_id }}</div>
                 </td>
                 <td class="file-cell" :title="fileNamesDisplay(item)">
                   {{ fileNamesDisplay(item) }}
@@ -308,78 +369,84 @@ onMounted(refresh)
                   </span>
                 </td>
                 <td>{{ formatElapsed(item.elapsed) }}</td>
-                <td class="col-actions">
-                  <button class="chip" type="button" @click="viewReport(item)">查看</button>
+                <td class="col-actions" @click.stop>
+                  <button class="chip" type="button" @click="viewReport(item)">查看报告</button>
                   <button
+                    v-if="detailAvailable(item)"
                     class="chip"
                     type="button"
-                    :disabled="item.status !== 'done' && item.status !== 'failed'"
-                    @click="showEvents(item.task_id)"
+                    @click="toggleRow(item)"
                   >
-                    {{ selectedTaskId === item.task_id && detailTab === 'events' ? '收起' : '时间线' }}
-                  </button>
-                  <button
-                    class="chip"
-                    type="button"
-                    :disabled="item.status !== 'done' && item.status !== 'failed'"
-                    @click="showLlmCalls(item.task_id)"
-                  >
-                    {{ selectedTaskId === item.task_id && detailTab === 'llm-calls' ? '收起' : '模型调用' }}
+                    {{ selectedTaskId === item.task_id ? '收起' : '详情' }}
                   </button>
                 </td>
               </tr>
               <tr v-if="selectedTaskId === item.task_id" class="event-row">
-                <td colspan="7">
-                  <div v-if="eventsLoading" class="muted">
-                    {{ detailTab === 'events' ? '加载时间线…' : '加载模型调用…' }}
-                  </div>
-                  <template v-else-if="detailTab === 'events'">
-                    <ol v-if="selectedEvents.length" class="event-list">
-                      <li v-for="ev in selectedEvents" :key="ev.id">
-                        <span class="ev-time mono small">{{ formatTime(ev.created_at) }}</span>
-                        <span class="ev-stage">{{ ev.stage }}</span>
-                        <span class="muted small">
-                          progress {{ (ev.progress * 100).toFixed(0) }}%
-                        </span>
-                      </li>
-                    </ol>
-                    <p v-else class="muted">该任务没有已保存的里程碑事件(可能创建于本次持久化功能上线前)。</p>
-                  </template>
-                  <template v-else>
-                    <div v-if="!selectedLlmCalls.length" class="muted">
-                      该任务没有已保存的模型调用记录(embedding 不记录;可能创建于本功能上线前)。
+                <td colspan="8">
+                  <div class="detail-panel">
+                    <div class="detail-tabs">
+                      <button
+                        :class="['tab', { 'tab-active': detailTab === 'events' }]"
+                        type="button"
+                        @click="showEvents(item.task_id)"
+                      >时间线</button>
+                      <button
+                        :class="['tab', { 'tab-active': detailTab === 'llm-calls' }]"
+                        type="button"
+                        @click="showLlmCalls(item.task_id)"
+                      >模型调用</button>
                     </div>
-                    <ul v-else class="llm-call-list">
-                      <li v-for="call in selectedLlmCalls" :key="call.id" class="llm-call-item">
-                        <div class="llm-call-head" @click="toggleCall(call.id)">
-                          <span class="llm-kind" :class="`kind-${call.kind}`">
-                            {{ llmKindText[call.kind] ?? call.kind }}
+                    <div v-if="eventsLoading" class="muted detail-loading">
+                      {{ detailTab === 'events' ? '加载时间线…' : '加载模型调用…' }}
+                    </div>
+                    <template v-else-if="detailTab === 'events'">
+                      <ol v-if="selectedEvents.length" class="event-list">
+                        <li v-for="ev in selectedEvents" :key="ev.id">
+                          <span class="ev-time mono small">{{ formatTime(ev.created_at) }}</span>
+                          <span class="ev-stage">{{ ev.stage }}</span>
+                          <span class="muted small">
+                            progress {{ (ev.progress * 100).toFixed(0) }}%
                           </span>
-                          <span :class="['http-tag', statusClass(call.status_code)]">
-                            {{ httpStatusText(call.status_code) }}
-                          </span>
-                          <span class="muted small">#{{ call.attempt }}</span>
-                          <span class="muted small">{{ formatMs(call.elapsed_ms) }}</span>
-                          <span class="mono small ev-time">{{ formatTime(call.created_at) }}</span>
-                          <span class="muted small toggle-hint">
-                            {{ expandedCalls[call.id] ? '收起 ▲' : '展开 ▼' }}
-                          </span>
-                        </div>
-                        <div v-if="call.error" class="llm-call-err small">⚠ {{ call.error }}</div>
-                        <div v-if="expandedCalls[call.id]" class="llm-call-body">
-                          <div class="llm-block">
-                            <div class="llm-block-title muted small">请求 payload(图片已脱敏)</div>
-                            <pre class="llm-json">{{ jsonPreview(call.payload) }}</pre>
+                        </li>
+                      </ol>
+                      <p v-else class="muted">该任务没有已保存的里程碑事件(可能创建于本次持久化功能上线前)。</p>
+                    </template>
+                    <template v-else>
+                      <div v-if="!selectedLlmCalls.length" class="muted">
+                        该任务没有已保存的模型调用记录(embedding 不记录;可能创建于本功能上线前)。
+                      </div>
+                      <ul v-else class="llm-call-list">
+                        <li v-for="call in selectedLlmCalls" :key="call.id" class="llm-call-item">
+                          <div class="llm-call-head" @click="toggleCall(call.id)">
+                            <span class="llm-kind" :class="`kind-${call.kind}`">
+                              {{ llmKindText[call.kind] ?? call.kind }}
+                            </span>
+                            <span :class="['http-tag', statusClass(call.status_code)]">
+                              {{ httpStatusText(call.status_code) }}
+                            </span>
+                            <span class="muted small">#{{ call.attempt }}</span>
+                            <span class="muted small">{{ formatMs(call.elapsed_ms) }}</span>
+                            <span class="mono small ev-time">{{ formatTime(call.created_at) }}</span>
+                            <span class="muted small toggle-hint">
+                              {{ expandedCalls[call.id] ? '收起 ▲' : '展开 ▼' }}
+                            </span>
                           </div>
-                          <div v-if="call.response" class="llm-block">
-                            <div class="llm-block-title muted small">响应 response(截断 64KB)</div>
-                            <pre class="llm-json">{{ jsonPreview(call.response) }}</pre>
+                          <div v-if="call.error" class="llm-call-err small">⚠ {{ call.error }}</div>
+                          <div v-if="expandedCalls[call.id]" class="llm-call-body">
+                            <div class="llm-block">
+                              <div class="llm-block-title muted small">请求 payload(图片已脱敏)</div>
+                              <pre class="llm-json">{{ jsonPreview(call.payload) }}</pre>
+                            </div>
+                            <div v-if="call.response" class="llm-block">
+                              <div class="llm-block-title muted small">响应 response(截断 64KB)</div>
+                              <pre class="llm-json">{{ jsonPreview(call.response) }}</pre>
+                            </div>
                           </div>
-                        </div>
-                      </li>
-                    </ul>
-                  </template>
-                  <p v-if="item.error" class="err small">错误: {{ item.error }}</p>
+                        </li>
+                      </ul>
+                    </template>
+                    <p v-if="item.error" class="err small">错误: {{ item.error }}</p>
+                  </div>
                 </td>
               </tr>
             </template>
@@ -397,19 +464,65 @@ onMounted(refresh)
 </template>
 
 <style scoped>
+.toolbar {
+  padding: 18px 24px 16px;
+}
 .head-row {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.head-left {
+  min-width: 0;
+}
+.head-actions {
+  display: flex;
   align-items: center;
-  margin-bottom: 4px;
+  gap: 10px;
+  flex-shrink: 0;
 }
 .page-title {
-  margin: 0;
+  margin: 0 0 4px;
   font-size: 18px;
 }
 .page-desc {
-  margin: 0 0 14px;
+  margin: 0;
+  font-size: 13px;
 }
+
+/* —— 搜索框 —— */
+.search-box {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.search-input {
+  width: 280px;
+  padding-right: 30px;
+}
+.search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.search-clear:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
 .filters {
   display: flex;
   gap: 16px;
@@ -419,7 +532,7 @@ onMounted(refresh)
   min-width: 160px;
 }
 .empty {
-  padding: 30px 0;
+  padding: 40px 0;
   text-align: center;
 }
 .table-wrap {
@@ -443,9 +556,21 @@ table.task-table {
   background: var(--surface-2);
   font-size: 12px;
   letter-spacing: 0.02em;
+  white-space: nowrap;
 }
-.task-table tbody tr:hover {
+.task-table tbody tr.task-row {
+  transition: background 0.1s;
+}
+.task-table tbody tr.task-row:hover {
   background: var(--surface-2);
+}
+.task-table tbody tr.row-clickable {
+  cursor: pointer;
+}
+/* 当前展开行:用主色左边缘 + 浅底标识 */
+.task-table tbody tr.row-expanded {
+  background: rgba(43, 95, 214, 0.04);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 .task-table .col-actions {
   white-space: nowrap;
@@ -455,7 +580,23 @@ table.task-table {
   margin-left: 6px;
 }
 .file-cell {
-  max-width: 320px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 单据号 / 任务号合列:主行 document_no,副行 task_id(muted) */
+.id-cell {
+  max-width: 170px;
+}
+.id-cell .doc-no {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.id-cell .task-id {
+  font-size: 11px;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -500,9 +641,40 @@ table.task-table {
 .risk-tag.risk-needs_review { color: var(--risk-medium); font-weight: 600; }
 .risk-tag.risk-clean { color: var(--risk-clean); }
 
+/* —— 展开详情面板 —— */
 .event-row td {
   background: var(--surface-2);
-  padding: 12px 16px;
+  padding: 0;
+}
+.detail-panel {
+  padding: 14px 16px;
+}
+.detail-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.detail-tabs .tab {
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.detail-tabs .tab:hover {
+  color: var(--text);
+}
+.detail-tabs .tab-active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+.detail-loading {
+  padding: 8px 0;
 }
 .event-list {
   margin: 0;
@@ -615,5 +787,18 @@ table.task-table {
 }
 .err {
   color: var(--risk-high);
+}
+
+@media (max-width: 720px) {
+  .head-row {
+    flex-direction: column;
+  }
+  .head-actions {
+    width: 100%;
+  }
+  .search-input {
+    width: 100%;
+    flex: 1;
+  }
 }
 </style>

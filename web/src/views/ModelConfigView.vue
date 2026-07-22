@@ -13,9 +13,13 @@ const form = reactive({
   llm_timeout: 120,
   llm_max_concurrency: 4,
   // —— paddleocr 引擎(专用 OCR 模型)——
+  paddleocr_api_mode: 'vllm' as 'vllm' | 'official_sdk',
   paddleocr_api_base: '',
   paddleocr_api_key: '',
   paddleocr_model: '',
+  paddleocr_official_api_base: '',
+  paddleocr_official_access_token: '',
+  paddleocr_official_model: 'PaddleOCR-VL-1.6',
   paddleocr_timeout: 300,
   paddleocr_max_concurrency: 4,
   // —— LLM 辅助说明服务 ——
@@ -35,6 +39,7 @@ const form = reactive({
 
 const keyDirty = ref(false)
 const paddleKeyDirty = ref(false)
+const paddleOfficialTokenDirty = ref(false)
 const embedKeyDirty = ref(false)
 const judgeKeyDirty = ref(false)
 const saved = ref(false)
@@ -47,9 +52,13 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.llm_model = c.llm_model || ''
   form.llm_timeout = c.llm_timeout ?? 120
   form.llm_max_concurrency = c.llm_max_concurrency ?? 4
+  form.paddleocr_api_mode = c.paddleocr_api_mode || 'vllm'
   form.paddleocr_api_base = c.paddleocr_api_base || ''
   form.paddleocr_api_key = c.paddleocr_api_key || ''
   form.paddleocr_model = c.paddleocr_model || ''
+  form.paddleocr_official_api_base = c.paddleocr_official_api_base || ''
+  form.paddleocr_official_access_token = c.paddleocr_official_access_token || ''
+  form.paddleocr_official_model = c.paddleocr_official_model || 'PaddleOCR-VL-1.6'
   form.paddleocr_timeout = c.paddleocr_timeout ?? 300
   form.paddleocr_max_concurrency = c.paddleocr_max_concurrency ?? 4
   form.judge_api_base = c.judge_api_base || ''
@@ -65,6 +74,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.max_pdf_pages = c.max_pdf_pages ?? 0
   keyDirty.value = false
   paddleKeyDirty.value = false
+  paddleOfficialTokenDirty.value = false
   embedKeyDirty.value = false
   judgeKeyDirty.value = false
 }
@@ -83,6 +93,10 @@ function onKeyInput(): void {
 
 function onPaddleKeyInput(): void {
   paddleKeyDirty.value = true
+}
+
+function onPaddleOfficialTokenInput(): void {
+  paddleOfficialTokenDirty.value = true
 }
 
 function onEmbedKeyInput(): void {
@@ -104,11 +118,17 @@ async function onSave(): Promise<void> {
     llm_max_concurrency: Number(form.llm_max_concurrency),
     llm_api_key: keyDirty.value ? form.llm_api_key : '********',
     // —— paddleocr 引擎(独立于 llm,填了才提交)——
+    paddleocr_api_mode: form.paddleocr_api_mode,
     paddleocr_api_base: form.paddleocr_api_base.trim(),
     paddleocr_model: form.paddleocr_model.trim(),
     paddleocr_timeout: Number(form.paddleocr_timeout),
     paddleocr_max_concurrency: Number(form.paddleocr_max_concurrency),
     paddleocr_api_key: paddleKeyDirty.value ? form.paddleocr_api_key : '********',
+    paddleocr_official_api_base: form.paddleocr_official_api_base.trim(),
+    paddleocr_official_model: form.paddleocr_official_model.trim(),
+    paddleocr_official_access_token: paddleOfficialTokenDirty.value
+      ? form.paddleocr_official_access_token
+      : '********',
     // —— 全局 ——
     pdf_render_dpi: Number(form.pdf_render_dpi),
     max_pdf_pages: Number(form.max_pdf_pages),
@@ -157,7 +177,7 @@ async function onReset(): Promise<void> {
       <p class="muted page-desc">
         识别 PDF 扫描件版面的多模态 VL 模型。兼容 OpenAI Chat Completions 协议,
         适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o 等)。
-        在比对提交页选择「llm」时使用本配置。
+        在“合同比对 API”页选择「llm」或其他流程指定该引擎时使用本配置。
       </p>
 
       <div class="form-grid">
@@ -207,26 +227,40 @@ async function onReset(): Promise<void> {
     <section class="card">
       <h2 class="page-title">paddleocr 引擎(专用 OCR 模型)</h2>
       <p class="muted page-desc">
-        识别 PDF 扫描件版面的专用 OCR 模型。与 llm 引擎走同一套 OpenAI 兼容协议,
-        但适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等,不遵循 JSON 指令)。
-        <b>配置完全独立</b>于 llm 引擎;未配置时选择「paddleocr」会报错,不复用 llm 配置。
-        在比对提交页选择「paddleocr」时使用本配置。
+        可使用原有 vLLM / OpenAI 兼容服务，也可使用 PaddleOCR 官方同步 API 或 Python SDK
+        调用 AI Studio 托管 API。官方 SDK 会直接返回分页 Markdown 和版面坐标；
+        vLLM 模式保留现有 OCR + Spotting 调用。<b>配置完全独立</b>于 llm 引擎。
+        在“合同比对 API”页选择「paddleocr」或其他流程指定该引擎时使用本配置。
       </p>
 
       <div class="form-grid">
-        <div class="field">
+        <div class="field span-2 backend-field">
+          <label>调用方式</label>
+          <div class="radio-row">
+            <label class="radio">
+              <input v-model="form.paddleocr_api_mode" type="radio" value="vllm" />
+              <span>vLLM / OpenAI 兼容(原有)</span>
+            </label>
+            <label class="radio">
+              <input v-model="form.paddleocr_api_mode" type="radio" value="official_sdk" />
+              <span>PaddleOCR 官方 API / SDK</span>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="form.paddleocr_api_mode === 'vllm'" class="field">
           <label>API Base</label>
           <input v-model="form.paddleocr_api_base" class="input" placeholder="https://api.siliconflow.cn/v1" />
-          <span class="hint">OpenAI 兼容根地址(可与 llm 相同或不同)</span>
+          <span class="hint">OpenAI 兼容根地址(必填)</span>
         </div>
 
-        <div class="field">
+        <div v-if="form.paddleocr_api_mode === 'vllm'" class="field">
           <label>模型名称</label>
           <input v-model="form.paddleocr_model" class="input" placeholder="PaddlePaddle/PaddleOCR-VL-1.5" />
-          <span class="hint">专用 OCR 模型(如 PaddleOCR-VL)</span>
+          <span class="hint">vLLM 服务暴露的模型名</span>
         </div>
 
-        <div class="field span-2">
+        <div v-if="form.paddleocr_api_mode === 'vllm'" class="field span-2">
           <label>API Key</label>
           <input
             v-model="form.paddleocr_api_key"
@@ -243,10 +277,53 @@ async function onReset(): Promise<void> {
           </span>
         </div>
 
+        <div v-if="form.paddleocr_api_mode === 'official_sdk'" class="field">
+          <label>官方 API 地址</label>
+          <input
+            v-model="form.paddleocr_official_api_base"
+            class="input"
+            placeholder="https://...aistudio-app.com/layout-parsing"
+          />
+          <span class="hint">
+            填写完整 /layout-parsing 地址时走网页端同步 API；留空时走异步任务 SDK
+          </span>
+        </div>
+
+        <div v-if="form.paddleocr_api_mode === 'official_sdk'" class="field">
+          <label>官方模型</label>
+          <input
+            v-model="form.paddleocr_official_model"
+            class="input"
+            placeholder="PaddleOCR-VL-1.6"
+          />
+          <span class="hint">支持 PaddleOCR-VL / PaddleOCR-VL-1.5 / PaddleOCR-VL-1.6</span>
+        </div>
+
+        <div v-if="form.paddleocr_api_mode === 'official_sdk'" class="field span-2">
+          <label>AI Studio Access Token</label>
+          <input
+            v-model="form.paddleocr_official_access_token"
+            class="input"
+            type="password"
+            :placeholder="store.config?.paddleocr_official_access_token_set ? '已设置(输入新值覆盖)' : 'Access Token(必填)'"
+            @input="onPaddleOfficialTokenInput"
+          />
+          <span class="hint">
+            <template v-if="store.config?.paddleocr_official_access_token_set">
+              当前: {{ store.config.paddleocr_official_access_token || '****' }} · 留空不修改
+            </template>
+            <template v-else>从 PaddleOCR 官方 AI Studio 获取</template>
+          </span>
+        </div>
+
         <div class="field">
           <label>请求超时(秒)</label>
-          <input v-model.number="form.paddleocr_timeout" class="input" type="number" min="10" max="600" />
-          <span class="hint">单页识别的超时上限(专用 OCR 模型较慢,建议 ≥ 300)</span>
+          <input v-model.number="form.paddleocr_timeout" class="input" type="number" min="10" max="3600" />
+          <span class="hint">
+            {{ form.paddleocr_api_mode === 'official_sdk'
+              ? '同步 API 的请求超时；异步 SDK 总轮询不少于 900 秒'
+              : '单页识别的超时上限' }}
+          </span>
         </div>
 
         <div class="field">
@@ -279,7 +356,7 @@ async function onReset(): Promise<void> {
       <p class="muted page-desc">
         对已确认「modified」的条款调用 LLM 补充严重度建议和解释；LLM 不得撤销变化或降低规则下限。
         需<b>纯文本 LLM</b>(如 Qwen3.5),与 OCR 的多模态 VL 模型分开配置。
-        比对提交页勾选「启用 LLM 辅助说明」后生效；未配置则沿用规则说明。
+        “合同比对 API”页启用 LLM 辅助说明后生效；未配置则沿用规则说明。
       </p>
 
       <div class="form-grid">
@@ -404,7 +481,6 @@ async function onReset(): Promise<void> {
 .page-desc {
   margin: 0 0 16px;
 }
-
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

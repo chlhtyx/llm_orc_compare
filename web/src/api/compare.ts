@@ -31,6 +31,47 @@ export function submitCompare(args: SubmitArgs): Promise<SubmitResponse> {
   return request('/api/v1/compare', { method: 'POST', body: form })
 }
 
+export interface CompareApiTestImage {
+  page_number: number
+  has_highlight: boolean
+  url: string
+}
+
+export interface CompareApiTestInfo {
+  task_id: string
+  document_no: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  stage?: string
+  progress?: number
+  error?: string | null
+  result?: {
+    change_status: 'clean' | 'changed' | 'needs_review'
+    recognition_status: 'reliable' | 'needs_review'
+    location_status: 'complete' | 'partial' | 'missing'
+    summary: Record<string, unknown>
+    result_text: string
+  }
+  highlight_images?: CompareApiTestImage[]
+}
+
+/** 使用合同比对页已选文件验证外部 API 的完整产物管线，不发送回调。 */
+export function submitCompareApiTest(source: File, target: File): Promise<CompareApiTestInfo> {
+  const form = new FormData()
+  form.append('source', source)
+  form.append('target', target)
+  return request('/api/v1/compare/api-test', { method: 'POST', body: form })
+}
+
+export function getCompareApiTest(taskId: string): Promise<CompareApiTestInfo> {
+  return request(`/api/v1/compare/api-test/${encodeURIComponent(taskId)}`)
+}
+
+export function getCompareApiTestImageUrl(taskId: string, pageNumber: number): string {
+  return apiUrl(
+    `/api/v1/compare/api-test/${encodeURIComponent(taskId)}/images/${pageNumber}`,
+  )
+}
+
 export function getTask(taskId: string): Promise<TaskInfo> {
   return request(`/api/v1/compare/${encodeURIComponent(taskId)}`)
 }
@@ -53,7 +94,7 @@ export function getAnnotatedDocxUrl(taskId: string): string {
   )
 }
 
-/** 返回带差异高亮框的 PDF 报告下载 URL（原生 PDF 有效，扫描件无坐标）。 */
+/** 返回带差异高亮框的 PDF 报告下载 URL（扫描件需 OCR/Spotting 提供坐标）。 */
 export function getAnnotatedPdfUrl(taskId: string): string {
   return apiUrl(
     `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=pdf`,

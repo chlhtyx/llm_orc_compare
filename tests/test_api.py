@@ -332,6 +332,117 @@ def test_llm_config_rejects_negative_max_pdf_pages(client):
     assert r.status_code == 400
 
 
+def test_llm_config_persists_paddleocr_api_mode(client):
+    from document_comparison.db import repository as db_repo
+
+    db_repo.save_llm_config({})
+    response = client.put(
+        "/api/v1/config/llm",
+        json={
+            "paddleocr_api_mode": "official_sdk",
+            "paddleocr_official_access_token": "official-token-1234",
+            "paddleocr_official_model": "PaddleOCR-VL-1.6",
+        },
+    )
+
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["paddleocr_api_mode"] == "official_sdk"
+    assert config["paddleocr_official_access_token_set"] is True
+    assert config["paddleocr_official_access_token"].endswith("1234")
+    assert config["paddleocr_official_access_token"] != "official-token-1234"
+    persisted = db_repo.get_llm_config()
+    assert persisted["paddleocr_api_mode"] == "official_sdk"
+    assert persisted["paddleocr_official_access_token"] == "official-token-1234"
+
+    fetched = client.get("/api/v1/config/llm").json()
+    assert fetched["persisted"]["paddleocr_official_access_token"] != (
+        "official-token-1234"
+    )
+
+
+def test_llm_config_rejects_unknown_paddleocr_api_mode(client):
+    response = client.put(
+        "/api/v1/config/llm", json={"paddleocr_api_mode": "unknown"}
+    )
+
+    assert response.status_code == 400
+    assert "paddleocr_api_mode" in response.json()["message"]
+
+
+def test_llm_config_rejects_unknown_paddleocr_official_model(client):
+    response = client.put(
+        "/api/v1/config/llm",
+        json={"paddleocr_official_model": "PaddlePaddle/PaddleOCR-VL-1.6"},
+    )
+
+    assert response.status_code == 400
+    assert "paddleocr_official_model" in response.json()["message"]
+
+
+def test_external_api_config_persists_applies_and_masks_secret(client):
+    """管理端保存外部 API 配置后应立即生效，GET/PUT 均不得返回 Key 明文。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.save_llm_config({})
+    response = client.put(
+        "/api/v1/config/llm",
+        json={
+            "external_api_key": "external-secret-1234",
+            "external_public_base_url": "https://compare.example.com/",
+            "external_max_upload_mb": 80,
+            "external_image_dpi": 180,
+            "external_ocr_backend": "llm",
+            "external_enable_llm_judge": True,
+            "external_enable_risk_assessment": True,
+        },
+    )
+    assert response.status_code == 200, response.json()
+    config = response.json()["config"]
+    assert config["external_api_key_set"] is True
+    assert config["external_api_key"].endswith("1234")
+    assert config["external_api_key"] != "external-secret-1234"
+    assert config["external_public_base_url"] == "https://compare.example.com"
+    assert config["external_max_upload_mb"] == 80
+    assert config["external_image_dpi"] == 180
+    assert config["external_ocr_backend"] == "llm"
+    assert config["external_enable_llm_judge"] is True
+    assert config["external_enable_risk_assessment"] is True
+    assert config["external_enabled"] is True
+
+    assert settings.external_api_key == "external-secret-1234"
+    assert settings.external_public_base_url == "https://compare.example.com"
+    persisted = db_repo.get_llm_config()
+    assert persisted["external_api_key"] == "external-secret-1234"
+
+    fetched = client.get("/api/v1/config/llm")
+    assert fetched.status_code == 200
+    body = fetched.json()
+    assert body["external_api_key"] != "external-secret-1234"
+    assert body["persisted"]["external_api_key"] != "external-secret-1234"
+    # 现有模型 Key 的持久化快照也一并保持脱敏。
+    assert body["persisted"].get("llm_api_key", "") != settings.llm_api_key or not settings.llm_api_key
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"external_public_base_url": "not-a-url"},
+        {"external_public_base_url": "https://user:pass@example.com"},
+        {"external_max_upload_mb": 0},
+        {"external_max_upload_mb": 1025},
+        {"external_image_dpi": 71},
+        {"external_image_dpi": 601},
+        {"external_ocr_backend": "other"},
+        {"external_enable_llm_judge": "true"},
+        {"external_enable_risk_assessment": 1},
+    ],
+)
+def test_external_api_config_rejects_invalid_values(client, payload):
+    response = client.put("/api/v1/config/llm", json=payload)
+    assert response.status_code == 400
+
+
 # —— 对帐单金额统计端点冒烟(/api/v1/statement)——
 
 def test_statement_accepts_multiple_pdfs(client, monkeypatch):

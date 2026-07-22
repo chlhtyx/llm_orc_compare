@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -36,6 +36,8 @@ def create_task(
     source_name: str = "",
     target_names: Iterable[str] | None = None,
     ocr_backend: str | None = None,
+    document_no: str | None = None,
+    external_request: bool = False,
 ) -> None:
     """任务提交时调用,创建一条 pending 记录。
 
@@ -49,6 +51,8 @@ def create_task(
             existing.source_name = source_name
             existing.target_names = targets
             existing.ocr_backend = ocr_backend
+            existing.document_no = document_no
+            existing.external_request = external_request
             existing.status = "pending"
             return
         s.add(TaskRecord(
@@ -58,6 +62,8 @@ def create_task(
             source_name=source_name,
             target_names=targets,
             ocr_backend=ocr_backend,
+            document_no=document_no,
+            external_request=external_request,
         ))
 
 
@@ -160,10 +166,15 @@ def list_tasks(
     *,
     kind: str | None = None,
     status: str | None = None,
+    q: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[TaskRecord], int]:
-    """分页查询任务列表,按 created_at 倒序。返回 (records, total)。"""
+    """分页查询任务列表,按 created_at 倒序。返回 (records, total)。
+
+    q 非空时,在 task_id / document_no / source_name / target_names(JSONB) 上
+    做不区分大小写的模糊匹配;调用方应自行 strip 并判空,避免空串退化为全表扫。
+    """
     base = select(TaskRecord)
     count_q = select(func.count()).select_from(TaskRecord)
     if kind:
@@ -172,6 +183,18 @@ def list_tasks(
     if status:
         base = base.where(TaskRecord.status == status)
         count_q = count_q.where(TaskRecord.status == status)
+    if q:
+        # target_names 是 JSONB list[str];cast 成 text 后整体 ILIKE,
+        # 对 list[str] 命中足够准确,且无需展开数组的子查询开销。
+        pat = f"%{q}%"
+        cond = or_(
+            TaskRecord.task_id.ilike(pat),
+            TaskRecord.document_no.ilike(pat),
+            TaskRecord.source_name.ilike(pat),
+            cast(TaskRecord.target_names, String).ilike(pat),
+        )
+        base = base.where(cond)
+        count_q = count_q.where(cond)
 
     base = base.order_by(TaskRecord.created_at.desc()).limit(limit).offset(offset)
 
@@ -205,6 +228,8 @@ def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:
         "source_name": rec.source_name,
         "target_names": list(rec.target_names or []),
         "ocr_backend": rec.ocr_backend,
+        "document_no": rec.document_no,
+        "external_request": rec.external_request,
         "overall_risk": rec.overall_risk,
         "change_status": rec.change_status,
         "elapsed": rec.elapsed,

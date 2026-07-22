@@ -17,6 +17,12 @@ from .normalize import normalize_text
 
 _SEP = r"(?=[\s，,。：:、]|$)"
 
+# PaddleOCR-VL 的 Markdown fallback 会给标题加 ``# `` / ``## `` 等语法标记。
+# 这些是识别结果的版式元数据，不是合同正文；若直接参与编号识别，
+# ``## 第一条`` 无法与 Word 侧的 ``第一条`` 锚定，进而产生一增一删。
+# 必须要求 # 后存在空白，避免误删 ``#合同编号`` 等真实文本。
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}[ \t]+")
+
 # PDF 文本层有时会把多个视觉逻辑行压成同一个 text line，例如
 # ``...3.2 支付方式...``、``开户行:...账户名:...``。这些起点必须在
 # 条款切分前恢复，否则字段/编号锚定会把多个条款错误合并。
@@ -287,6 +293,25 @@ def _split_body(line: str, prefix: str) -> str:
     return rest.lstrip(" .、．)）:：").strip()
 
 
+def _comparison_text(text: str, doc_type: DocType) -> str:
+    """返回结构识别使用的文本，不改动 Word 原文或 OCR 定位证据。"""
+    if doc_type != "pdf":
+        return text
+    return _MARKDOWN_HEADING_RE.sub("", text, count=1)
+
+
+def _raw_evidence_item(item: RawItem, text: str) -> RawItem:
+    """为已清理的单行比较文本恢复 OCR 原文，同时保留其定位信息。"""
+    return RawItem(
+        text=text,
+        kind=item.kind,
+        heading_level=item.heading_level,
+        page_index=item.page_index,
+        bbox=list(item.bbox),
+        table=item.table,
+    )
+
+
 def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
     """把 RawItem 流切分为 Clause 列表(§5.3)。
 
@@ -342,19 +367,24 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
             continue
 
         if item.kind in ("heading", "title"):
-            num = detect_number(norm)
+            comparison_norm = _comparison_text(norm, doc_type)
+            num = detect_number(comparison_norm)
             if num:
                 prefix, number, level = num
-                body = _split_body(norm, prefix)
+                body = _split_body(comparison_norm, prefix)
                 section = detect_section_key(body)
                 current = new_clause(
-                    number, level, body or norm, body or norm, item,
+                    number,
+                    level,
+                    body or comparison_norm,
+                    body or comparison_norm,
+                    item,
                     section[1] if section else "",
                 )
             else:
-                section = detect_section_key(norm)
+                section = detect_section_key(comparison_norm)
                 current = new_clause(
-                    "", item.heading_level or 1, norm, norm, item,
+                    "", item.heading_level or 1, comparison_norm, comparison_norm, item,
                     section[1] if section else "",
                 )
             clauses.append(current)
@@ -362,15 +392,20 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
 
         # paragraph:按行拆分(单个 block 可能含多行/多编号/多字段)
         # 优先级:编号 > 字段名 > 续入当前条款
-        for line_item in _split_lines_with_bbox(item, norm):
+        comparison_norm = _comparison_text(norm, doc_type)
+        line_items = _split_lines_with_bbox(item, comparison_norm)
+        for line_item in line_items:
             line = line_item.text
+            evidence_item = line_item
+            if comparison_norm != norm and len(line_items) == 1:
+                evidence_item = _raw_evidence_item(line_item, norm)
             num = detect_number(line)
             if num:
                 prefix, number, level = num
                 body = _split_body(line, prefix)
                 section = detect_section_key(body)
                 current = new_clause(
-                    number, level, body, body, line_item,
+                    number, level, body, body, evidence_item,
                     section[1] if section else "",
                 )
                 clauses.append(current)
@@ -381,23 +416,25 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
                 prefix, field_key = field
                 body = _split_body(line, prefix)
                 # 字段块:正文为冒号后的值,标题用归一化 field_key 便于阅读
-                current = new_clause("", 0, field_key, body or line, line_item, field_key)
+                current = new_clause(
+                    "", 0, field_key, body or line, evidence_item, field_key
+                )
                 clauses.append(current)
                 continue
             section = detect_section_key(line)
             if section:
                 title, field_key = section
-                current = new_clause("", 1, title, line, line_item, field_key)
+                current = new_clause("", 1, title, line, evidence_item, field_key)
                 clauses.append(current)
                 continue
             if current is None:
-                current = new_clause("", 0, "", line, line_item)
+                current = new_clause("", 0, "", line, evidence_item)
                 clauses.append(current)
             else:
                 sep = "\n" if current.text else ""
                 current.text += sep + line
-                if line_item.bbox:
-                    current.blocks.append(_raw_to_block(line_item))
+                if evidence_item.bbox:
+                    current.blocks.append(_raw_to_block(evidence_item))
 
     return clauses
 

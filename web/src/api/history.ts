@@ -15,6 +15,10 @@ export interface TaskListItem {
   source_name: string
   target_names: string[]
   ocr_backend: string | null
+  /** 单据号(仅外部接口核对请求携带,普通提交为 null)。 */
+  document_no: string | null
+  /** 是否外部接口提交的任务(携带 document_no)。 */
+  external_request: boolean
   overall_risk: OverallRisk | null
   change_status: 'clean' | 'changed' | 'needs_review' | null
   elapsed: number | null
@@ -62,6 +66,8 @@ export interface LlmCallItem {
 export interface ListTasksParams {
   kind?: TaskKind
   status?: TaskStatus
+  /** 模糊搜索关键字,后端匹配 task_id/document_no/source_name/target_names。 */
+  q?: string
   limit?: number
   offset?: number
 }
@@ -75,6 +81,9 @@ export function listTasks(params: ListTasksParams = {}): Promise<ListTasksRespon
   const qs = new URLSearchParams()
   if (params.kind) qs.set('kind', params.kind)
   if (params.status) qs.set('status', params.status)
+  // trim 后非空才作为搜索条件,空串等同未搜索
+  const q = params.q?.trim()
+  if (q) qs.set('q', q)
   if (params.limit != null) qs.set('limit', String(params.limit))
   if (params.offset != null) qs.set('offset', String(params.offset))
   const query = qs.toString()

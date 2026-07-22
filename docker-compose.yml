@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.27
+    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.30
     container_name: llm-ocr-compare
     platform: linux/amd64
     restart: unless-stopped
@@ -40,6 +40,13 @@ services:
     environment:
       # DATABASE_URL 内部走服务名 + 容器内端口 5432(不是宿主映射端口)。
       DATABASE_URL: postgresql+psycopg://dc:${POSTGRES_PASSWORD:-dcpass}@postgres:5432/doc_compare
+      DC_EXTERNAL_API_KEY: ${DC_EXTERNAL_API_KEY:-}
+      DC_EXTERNAL_PUBLIC_BASE_URL: ${DC_EXTERNAL_PUBLIC_BASE_URL:-}
+      DC_EXTERNAL_MAX_UPLOAD_MB: ${DC_EXTERNAL_MAX_UPLOAD_MB:-50}
+      DC_EXTERNAL_IMAGE_DPI: ${DC_EXTERNAL_IMAGE_DPI:-144}
+      DC_EXTERNAL_OCR_BACKEND: ${DC_EXTERNAL_OCR_BACKEND:-paddleocr}
+      DC_EXTERNAL_ENABLE_LLM_JUDGE: ${DC_EXTERNAL_ENABLE_LLM_JUDGE:-0}
+      DC_EXTERNAL_ENABLE_RISK_ASSESSMENT: ${DC_EXTERNAL_ENABLE_RISK_ASSESSMENT:-0}
     volumes:
       # 绑定宿主目录:持久化 uploads 文件与日志(logs/app.log)
       # LLM/OCR 配置写入同栈 Postgres(llm_config 表),不再读写此卷下的 llm_config.json

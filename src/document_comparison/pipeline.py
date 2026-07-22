@@ -38,7 +38,9 @@ def run_pipeline(
     enable_risk_assessment: bool = False,
 ) -> TamperReport:
     cfg = cfg or settings
-    ocr = ocr or get_ocr_engine(ocr_backend)
+    # 标准管线需要 PDF 标注：PaddleOCR 内容无坐标时追加 Spotting 调用。
+    # 对帐单等不需要标注的通道仍使用 get_ocr_engine 默认单次 OCR。
+    ocr = ocr or get_ocr_engine(ocr_backend, enable_spotting=True)
     embed = embed or get_embed_engine(cfg.embed_backend)
     thresholds = {"identical": cfg.similarity_identical, "modified": cfg.similarity_modified}
 

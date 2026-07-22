@@ -14,6 +14,21 @@ def apply_recognition_gate(
     enable_risk_assessment: bool = False,
 ) -> TamperReport:
     report.recognition_diagnostics = diagnostics
+    location_gaps = [
+        item for item in diagnostics if item.location_status != "complete"
+    ]
+    if any(item.location_status == "missing" for item in location_gaps):
+        report.location_status = "missing"
+    elif location_gaps:
+        report.location_status = "partial"
+    else:
+        report.location_status = "complete"
+    if location_gaps:
+        report.summary["location_quality"] = report.location_status
+        report.summary["unlocated_pages"] = [
+            item.page_index + 1 for item in location_gaps
+        ]
+
     unreliable = [item for item in diagnostics if not item.reliable]
     if not unreliable:
         report.recognition_status = "reliable"

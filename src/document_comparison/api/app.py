@@ -46,9 +46,26 @@ from ..storage import (
 )
 from ..report.builder import burn_pdf
 from ..report.docx_burn import build_docx_preview, burn_docx
+from ..external_api import (
+    build_external_result,
+    external_config_enabled,
+    external_image_path,
+    require_external_api_key,
+    validate_callback_url,
+    validate_public_base_url,
+)
 from ..tasks import task_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _upload_size(upload: UploadFile) -> int:
+    """读取底层临时文件大小并回拨，不把整个文件复制进内存。"""
+    current = upload.file.tell()
+    upload.file.seek(0, 2)
+    size = upload.file.tell()
+    upload.file.seek(current)
+    return size
 
 
 
@@ -59,6 +76,15 @@ def _mask_key(key: str) -> str:
     if len(key) <= 4:
         return "****"
     return "*" * (len(key) - 4) + key[-4:]
+
+
+def _safe_persisted_config() -> dict:
+    """返回可供管理端展示的配置快照，不泄露任何 API Key 明文。"""
+    persisted = load_llm_overrides()
+    for key in tuple(persisted):
+        if key.endswith(("_api_key", "_access_token")):
+            persisted[key] = _mask_key(str(persisted[key]))
+    return persisted
 
 
 def _task_record_to_task_info_dict(rec, *, kind: str) -> dict:
@@ -78,12 +104,61 @@ def _task_record_to_task_info_dict(rec, *, kind: str) -> dict:
         "elapsed": rec.elapsed,
     }
     if kind == "compare" and rec.report_compare is not None:
-        base["report"] = rec.report_compare
+        base["report"] = TamperReport.model_validate(rec.report_compare).model_dump()
     elif kind == "raw" and rec.report_raw is not None:
         base["raw_report"] = rec.report_raw
     elif kind == "statement" and rec.report_statement is not None:
         base["statement_report"] = rec.report_statement
     return base
+
+
+async def _external_task_response(task_id: str) -> dict:
+    """构造外部任务状态响应，供正式查询和管理端管线测试复用。"""
+    task = task_manager.get(task_id)
+    report = None
+    if task is not None:
+        if not task.external_request:
+            raise HTTPException(404, "task not found")
+        document_no = task.document_no or ""
+        status = task.info.status
+        response = {
+            "task_id": task_id,
+            "document_no": document_no,
+            "status": status,
+            "stage": task.info.stage,
+            "progress": task.info.progress,
+            "error": task.info.error,
+        }
+        report = task.report
+    else:
+        rec = await asyncio.to_thread(db_repo.get_task, task_id)
+        if rec is None or not rec.external_request:
+            raise HTTPException(404, "task not found")
+        document_no = rec.document_no or ""
+        status = rec.status
+        response = {
+            "task_id": task_id,
+            "document_no": document_no,
+            "status": status,
+            "stage": "",
+            "progress": 1.0 if status == "done" else 0.0,
+            "error": rec.error,
+        }
+        if rec.report_compare is not None:
+            report = TamperReport.model_validate(rec.report_compare)
+
+    if status == "done" and report is not None:
+        external = build_external_result(task_id, document_no, report)
+        response["result"] = {
+            key: external[key]
+            for key in (
+                "change_status", "recognition_status", "location_status",
+                "summary", "result_text",
+            )
+        }
+        response["highlight_images"] = external["highlight_images"]
+        response["result_url"] = external["result_url"]
+    return response
 
 
 def create_app() -> FastAPI:
@@ -162,10 +237,19 @@ def create_app() -> FastAPI:
             "llm_timeout": settings.llm_timeout,
             "llm_max_concurrency": settings.llm_max_concurrency,
             "llm_max_retries": settings.llm_max_retries,
+            "paddleocr_api_mode": settings.paddleocr_api_mode,
             "paddleocr_api_base": settings.paddleocr_api_base,
             "paddleocr_api_key": _mask_key(settings.paddleocr_api_key),
             "paddleocr_api_key_set": bool(settings.paddleocr_api_key),
             "paddleocr_model": settings.paddleocr_model,
+            "paddleocr_official_api_base": settings.paddleocr_official_api_base,
+            "paddleocr_official_access_token": _mask_key(
+                settings.paddleocr_official_access_token
+            ),
+            "paddleocr_official_access_token_set": bool(
+                settings.paddleocr_official_access_token
+            ),
+            "paddleocr_official_model": settings.paddleocr_official_model,
             "paddleocr_timeout": settings.paddleocr_timeout,
             "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
             "paddleocr_max_retries": settings.paddleocr_max_retries,
@@ -182,7 +266,16 @@ def create_app() -> FastAPI:
             "embed_timeout": settings.embed_timeout,
             "pdf_render_dpi": settings.pdf_render_dpi,
             "max_pdf_pages": settings.max_pdf_pages,
-            "persisted": load_llm_overrides(),
+            "external_api_key": _mask_key(settings.external_api_key),
+            "external_api_key_set": bool(settings.external_api_key),
+            "external_public_base_url": settings.external_public_base_url,
+            "external_max_upload_mb": settings.external_max_upload_mb,
+            "external_image_dpi": settings.external_image_dpi,
+            "external_ocr_backend": settings.external_ocr_backend,
+            "external_enable_llm_judge": settings.external_enable_llm_judge,
+            "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+            "external_enabled": external_config_enabled(),
+            "persisted": _safe_persisted_config(),
         }
 
     @app.put("/api/v1/config/llm")
@@ -191,21 +284,33 @@ def create_app() -> FastAPI:
 
         可选字段:llm_api_base, llm_api_key, llm_model, llm_timeout,
         llm_max_concurrency, llm_max_retries,
-        paddleocr_api_base, paddleocr_api_key, paddleocr_model,
+        paddleocr_api_mode, paddleocr_api_base, paddleocr_api_key, paddleocr_model,
+        paddleocr_official_api_base, paddleocr_official_access_token,
+        paddleocr_official_model,
         paddleocr_timeout, paddleocr_max_concurrency, paddleocr_max_retries,
         judge_api_base, judge_api_key, judge_model, judge_timeout,
         embed_backend, embed_api_base, embed_api_key, embed_model, embed_timeout,
-        pdf_render_dpi, max_pdf_pages。空值/省略表示不修改(api_key 传
+        pdf_render_dpi, max_pdf_pages, external_api_key,
+        external_public_base_url, external_max_upload_mb, external_image_dpi,
+        external_ocr_backend, external_enable_llm_judge,
+        external_enable_risk_assessment。
+        空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
         allowed = {
             "llm_api_base", "llm_api_key", "llm_model",
             "llm_timeout", "llm_max_concurrency", "llm_max_retries",
-            "paddleocr_api_base", "paddleocr_api_key", "paddleocr_model",
+            "paddleocr_api_mode", "paddleocr_api_base", "paddleocr_api_key", "paddleocr_model",
+            "paddleocr_official_api_base", "paddleocr_official_access_token",
+            "paddleocr_official_model",
             "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
             "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
             "embed_backend", "embed_api_base", "embed_api_key",
             "embed_model", "embed_timeout", "pdf_render_dpi", "max_pdf_pages",
+            "external_api_key", "external_public_base_url",
+            "external_max_upload_mb", "external_image_dpi",
+            "external_ocr_backend", "external_enable_llm_judge",
+            "external_enable_risk_assessment",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
@@ -227,6 +332,23 @@ def create_app() -> FastAPI:
                 int(body["llm_max_retries"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "llm_max_retries 必须为整数")
+        if "paddleocr_api_mode" in body:
+            if body["paddleocr_api_mode"] not in {"vllm", "official_sdk"}:
+                raise HTTPException(
+                    400, "paddleocr_api_mode 必须为 vllm 或 official_sdk"
+                )
+        if body.get("paddleocr_official_model") not in {
+            None,
+            "",
+            "PaddleOCR-VL",
+            "PaddleOCR-VL-1.5",
+            "PaddleOCR-VL-1.6",
+        }:
+            raise HTTPException(
+                400,
+                "paddleocr_official_model 仅支持 "
+                "PaddleOCR-VL | PaddleOCR-VL-1.5 | PaddleOCR-VL-1.6",
+            )
         if "paddleocr_timeout" in body and body["paddleocr_timeout"] is not None:
             try:
                 float(body["paddleocr_timeout"])
@@ -268,6 +390,37 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "max_pdf_pages 必须为整数")
             if pages < 0:
                 raise HTTPException(400, "max_pdf_pages 必须 >= 0(0 表示不限制)")
+        if body.get("external_public_base_url"):
+            try:
+                body = dict(body)
+                body["external_public_base_url"] = validate_public_base_url(
+                    str(body["external_public_base_url"])
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if "external_max_upload_mb" in body and body["external_max_upload_mb"] is not None:
+            try:
+                upload_mb = int(body["external_max_upload_mb"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "external_max_upload_mb 必须为整数")
+            if not 1 <= upload_mb <= 1024:
+                raise HTTPException(400, "external_max_upload_mb 取值范围 1-1024")
+        if "external_image_dpi" in body and body["external_image_dpi"] is not None:
+            try:
+                image_dpi = int(body["external_image_dpi"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "external_image_dpi 必须为整数")
+            if not 72 <= image_dpi <= 600:
+                raise HTTPException(400, "external_image_dpi 取值范围 72-600")
+        if "external_ocr_backend" in body:
+            if body["external_ocr_backend"] not in {"llm", "paddleocr"}:
+                raise HTTPException(400, "external_ocr_backend 必须为 llm 或 paddleocr")
+        if "external_enable_llm_judge" in body:
+            if not isinstance(body["external_enable_llm_judge"], bool):
+                raise HTTPException(400, "external_enable_llm_judge 必须为布尔值")
+        if "external_enable_risk_assessment" in body:
+            if not isinstance(body["external_enable_risk_assessment"], bool):
+                raise HTTPException(400, "external_enable_risk_assessment 必须为布尔值")
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
         overrides = dict(body)
@@ -275,10 +428,14 @@ def create_app() -> FastAPI:
             overrides.pop("llm_api_key")
         if overrides.get("paddleocr_api_key") == "********":
             overrides.pop("paddleocr_api_key")
+        if overrides.get("paddleocr_official_access_token") == "********":
+            overrides.pop("paddleocr_official_access_token")
         if overrides.get("embed_api_key") == "********":
             overrides.pop("embed_api_key")
         if overrides.get("judge_api_key") == "********":
             overrides.pop("judge_api_key")
+        if overrides.get("external_api_key") == "********":
+            overrides.pop("external_api_key")
 
         save_llm_overrides(overrides)
         return {
@@ -291,10 +448,19 @@ def create_app() -> FastAPI:
                 "llm_timeout": settings.llm_timeout,
                 "llm_max_concurrency": settings.llm_max_concurrency,
                 "llm_max_retries": settings.llm_max_retries,
+                "paddleocr_api_mode": settings.paddleocr_api_mode,
                 "paddleocr_api_base": settings.paddleocr_api_base,
                 "paddleocr_api_key": _mask_key(settings.paddleocr_api_key),
                 "paddleocr_api_key_set": bool(settings.paddleocr_api_key),
                 "paddleocr_model": settings.paddleocr_model,
+                "paddleocr_official_api_base": settings.paddleocr_official_api_base,
+                "paddleocr_official_access_token": _mask_key(
+                    settings.paddleocr_official_access_token
+                ),
+                "paddleocr_official_access_token_set": bool(
+                    settings.paddleocr_official_access_token
+                ),
+                "paddleocr_official_model": settings.paddleocr_official_model,
                 "paddleocr_timeout": settings.paddleocr_timeout,
                 "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
                 "paddleocr_max_retries": settings.paddleocr_max_retries,
@@ -311,8 +477,230 @@ def create_app() -> FastAPI:
                 "embed_timeout": settings.embed_timeout,
                 "pdf_render_dpi": settings.pdf_render_dpi,
                 "max_pdf_pages": settings.max_pdf_pages,
+                "external_api_key": _mask_key(settings.external_api_key),
+                "external_api_key_set": bool(settings.external_api_key),
+                "external_public_base_url": settings.external_public_base_url,
+                "external_max_upload_mb": settings.external_max_upload_mb,
+                "external_image_dpi": settings.external_image_dpi,
+                "external_ocr_backend": settings.external_ocr_backend,
+                "external_enable_llm_judge": settings.external_enable_llm_judge,
+                "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+                "external_enabled": external_config_enabled(),
             },
         }
+
+    @app.post("/api/v1/compare/api-test", status_code=202)
+    async def submit_external_pipeline_test(
+        source: UploadFile = File(..., description="测试用原始合同 Word(.docx)"),
+        target: UploadFile = File(..., description="测试用回收件 PDF(.pdf)"),
+    ):
+        """合同比对页 API 管线测试：复用外部任务产物流程，但不发送真实回调。"""
+        if not external_config_enabled():
+            raise HTTPException(400, "请先保存完整的外部系统 API 配置")
+        if not (source.filename or "").lower().endswith(".docx"):
+            raise HTTPException(400, "source 必须为 .docx")
+        if not (target.filename or "").lower().endswith(".pdf"):
+            raise HTTPException(400, "target 必须为 .pdf")
+
+        max_bytes = settings.external_max_upload_mb * 1024 * 1024
+        for field_name, upload in (("source", source), ("target", target)):
+            if _upload_size(upload) > max_bytes:
+                raise HTTPException(
+                    413,
+                    f"{field_name} 超过 {settings.external_max_upload_mb} MiB 上限",
+                )
+
+        if settings.max_pdf_pages > 0:
+            try:
+                pdf_bytes = target.file.read()
+            finally:
+                target.file.seek(0)
+            try:
+                page_count = count_pages_from_bytes(pdf_bytes)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"无法解析 PDF: {exc}")
+            if page_count > settings.max_pdf_pages:
+                raise HTTPException(
+                    400,
+                    f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                )
+
+        running = sum(
+            1
+            for task in task_manager._tasks.values()
+            if task.info.status in ("pending", "running")
+        )
+        if running >= settings.max_concurrent_tasks:
+            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        document_no = f"API-TEST-{uuid.uuid4().hex[:12].upper()}"
+        task_id = task_manager.create(
+            "compare",
+            source_name=source.filename or "",
+            target_names=[target.filename or ""],
+            ocr_backend=settings.external_ocr_backend,
+            document_no=document_no,
+            external_request=True,
+        )
+        word_path = save_upload(source, task_id, "source")
+        pdf_path = save_upload(target, task_id, "target")
+        asyncio.create_task(
+            task_manager.run(
+                task_id,
+                str(word_path),
+                str(pdf_path),
+                enable_llm_judge=settings.external_enable_llm_judge,
+                ocr_backend=settings.external_ocr_backend,
+                enable_risk_assessment=settings.external_enable_risk_assessment,
+            )
+        )
+        return {"task_id": task_id, "document_no": document_no, "status": "pending"}
+
+    @app.get("/api/v1/compare/api-test/{task_id}")
+    async def get_external_pipeline_test(task_id: str):
+        response = await _external_task_response(task_id)
+        if not str(response.get("document_no", "")).startswith("API-TEST-"):
+            raise HTTPException(404, "test task not found")
+        return response
+
+    @app.get("/api/v1/compare/api-test/{task_id}/images/{page_number}")
+    async def get_external_pipeline_test_image(task_id: str, page_number: int):
+        if page_number < 1:
+            raise HTTPException(404, "image not found")
+        task = task_manager.get(task_id)
+        if task is not None:
+            document_no = task.document_no or ""
+        else:
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            document_no = rec.document_no if rec else ""
+        if not str(document_no).startswith("API-TEST-"):
+            raise HTTPException(404, "test task not found")
+        path = external_image_path(task_id, page_number)
+        if not path.is_file():
+            raise HTTPException(404, "image not found")
+        return FileResponse(path, media_type="image/png")
+
+    @app.post("/api/v1/external/compare", status_code=202)
+    async def external_compare(
+        source: UploadFile = File(..., description="原始合同 Word(.docx)"),
+        target: UploadFile = File(..., description="回收件 PDF(.pdf)"),
+        document_no: str = Form(...),
+        callback_url: str = Form(...),
+        callback_secret: str = Form(...),
+        _auth: None = Depends(require_external_api_key),
+    ):
+        """供外部系统调用的标准合同比对异步入口。"""
+        if not (source.filename or "").lower().endswith(".docx"):
+            raise HTTPException(400, "source 必须为 .docx")
+        if not (target.filename or "").lower().endswith(".pdf"):
+            raise HTTPException(400, "target 必须为 .pdf")
+
+        document_no = document_no.strip()
+        if not document_no:
+            raise HTTPException(400, "document_no 不能为空")
+        if len(document_no) > 255:
+            raise HTTPException(400, "document_no 不能超过 255 个字符")
+        callback_secret = callback_secret.strip()
+        if not callback_secret:
+            raise HTTPException(400, "callback_secret 不能为空")
+        try:
+            callback_url = validate_callback_url(callback_url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        max_bytes = settings.external_max_upload_mb * 1024 * 1024
+        if max_bytes <= 0:
+            raise HTTPException(503, "外部 API 上传大小配置无效")
+        for field_name, upload in (("source", source), ("target", target)):
+            if _upload_size(upload) > max_bytes:
+                raise HTTPException(
+                    413,
+                    f"{field_name} 超过 {settings.external_max_upload_mb} MiB 上限",
+                )
+
+        # 与内部接口保持一致：超页数任务在入队前拒绝。
+        if settings.max_pdf_pages > 0:
+            try:
+                pdf_bytes = target.file.read()
+            finally:
+                target.file.seek(0)
+            try:
+                page_count = count_pages_from_bytes(pdf_bytes)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, f"无法解析 PDF: {exc}")
+            if page_count > settings.max_pdf_pages:
+                raise HTTPException(
+                    400,
+                    f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                )
+
+        running = sum(
+            1
+            for task in task_manager._tasks.values()
+            if task.info.status in ("pending", "running")
+        )
+        if running >= settings.max_concurrent_tasks:
+            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+        task_id = task_manager.create(
+            "compare",
+            source_name=source.filename or "",
+            target_names=[target.filename or ""],
+            ocr_backend=settings.external_ocr_backend,
+            callback_url=callback_url,
+            callback_secret=callback_secret,
+            document_no=document_no,
+            external_request=True,
+        )
+        word_path = save_upload(source, task_id, "source")
+        pdf_path = save_upload(target, task_id, "target")
+        asyncio.create_task(
+            task_manager.run(
+                task_id,
+                str(word_path),
+                str(pdf_path),
+                enable_llm_judge=settings.external_enable_llm_judge,
+                ocr_backend=settings.external_ocr_backend,
+                enable_risk_assessment=settings.external_enable_risk_assessment,
+            )
+        )
+        return {"task_id": task_id, "document_no": document_no, "status": "pending"}
+
+    @app.get("/api/v1/external/compare/{task_id}")
+    async def get_external_result(
+        task_id: str,
+        _auth: None = Depends(require_external_api_key),
+    ):
+        return await _external_task_response(task_id)
+
+    @app.get("/api/v1/external/compare/{task_id}/images/{page_number}")
+    async def get_external_highlight_image(
+        task_id: str,
+        page_number: int,
+        _auth: None = Depends(require_external_api_key),
+    ):
+        if page_number < 1:
+            raise HTTPException(404, "image not found")
+        task = task_manager.get(task_id)
+        if task is not None:
+            is_external = task.external_request
+        else:
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            is_external = bool(rec and rec.external_request)
+        if not is_external:
+            raise HTTPException(404, "task not found")
+        path = external_image_path(task_id, page_number)
+        if not path.is_file():
+            raise HTTPException(404, "image not found")
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                "Content-Disposition": (
+                    f'inline; filename="{task_id}-page-{page_number:04d}.png"'
+                )
+            },
+        )
 
     @app.post("/api/v1/compare")
     async def compare(
@@ -413,7 +801,9 @@ def create_app() -> FastAPI:
             # 内存里 report 还没就绪时,从 PG JSONB 回捞。
             rec = await asyncio.to_thread(db_repo.get_task, task_id)
             if rec is not None and rec.report_compare is not None:
-                resp["report"] = rec.report_compare
+                resp["report"] = TamperReport.model_validate(
+                    rec.report_compare
+                ).model_dump()
         return resp
 
     @app.get(
@@ -746,6 +1136,7 @@ def create_app() -> FastAPI:
     async def list_tasks(
         kind: str | None = None,
         status: str | None = None,
+        q: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -754,6 +1145,7 @@ def create_app() -> FastAPI:
         查询参数:
           kind   - compare | raw | statement(可选筛选)
           status - pending | running | done | failed(可选筛选)
+          q      - 模糊搜索关键字,匹配 task_id / document_no / source_name / target_names
           limit  - 默认 50,上限 200
           offset - 分页偏移
         返回 {items: [...轻量元数据], total: N}。不含报告 JSONB。
@@ -768,10 +1160,12 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "kind 必须为 compare | raw | statement")
         if status is not None and status not in ("pending", "running", "done", "failed"):
             raise HTTPException(400, "status 必须为 pending | running | done | failed")
+        # 空白 q 视为未搜索,避免空串退化为 %% 全表匹配
+        q = q.strip() if q else None
 
         records, total = await asyncio.to_thread(
             db_repo.list_tasks,
-            kind=kind, status=status, limit=limit, offset=offset,
+            kind=kind, status=status, q=q, limit=limit, offset=offset,
         )
         items = [db_repo.to_dict(r, include_report=False) for r in records]
         return {"items": items, "total": total}

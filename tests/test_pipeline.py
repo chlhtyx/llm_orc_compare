@@ -10,11 +10,53 @@ except ImportError:
     import fitz  # type: ignore
 
 from document_comparison.embed.mock import MockEmbedding
-from document_comparison.models import Block, PageMeta
+from document_comparison.models import (
+    Block,
+    Diff,
+    PageMeta,
+    PageRegion,
+    TamperReport,
+)
 from document_comparison.parsing.pdf import extract_text_blocks
 from document_comparison.pipeline import run_pipeline
 from document_comparison.report.builder import burn_pdf
 from document_comparison.report.docx_burn import burn_docx
+
+
+def test_burn_pdf_includes_pdf_added_clause(tmp_path: Path):
+    pdf_path = tmp_path / "source.pdf"
+    out_path = tmp_path / "annotated.pdf"
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)
+    doc.save(pdf_path)
+    doc.close()
+    report = TamperReport(
+        source="source.docx",
+        target=str(pdf_path),
+        overall_risk="changed",
+        change_status="changed",
+        page_meta=[PageMeta(
+            page_index=0,
+            width_px=1654,
+            height_px=2339,
+            pdf_width_pt=595,
+            pdf_height_pt=842,
+        )],
+        unmatched_clauses=[Diff(
+            alignment_id="al-added",
+            status="added",
+            page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+            segments=[],
+        )],
+    )
+
+    burn_pdf(pdf_path, report, out_path)
+
+    annotated = fitz.open(out_path)
+    try:
+        assert len(list(annotated[0].annots() or [])) == 1
+    finally:
+        annotated.close()
 
 
 class _TextLayerOCR:

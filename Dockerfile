@@ -24,9 +24,10 @@ FROM python:3.12-slim AS runtime
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_TRUSTED_HOST=mirrors.aliyun.com
 
-# 系统依赖:PyMuPDF 运行库 + curl(健康检查)+ tzdata(时区,日志/时间戳用本地时区)
+# 系统依赖:PyMuPDF / PaddleOCR(OpenCV libGL) 运行库 +
+# curl(健康检查)+ tzdata(时区,日志/时间戳用本地时区)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl tzdata \
+    && apt-get install -y --no-install-recommends curl libgl1 tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -41,9 +42,16 @@ RUN pip install --no-cache-dir \
     "python-docx>=1.1" \
     "PyMuPDF>=1.24" \
     "httpx>=0.27" \
+    "requests>=2.31" \
+    "paddleocr>=3.7,<3.8" \
     "SQLAlchemy>=2.0" \
     "psycopg[binary]>=3.1" \
     "alembic>=1.13"
+
+# opencv-contrib-python 还依赖 GLib 线程库(libgthread-2.0.so.0)。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # 拷后端源码
 COPY src/ ./src/

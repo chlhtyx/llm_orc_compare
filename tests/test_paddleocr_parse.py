@@ -8,8 +8,16 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 from document_comparison.models import PageMeta
+from document_comparison.ocr import paddleocr_http
 from document_comparison.ocr.paddleocr_http import (
+    PaddleOCREngine,
+    _attach_spotting_bboxes,
+    _official_bbox_to_pt,
+    _parse_official_page,
     _parse_loc_content,
     _parse_plain_content,
     _plain_text_to_table,
@@ -105,6 +113,263 @@ def test_loc_fallback_branch():
     assert blocks[0].bbox[0] > 0  # x1
 
 
+def test_loc_polygon_uses_all_points_for_outer_bbox():
+    """Spotting 的异形多边形应取全部顶点外接框，而不是固定前四个点。"""
+    content = (
+        "弯曲文本"
+        "<|LOC_100|><|LOC_200|><|LOC_500|><|LOC_180|>"
+        "<|LOC_650|><|LOC_400|><|LOC_300|><|LOC_520|>"
+        "<|LOC_80|><|LOC_350|>"
+    )
+    blocks = _parse_loc_content(content, 0, _meta())
+    assert len(blocks) == 1
+    assert blocks[0].bbox == [
+        80 * 595 / 1000,
+        180 * 842 / 1000,
+        650 * 595 / 1000,
+        520 * 842 / 1000,
+    ]
+
+
+def test_official_sdk_page_keeps_structure_table_and_bbox():
+    page = SimpleNamespace(
+        markdown_text="fallback markdown",
+        pruned_result={
+            "width": 1000,
+            "height": 2000,
+            "parsing_res_list": [
+                {
+                    "block_label": "text",
+                    "block_content": "第一条 合同内容",
+                    "block_bbox": [100, 200, 900, 400],
+                },
+                {
+                    "block_label": "table",
+                    "block_content": "名称 | 金额\n--- | ---\n设备 | 100",
+                    "block_bbox": [[100, 500], [900, 500], [900, 900], [100, 900]],
+                },
+            ],
+        },
+    )
+
+    blocks = _parse_official_page(page, 0, _meta())
+
+    assert [block.label for block in blocks] == ["text", "table"]
+    assert blocks[0].bbox == [59.5, 84.2, 535.5, 168.4]
+    assert blocks[1].table is not None
+    assert blocks[1].table.headers == ["名称", "金额"]
+    assert blocks[1].table.rows == [["设备", "100"]]
+
+
+def test_official_bbox_rejects_missing_or_degenerate_coordinates():
+    assert _official_bbox_to_pt(None, 100, 100, 50, 50) == []
+    assert _official_bbox_to_pt([10, 10, 10, 20], 100, 100, 50, 50) == []
+
+
+def test_engine_official_sdk_mode_calls_parse_document(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    class FakeOptions:
+        def __init__(self, **kwargs):
+            captured["options"] = kwargs
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def parse_document(self, **kwargs):
+            captured["parse"] = kwargs
+            assert (tmp_path / "scan.pdf").read_bytes() == b"%PDF-test"
+            return SimpleNamespace(
+                job_id="job-1",
+                pages=[
+                    SimpleNamespace(
+                        markdown_text="第一条 合同内容",
+                        pruned_result={
+                            "width": 1000,
+                            "height": 2000,
+                            "parsing_res_list": [
+                                {
+                                    "block_label": "text",
+                                    "block_content": "第一条 合同内容",
+                                    "block_bbox": [100, 200, 900, 400],
+                                }
+                            ],
+                        },
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(
+        paddleocr_http, "_load_official_sdk", lambda: (FakeClient, FakeOptions)
+    )
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = PaddleOCREngine(
+        api_mode="official_sdk",
+        official_api_base="https://official.example.test",
+        official_access_token="access-token",
+        official_model="PaddleOCR-VL-1.6",
+        timeout=123,
+    )
+
+    pages = engine.recognize(pdf_path, [_meta()])
+
+    assert pages[0][0].content == "第一条 合同内容"
+    assert captured["client"] == {
+        "token": "access-token",
+        "request_timeout": 123.0,
+        "poll_timeout": 900.0,
+        "base_url": "https://official.example.test",
+    }
+    assert captured["parse"]["file_path"] == str(pdf_path)
+    assert captured["parse"]["model"] == "PaddleOCR-VL-1.6"
+    assert captured["options"]["use_layout_detection"] is True
+    assert captured["options"]["use_doc_unwarping"] is False
+
+
+def test_engine_official_layout_api_uses_sync_endpoint(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "markdown": {"text": "第一条 合同内容", "images": {}},
+                            "prunedResult": {
+                                "width": 1000,
+                                "height": 2000,
+                                "parsing_res_list": [
+                                    {
+                                        "block_label": "text",
+                                        "block_content": "第一条 合同内容",
+                                        "block_bbox": [100, 200, 900, 400],
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            }
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update(
+            {"url": url, "json": json, "headers": headers, "timeout": timeout}
+        )
+        return FakeResponse()
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", fake_post)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = PaddleOCREngine(
+        api_mode="official_sdk",
+        official_api_base="https://official.example.test/layout-parsing",
+        official_access_token="access-token",
+        timeout=123,
+    )
+
+    pages = engine.recognize(pdf_path, [_meta()])
+
+    assert pages[0][0].content == "第一条 合同内容"
+    assert captured["url"] == "https://official.example.test/layout-parsing"
+    assert captured["headers"]["Authorization"] == "token access-token"
+    assert captured["timeout"] == 123.0
+    assert captured["json"]["fileType"] == 0
+    assert captured["json"]["file"] == "JVBERi10ZXN0"
+    assert captured["json"]["useRegionDetection"] is True
+    assert captured["json"]["useDocUnwarping"] is False
+
+
+def test_engine_official_sdk_honors_longer_poll_timeout(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    class FakeOptions:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def parse_document(self, **_kwargs):
+            return SimpleNamespace(job_id="job-long", pages=[])
+
+    monkeypatch.setattr(
+        paddleocr_http, "_load_official_sdk", lambda: (FakeClient, FakeOptions)
+    )
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = PaddleOCREngine(
+        api_mode="official_sdk",
+        official_access_token="access-token",
+        timeout=1200,
+    )
+
+    engine.recognize(pdf_path, [])
+
+    assert captured["request_timeout"] == 1200.0
+    assert captured["poll_timeout"] == 1200.0
+
+
+def test_engine_official_sdk_recognize_text_uses_temporary_image(
+    monkeypatch,
+):
+    seen: dict = {}
+
+    class FakeOptions:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def parse_document(self, **kwargs):
+            image_path = kwargs["file_path"]
+            seen["path"] = image_path
+            seen["bytes"] = Path(image_path).read_bytes()
+            return SimpleNamespace(
+                job_id="job-image",
+                pages=[SimpleNamespace(markdown_text="识别文本")],
+            )
+
+    monkeypatch.setattr(
+        paddleocr_http, "_load_official_sdk", lambda: (FakeClient, FakeOptions)
+    )
+    engine = PaddleOCREngine(
+        api_mode="official_sdk", official_access_token="token"
+    )
+
+    assert engine.recognize_text(b"png-data") == "识别文本"
+    assert seen["bytes"] == b"png-data"
+    assert not Path(seen["path"]).exists()
+
+
 def test_loc_markdown_table_keeps_structure_and_bbox():
     """LOC 坐标与 Markdown 表格同时出现时不能把表格降级为普通文本。"""
     loc = "<|LOC_10|><|LOC_20|><|LOC_900|><|LOC_20|><|LOC_900|><|LOC_80|><|LOC_10|><|LOC_80|>"
@@ -189,14 +454,135 @@ def test_plain_text_to_table_empty():
     assert _plain_text_to_table("   ") is None
 
 
+def test_attach_spotting_bboxes_merges_consecutive_lines():
+    content_blocks = _parse_plain_content(
+        "第五条 付款方式 验收合格后30日内支付货款\n合同尾部",
+        0,
+        _meta(),
+    )
+    loc_a = "<|LOC_100|><|LOC_100|><|LOC_800|><|LOC_100|><|LOC_800|><|LOC_160|><|LOC_100|><|LOC_160|>"
+    loc_b = "<|LOC_100|><|LOC_170|><|LOC_900|><|LOC_170|><|LOC_900|><|LOC_230|><|LOC_100|><|LOC_230|>"
+    loc_c = "<|LOC_100|><|LOC_800|><|LOC_500|><|LOC_800|><|LOC_500|><|LOC_850|><|LOC_100|><|LOC_850|>"
+    spotting = _parse_loc_content(
+        f"第五条 付款方式{loc_a}\n验收合格后30日内支付货款{loc_b}\n合同尾部{loc_c}",
+        0,
+        _meta(),
+    )
+
+    merged = _attach_spotting_bboxes(content_blocks, spotting)
+
+    assert len(merged[0].bbox) == 4
+    assert merged[0].bbox[1] == 100 * 842 / 1000
+    assert merged[0].bbox[3] == 230 * 842 / 1000
+    assert merged[1].bbox == spotting[2].bbox
+
+
+def test_engine_uses_ocr_content_and_spotting_coordinates(monkeypatch):
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+        enable_spotting=True,
+    )
+    loc = "<|LOC_10|><|LOC_20|><|LOC_900|><|LOC_20|><|LOC_900|><|LOC_80|><|LOC_10|><|LOC_80|>"
+    prompts: list[str] = []
+
+    def fake_chat(_data_url: str, *, prompt: str = "OCR:", **_kwargs) -> str:
+        prompts.append(prompt)
+        if prompt == "OCR:":
+            return "甲方：示例公司"
+        return f"甲方：示例公司{loc}"
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    out: list[list] = [None]
+    engine._recognize_page(0, b"png", _meta(), out)
+
+    assert prompts == ["OCR:", "Spotting:"]
+    assert out[0][0].content == "甲方：示例公司"
+    assert len(out[0][0].bbox) == 4
+
+
+def test_engine_skips_spotting_when_ocr_already_has_coordinates(monkeypatch):
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+        enable_spotting=True,
+    )
+    loc = "<|LOC_10|><|LOC_20|><|LOC_900|><|LOC_20|><|LOC_900|><|LOC_80|><|LOC_10|><|LOC_80|>"
+    prompts: list[str] = []
+
+    def fake_chat(_data_url: str, *, prompt: str = "OCR:", **_kwargs) -> str:
+        prompts.append(prompt)
+        return f"甲方：示例公司{loc}"
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    out: list[list] = [None]
+    engine._recognize_page(0, b"png", _meta(), out)
+
+    assert prompts == ["OCR:"]
+    assert len(out[0][0].bbox) == 4
+
+
+def test_engine_does_not_spot_when_annotation_mode_is_disabled(monkeypatch):
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+        enable_spotting=False,
+    )
+    prompts: list[str] = []
+
+    def fake_chat(_data_url: str, *, prompt: str = "OCR:", **_kwargs) -> str:
+        prompts.append(prompt)
+        return "甲方：示例公司"
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    out: list[list] = [None]
+    engine._recognize_page(0, b"png", _meta(), out)
+
+    assert prompts == ["OCR:"]
+    assert out[0][0].bbox == []
+
+
+def test_spotting_failure_does_not_discard_ocr_content(monkeypatch):
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+        enable_spotting=True,
+    )
+
+    def fake_chat(_data_url: str, *, prompt: str = "OCR:", **_kwargs) -> str:
+        if prompt == "OCR:":
+            return "甲方：示例公司"
+        raise RuntimeError("spotting unavailable")
+
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    out: list[list] = [None]
+    engine._recognize_page(0, b"png", _meta(), out)
+
+    assert out[0][0].content == "甲方：示例公司"
+    assert out[0][0].bbox == []
+
+
 def test_engine_reads_paddleocr_config():
     """paddleocr 后端使用独立的 paddleocr_* 配置(不复用 llm_*)。"""
-    from document_comparison.ocr.paddleocr_http import PaddleOCREngine
-
     eng = PaddleOCREngine()
     # 应与 paddleocr_* 配置一致(settings.paddleocr_api_base / _api_key / _model),
     # 与 llm_* 完全隔离。
     from document_comparison.config import settings
+    assert eng.api_mode == settings.paddleocr_api_mode
     assert eng.api_base == settings.paddleocr_api_base
     assert eng.api_key == settings.paddleocr_api_key
     assert eng.model == settings.paddleocr_model
+    assert eng.official_api_base == settings.paddleocr_official_api_base
+    assert (
+        eng.official_access_token
+        == settings.paddleocr_official_access_token
+    )
+    assert eng.official_model == settings.paddleocr_official_model

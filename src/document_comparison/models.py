@@ -15,6 +15,7 @@ DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
 OverallRisk = Literal["high", "medium", "low", "changed", "clean", "needs_review"]
 RecognitionStatus = Literal["reliable", "needs_review"]
+LocationStatus = Literal["complete", "partial", "missing"]
 ChangeVerdict = Literal["clean", "changed", "needs_review"]
 EvidenceConfidence = Literal["high", "medium", "low"]
 KeyElementKind = Literal[
@@ -187,6 +188,13 @@ class PageRecognitionDiagnostic(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     char_count: int = 0
     table_count: int = 0
+    location_status: LocationStatus = "complete"
+    bbox_coverage: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="该页有效 OCR 字符中具备 PDF 坐标的比例；不参与内容变化裁决",
+    )
 
 
 class TamperReport(BaseModel):
@@ -206,6 +214,10 @@ class TamperReport(BaseModel):
     page_meta: list[PageMeta] = Field(default_factory=list)
     recognition_status: RecognitionStatus = "reliable"
     recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
+    location_status: LocationStatus = Field(
+        default="complete",
+        description="PDF 高亮定位完整度；与 OCR 内容可靠性及变化裁决相互独立",
+    )
 
     @model_validator(mode="before")
     @classmethod

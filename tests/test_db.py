@@ -157,6 +157,74 @@ def test_list_tasks_filter_and_pagination(db_isolated):
     assert {r.task_id for r in page1}.isdisjoint({r.task_id for r in page2})
 
 
+def test_list_tasks_q_search(db_isolated):
+    """q 模糊搜索命中 task_id / document_no / source_name / target_names,且 total 与 records 一致。"""
+    db_repo.create_task(
+        "task_alpha", "compare",
+        source_name="contract_alpha.docx",
+        target_names=["recovered_alpha.pdf"],
+        document_no="DT-2024-0001",
+    )
+    db_repo.create_task(
+        "task_beta", "raw",
+        source_name="note_beta.txt",
+        target_names=["scan_beta.pdf"],
+        document_no="DT-2024-0002",
+    )
+    db_repo.create_task(
+        "task_gamma", "statement",
+        target_names=["bank_stmt.pdf"],
+        document_no=None,
+    )
+    db_repo.update_task_status("task_alpha", "done")
+    db_repo.update_task_status("task_beta", "done")
+    db_repo.update_task_status("task_gamma", "done")
+
+    # 命中 task_id
+    recs, total = db_repo.list_tasks(q="task_alpha")
+    assert total == 1
+    assert [r.task_id for r in recs] == ["task_alpha"]
+
+    # 命中 document_no(大小写不敏感)
+    recs, total = db_repo.list_tasks(q="dt-2024-0001")
+    assert total == 1
+    assert recs[0].task_id == "task_alpha"
+
+    # 命中 document_no 前缀 → 两条 DT-2024-*
+    recs, total = db_repo.list_tasks(q="DT-2024")
+    assert total == 2
+    assert {r.task_id for r in recs} == {"task_alpha", "task_beta"}
+
+    # 命中 source_name
+    recs, total = db_repo.list_tasks(q="alpha.docx")
+    assert total == 1
+    assert recs[0].task_id == "task_alpha"
+
+    # 命中 target_names(JSONB cast → text)
+    recs, total = db_repo.list_tasks(q="bank_stmt")
+    assert total == 1
+    assert recs[0].task_id == "task_gamma"
+
+    # 子串命中多条(都含 "_beta")
+    recs, total = db_repo.list_tasks(q="beta")
+    assert total == 1
+    assert recs[0].task_id == "task_beta"
+
+    # 无命中
+    recs, total = db_repo.list_tasks(q="不存在的关键字xyz")
+    assert total == 0
+    assert recs == []
+
+    # q 可与 kind 叠加
+    recs, total = db_repo.list_tasks(q="DT-2024", kind="raw")
+    assert total == 1
+    assert recs[0].task_id == "task_beta"
+
+    # 空白/空 q 等同未搜索(全量)
+    recs, total = db_repo.list_tasks(q="")
+    assert total == 3
+
+
 def test_update_task_status_unknown_task_is_noop(db_isolated, caplog):
     """未知 task_id 的更新不应抛错,仅记日志。"""
     db_repo.update_task_status("nope", "done")
@@ -310,3 +378,27 @@ def test_llm_call_to_dict_serialization(db_isolated):
     assert d["elapsed_ms"] == 50
     assert d["response"] == {"ok": True}
     assert "created_at" in d and isinstance(d["created_at"], str)
+
+
+def test_external_task_metadata_roundtrip_allows_duplicate_document_no(db_isolated):
+    db_repo.create_task(
+        "external-1",
+        "compare",
+        document_no="BILL-2026-001",
+        external_request=True,
+    )
+    db_repo.create_task(
+        "external-2",
+        "compare",
+        document_no="BILL-2026-001",
+        external_request=True,
+    )
+
+    first = db_repo.get_task("external-1")
+    second = db_repo.get_task("external-2")
+    assert first is not None and second is not None
+    assert first.document_no == second.document_no == "BILL-2026-001"
+    assert first.external_request is True
+    serialized = db_repo.to_dict(first)
+    assert serialized["document_no"] == "BILL-2026-001"
+    assert serialized["external_request"] is True

@@ -20,6 +20,10 @@ export const useReportStore = defineStore('report', () => {
   const diffs = computed<Diff[]>(() => report.value?.diffs ?? [])
   const keyElements = computed<KeyElement[]>(() => report.value?.key_elements ?? [])
   const unmatched = computed<Diff[]>(() => report.value?.unmatched_clauses ?? [])
+  const pdfHighlights = computed<Diff[]>(() => [
+    ...diffs.value,
+    ...unmatched.value.filter((d) => d.status === 'added' && d.page_regions.length > 0),
+  ])
 
   /** 按风险等级排序的条款差异(high → none)。 */
   const diffsBySeverity = computed<Diff[]>(() =>
@@ -36,7 +40,7 @@ export const useReportStore = defineStore('report', () => {
 
   /** 是否存在可在 PDF 上绘制的高亮区域（扫描件无坐标时为 false）。 */
   const hasPdfHighlights = computed<boolean>(() =>
-    diffs.value.some((d) => d.page_regions.length > 0),
+    pdfHighlights.value.some((d) => d.page_regions.length > 0),
   )
 
  const counts = computed(() => {
@@ -54,6 +58,7 @@ export const useReportStore = defineStore('report', () => {
     diffs,
     keyElements,
     unmatched,
+    pdfHighlights,
     diffsBySeverity,
     highRiskDiffs,
     changedKeyElements,

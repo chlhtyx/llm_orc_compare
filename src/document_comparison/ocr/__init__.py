@@ -2,10 +2,9 @@
 
 - llm(默认):通过远端多模态推理服务(OpenAI 兼容 API)识别 PDF 版面。
   适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o 等)。
-  独立配置:paddleocr_api_base / paddleocr_api_key / paddleocr_model(不复用 llm_*)。
-- paddleocr:走同一套 OpenAI 兼容推理服务,但用不同的输出解析逻辑。
-  适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等),这类模型不遵循
-  JSON 指令。独立配置:paddleocr_api_base / paddleocr_api_key / paddleocr_model。
+  独立配置:llm_api_base / llm_api_key / llm_model。
+- paddleocr:可切换原有 vLLM Chat Completions 与 PaddleOCR 官方 Python SDK。
+  原 vLLM 配置与 paddleocr_official_* 官方 SDK 配置分开保存。
 """
 from __future__ import annotations
 
@@ -17,15 +16,18 @@ from .paddleocr_http import PaddleOCREngine
 from .trusted import TrustedPDFReader
 
 
-def get_ocr_engine(backend: str | None = None) -> OCREngine:
+def get_ocr_engine(
+    backend: str | None = None, *, enable_spotting: bool = False
+) -> OCREngine:
     """按引擎名构造 OCR 引擎。
 
     backend 为 None 时回退到 settings.ocr_backend(代码默认 'llm',
-    不再持久化、不在设置页暴露)。
+    不再持久化、不在设置页暴露)。enable_spotting 仅供需要 PDF 高亮的
+    标准合同比对使用；其它通道保持单次 OCR 调用。
     """
     backend = backend or settings.ocr_backend
     if backend == "paddleocr":
-        fallback: OCREngine = PaddleOCREngine()
+        fallback: OCREngine = PaddleOCREngine(enable_spotting=enable_spotting)
     else:
         fallback = LLMOCREngine()
     # 无论视觉 OCR 选哪一个 adapter，都先尝试确定性的 PDF 原生读取。

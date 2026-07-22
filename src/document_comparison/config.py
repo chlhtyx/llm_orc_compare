@@ -37,7 +37,7 @@ class Settings:
 
     # —— OCR 引擎默认选择:llm | paddleocr ——
     # 不再持久化、不在设置页暴露。仅作为代码兜底默认值:
-    # 比对提交页的引擎选择器初始值、API 未传 ocr_backend 时的兜底。
+    # 既有比对 API 未传 ocr_backend 时的兜底。
     ocr_backend: str = "llm"
 
     # —— 远端多模态推理(llm 引擎用:通用 VL 模型)——
@@ -54,12 +54,18 @@ class Settings:
     llm_max_retries: int = 2
 
     # —— 远端多模态推理(paddleocr 引擎用:专用 OCR 模型)——
-    # 与 llm_* 完全独立配置。走同一套 OpenAI 兼容 /chat/completions 协议,
-    # 但适配返回纯文本/Markdown 的专用 OCR 模型(PaddleOCR-VL 等)。
-    # 未配置(api_base 为空)时,选用 paddleocr 引擎会直接报错,不回退 llm_*。
+    # 与 llm_* 完全独立配置。api_mode=vllm 走 OpenAI 兼容
+    # /chat/completions;api_mode=official_sdk 走 PaddleOCR 官方 Python SDK。
+    # 两种方式各自保留配置,切换时不覆盖另一套凭据。
+    paddleocr_api_mode: str = "vllm"
+    # vLLM / OpenAI 兼容方式(原有配置)
     paddleocr_api_base: str = ""
     paddleocr_api_key: str = ""
     paddleocr_model: str = ""
+    # PaddleOCR 官方 Python SDK / AI Studio 托管 API
+    paddleocr_official_api_base: str = ""
+    paddleocr_official_access_token: str = ""
+    paddleocr_official_model: str = "PaddleOCR-VL-1.6"
     paddleocr_timeout: float = 300.0
     paddleocr_max_concurrency: int = 4
     paddleocr_max_retries: int = 2
@@ -110,6 +116,36 @@ class Settings:
     webhook_max_retries: int = 3
     webhook_timeout_seconds: float = 10.0
 
+    # —— 外部合同比对 API ——
+    # 两项均配置后 `/api/v1/external/*` 才可用；缺失时端点返回 503，
+    # 不影响内部页面和既有 API。
+    external_api_key: str = field(
+        default_factory=lambda: _env("DC_EXTERNAL_API_KEY", "")
+    )
+    external_public_base_url: str = field(
+        default_factory=lambda: _env("DC_EXTERNAL_PUBLIC_BASE_URL", "")
+    )
+    external_max_upload_mb: int = field(
+        default_factory=lambda: int(_env("DC_EXTERNAL_MAX_UPLOAD_MB", "50"))
+    )
+    external_image_dpi: int = field(
+        default_factory=lambda: int(_env("DC_EXTERNAL_IMAGE_DPI", "144"))
+    )
+    # 外部正式调用和管理端管线测试共用同一组默认比对选项。
+    external_ocr_backend: str = field(
+        default_factory=lambda: _env("DC_EXTERNAL_OCR_BACKEND", "paddleocr")
+    )
+    external_enable_llm_judge: bool = field(
+        default_factory=lambda: _env(
+            "DC_EXTERNAL_ENABLE_LLM_JUDGE", "0"
+        ).lower() in ("1", "true", "yes")
+    )
+    external_enable_risk_assessment: bool = field(
+        default_factory=lambda: _env(
+            "DC_EXTERNAL_ENABLE_RISK_ASSESSMENT", "0"
+        ).lower() in ("1", "true", "yes")
+    )
+
     # —— Postgres(SQLAlchemy 引擎;硬依赖,未配置时启动失败)——
     # 连接串示例:postgresql+psycopg://dc:dcpass@localhost:5432/doc_compare
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL", ""))
@@ -154,9 +190,13 @@ _LLM_CONFIG_FIELDS = (
     "llm_timeout",
     "llm_max_concurrency",
     "llm_max_retries",
+    "paddleocr_api_mode",
     "paddleocr_api_base",
     "paddleocr_api_key",
     "paddleocr_model",
+    "paddleocr_official_api_base",
+    "paddleocr_official_access_token",
+    "paddleocr_official_model",
     "paddleocr_timeout",
     "paddleocr_max_concurrency",
     "paddleocr_max_retries",
@@ -171,6 +211,13 @@ _LLM_CONFIG_FIELDS = (
     "embed_timeout",
     "pdf_render_dpi",
     "max_pdf_pages",
+    "external_api_key",
+    "external_public_base_url",
+    "external_max_upload_mb",
+    "external_image_dpi",
+    "external_ocr_backend",
+    "external_enable_llm_judge",
+    "external_enable_risk_assessment",
 )
 
 # dataclass 字段默认值,供 PG 无记录时合并使用(不再写入种子配置)。
@@ -181,9 +228,13 @@ _LLM_DEFAULTS: dict = {
     "llm_timeout": 120,
     "llm_max_concurrency": 4,
     "llm_max_retries": 2,
+    "paddleocr_api_mode": "vllm",
     "paddleocr_api_base": "",
     "paddleocr_api_key": "",
     "paddleocr_model": "",
+    "paddleocr_official_api_base": "",
+    "paddleocr_official_access_token": "",
+    "paddleocr_official_model": "PaddleOCR-VL-1.6",
     "paddleocr_timeout": 300,
     "paddleocr_max_concurrency": 4,
     "paddleocr_max_retries": 2,
@@ -198,6 +249,14 @@ _LLM_DEFAULTS: dict = {
     "embed_timeout": 60,
     "pdf_render_dpi": 200,
     "max_pdf_pages": 0,
+    # 服务管理端可持久化覆盖；环境变量仍作为首次启动/灾备默认值。
+    "external_api_key": settings.external_api_key,
+    "external_public_base_url": settings.external_public_base_url,
+    "external_max_upload_mb": settings.external_max_upload_mb,
+    "external_image_dpi": settings.external_image_dpi,
+    "external_ocr_backend": settings.external_ocr_backend,
+    "external_enable_llm_judge": settings.external_enable_llm_judge,
+    "external_enable_risk_assessment": settings.external_enable_risk_assessment,
 }
 
 def _legacy_llm_config_path() -> Path:
@@ -259,12 +318,22 @@ def apply_llm_overrides() -> None:
         settings.llm_max_concurrency = int(cfg["llm_max_concurrency"])
     if "llm_max_retries" in cfg:
         settings.llm_max_retries = int(cfg["llm_max_retries"])
+    if cfg.get("paddleocr_api_mode") in {"vllm", "official_sdk"}:
+        settings.paddleocr_api_mode = str(cfg["paddleocr_api_mode"])
     if "paddleocr_api_base" in cfg:
         settings.paddleocr_api_base = cfg["paddleocr_api_base"]
     if "paddleocr_api_key" in cfg:
         settings.paddleocr_api_key = cfg["paddleocr_api_key"]
     if "paddleocr_model" in cfg:
         settings.paddleocr_model = cfg["paddleocr_model"]
+    if "paddleocr_official_api_base" in cfg:
+        settings.paddleocr_official_api_base = cfg["paddleocr_official_api_base"]
+    if "paddleocr_official_access_token" in cfg:
+        settings.paddleocr_official_access_token = cfg[
+            "paddleocr_official_access_token"
+        ]
+    if "paddleocr_official_model" in cfg:
+        settings.paddleocr_official_model = cfg["paddleocr_official_model"]
     if "paddleocr_timeout" in cfg:
         settings.paddleocr_timeout = float(cfg["paddleocr_timeout"])
     if "paddleocr_max_concurrency" in cfg:
@@ -299,6 +368,28 @@ def apply_llm_overrides() -> None:
             settings.max_pdf_pages = int(cfg["max_pdf_pages"])
         except (TypeError, ValueError):
             pass
+    if "external_api_key" in cfg:
+        settings.external_api_key = str(cfg["external_api_key"])
+    if "external_public_base_url" in cfg:
+        settings.external_public_base_url = str(cfg["external_public_base_url"])
+    if "external_max_upload_mb" in cfg:
+        try:
+            settings.external_max_upload_mb = int(cfg["external_max_upload_mb"])
+        except (TypeError, ValueError):
+            pass
+    if "external_image_dpi" in cfg:
+        try:
+            settings.external_image_dpi = int(cfg["external_image_dpi"])
+        except (TypeError, ValueError):
+            pass
+    if cfg.get("external_ocr_backend") in {"llm", "paddleocr"}:
+        settings.external_ocr_backend = str(cfg["external_ocr_backend"])
+    if "external_enable_llm_judge" in cfg:
+        settings.external_enable_llm_judge = bool(cfg["external_enable_llm_judge"])
+    if "external_enable_risk_assessment" in cfg:
+        settings.external_enable_risk_assessment = bool(
+            cfg["external_enable_risk_assessment"]
+        )
 
 
 def _maybe_import_legacy_llm_config_file() -> None:

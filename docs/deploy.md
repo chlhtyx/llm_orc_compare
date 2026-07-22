@@ -34,8 +34,20 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(`dc` 用户) |
 | `DC_DB_AUTO_MIGRATE` | `1` | 启动时自动 `alembic upgrade head`(默认开);设为 `0` 改由运维手动控制 |
 | `DC_DB_AUTO_CREATE` | 空 | 设为 `1` 时跳过 alembic 直接 `CREATE TABLE IF NOT EXISTS`(仅测试用) |
+| `DC_EXTERNAL_API_KEY` | 空 | 外部 API Key 的可选启动默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_PUBLIC_BASE_URL` | 空 | 服务公开地址的可选启动默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_MAX_UPLOAD_MB` | `50` | 外部接口单文件上限默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_IMAGE_DPI` | `144` | 全页高亮 PNG DPI 默认值；管理端设置可覆盖 |
+| `DC_EXTERNAL_OCR_BACKEND` | `paddleocr` | 外部 API 与页面测试共用的 OCR 引擎默认值 |
+| `DC_EXTERNAL_ENABLE_LLM_JUDGE` | `0` | 外部 API 是否默认启用 LLM 辅助说明 |
+| `DC_EXTERNAL_ENABLE_RISK_ASSESSMENT` | `0` | 外部 API 是否默认开启风险分级 |
 
 > LLM / OCR 配置(API Base、API Key、模型名、超时、并发等)统一持久化于 Postgres 的 `llm_config` 表,通过 UI 设置页维护,不使用环境变量。首次启动若 `./data/llm_config.json` 存在且 PG 无记录,会自动一次性导入该文件并保留文件作备份,之后不再读取。
+
+外部系统 API 配置在管理端“合同比对 API”页维护并写入 Postgres，保存后立即生效。
+上述 `DC_EXTERNAL_*` 仅作为首次启动或数据库配置不可用时的默认值。该页中的管线
+测试与正式外部接口共用 OCR/LLM 比对选项，会生成真实 OCR/比对调用和全页 PNG，
+但不会发送回调。测试文件与产物按普通任务保存在 `uploads/`、`reports/` 和任务历史中。
 
 ## 数据持久化
 
@@ -44,12 +56,13 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 | 路径 | 内容 | 容器内路径 |
 |------|------|------------|
 | `./data/uploads` | 上传的源/目标文件(docx/pdf) | `/app/.dc_data/uploads` |
+| `./data/reports` | 外部接口的标注 PDF 与逐页高亮 PNG | `/app/.dc_data/reports` |
 | `./data/logs/app.log` | 应用滚动日志(10MB×5) | `/app/.dc_data/logs/app.log` |
 | `./data/pg/` | Postgres 数据目录(任务记录、里程碑事件、**完整报告 JSONB**、**LLM/OCR 模型配置**) | `/var/lib/postgresql/data` |
 
 > `./data/llm_config.json`(旧版 LLM 配置文件)在升级后不再被读取,首次启动会自动导入 PG 一次;若文件存在,作为备份保留。
 
-**报告持久化**:比对报告 JSON、任务元数据、里程碑事件**只**写入 Postgres,不再落 `.dc_data/reports/` 文件。查询/下载端点先查内存,未命中再从 PG JSONB 还原。上传的原始 docx/pdf 仍保存在文件系统(供 `/source`、`/docx-preview`、PDF/DOCX 标注报告生成读取)。
+**报告持久化**:比对报告 JSON、任务元数据、里程碑事件写入 Postgres。上传的原始 docx/pdf 保存在文件系统；外部 API 还会把标注 PDF 和逐页 PNG 写入 `.dc_data/reports/`，因此备份时必须同时保留该目录。
 
 > 升级提示:从老版本(报告写文件)升级后,老报告 `.json` 文件不再被读取;如需保留历史可访问性,升级前用一次性脚本把它们导入 PG(`db_repo.save_compare_report` 等)。
 

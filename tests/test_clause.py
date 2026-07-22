@@ -154,6 +154,42 @@ def test_build_clauses_preserves_unnumbered_merge():
     assert "正文第二行" in clauses[0].text
 
 
+def test_build_clauses_ignores_pdf_markdown_heading_markers():
+    """OCR Markdown 的标题语法不能变成合同正文或阻断编号识别。"""
+    items = [
+        RawItem(
+            text="# 通用两页样板合同",
+            kind="paragraph",
+            page_index=0,
+            bbox=[10, 10, 210, 30],
+        ),
+        RawItem(text="## 第一条 合作内容", kind="paragraph"),
+        RawItem(text="### 1.1 服务内容", kind="paragraph"),
+        RawItem(text="服务正文。", kind="paragraph"),
+    ]
+
+    clauses = build_clauses(items, "pdf")
+
+    assert [(clause.number, clause.title) for clause in clauses] == [
+        ("", ""),
+        ("一", "合作内容"),
+        ("1.1", "服务内容"),
+    ]
+    assert clauses[0].text == "通用两页样板合同"
+    assert clauses[2].text == "服务内容\n服务正文。"
+    # 只清理用于比较的文本；定位证据仍保留 OCR 原文及坐标。
+    assert clauses[0].blocks[0].content == "# 通用两页样板合同"
+    assert clauses[0].blocks[0].bbox == [10, 10, 210, 30]
+
+
+def test_build_clauses_does_not_strip_literal_hash_text_or_word_source():
+    pdf = build_clauses([RawItem(text="#合同编号 A-001")], "pdf")
+    word = build_clauses([RawItem(text="# 合同编号 A-001")], "word")
+
+    assert pdf[0].text == "#合同编号 A-001"
+    assert word[0].text == "# 合同编号 A-001"
+
+
 def test_contract_section_titles_anchor_numbered_and_unnumbered_versions():
     word = build_clauses([
         RawItem(text="质量要求:产品应符合国家标准。"),
