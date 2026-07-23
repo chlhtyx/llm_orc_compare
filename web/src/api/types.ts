@@ -105,6 +105,13 @@ export interface CompareOptions {
   enable_risk_assessment?: boolean
   /** OCR 引擎选择(由对比页每次提交时选择);不传则用默认 llm */
   ocr_backend?: 'llm' | 'paddleocr'
+  /**
+   * 回收件页数截取:开启后,回收 PDF 页数超过原始合同时,截取到原始页数再比对。
+   * 用物理截断(生成前 N 页子集 PDF)保证 OCR/报告/高亮图在页数维度一致。
+   */
+  truncate_to_original_pages?: boolean
+  /** 原始合同页数(可选显式覆盖);不传时按 docx OOXML 分页符估算 */
+  original_page_count?: number
 }
 
 export interface TaskInfo {

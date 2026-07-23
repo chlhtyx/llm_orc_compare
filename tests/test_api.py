@@ -136,6 +136,91 @@ def test_compare_rejects_bad_options(client):
     assert r.status_code == 400
 
 
+def test_compare_accepts_truncate_options(client, monkeypatch):
+    """options 携带 truncate_to_original_pages / original_page_count 应透传到 run。"""
+    import io
+    from docx import Document  # type: ignore[import-untyped]
+
+    from document_comparison.api.app import task_manager
+
+    captured: dict = {}
+
+    async def _spy_run(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(task_manager, "run", _spy_run)
+
+    doc = Document()
+    doc.add_paragraph("第一条 测试条款")
+    doc_buf = io.BytesIO()
+    doc.save(doc_buf)
+    doc_buf.seek(0)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page(width=595, height=842)
+    pdf.save(pdf_buf)
+    pdf_buf.seek(0)
+
+    r = client.post(
+        "/api/v1/compare",
+        files={
+            "source": ("contract.docx", doc_buf,
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            "target": ("scan.pdf", pdf_buf, "application/pdf"),
+        },
+        data={
+            "options": (
+                '{"truncate_to_original_pages": true, '
+                '"original_page_count": 5}'
+            ),
+        },
+    )
+    assert r.status_code == 200, r.json()
+    assert captured.get("truncate_to_original_pages") is True
+    assert captured.get("original_page_count") == 5
+
+
+def test_compare_rejects_nonpositive_original_page_count(client):
+    """original_page_count 必须 >= 1(0 / 负数返回 400)。"""
+    import io
+    from docx import Document  # type: ignore[import-untyped]
+
+    doc = Document()
+    doc.add_paragraph("第一条 测试条款")
+    doc_buf = io.BytesIO()
+    doc.save(doc_buf)
+    doc_buf.seek(0)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page(width=595, height=842)
+    pdf.save(pdf_buf)
+    pdf_buf.seek(0)
+
+    for bad in (0, -1):
+        doc_buf.seek(0)
+        pdf_buf.seek(0)
+        r = client.post(
+            "/api/v1/compare",
+            files={
+                "source": ("contract.docx", io.BytesIO(doc_buf.getvalue()),
+                           "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                "target": ("scan.pdf", io.BytesIO(pdf_buf.getvalue()), "application/pdf"),
+            },
+            data={"options": f'{{"truncate_to_original_pages": true, "original_page_count": {bad}}}'},
+        )
+        assert r.status_code == 400, (bad, r.json())
+
+
 def test_raw_compare_accepts_valid_files(client):
     """无标注版 POST /api/v1/raw-compare 应接受 docx+pdf 并返回 task_id。"""
     import io
@@ -395,6 +480,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
             "external_ocr_backend": "llm",
             "external_enable_llm_judge": True,
             "external_enable_risk_assessment": True,
+            "external_truncate_to_original_pages": True,
         },
     )
     assert response.status_code == 200, response.json()
@@ -408,10 +494,12 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
     assert config["external_ocr_backend"] == "llm"
     assert config["external_enable_llm_judge"] is True
     assert config["external_enable_risk_assessment"] is True
+    assert config["external_truncate_to_original_pages"] is True
     assert config["external_enabled"] is True
 
     assert settings.external_api_key == "external-secret-1234"
     assert settings.external_public_base_url == "https://compare.example.com"
+    assert settings.external_truncate_to_original_pages is True
     persisted = db_repo.get_llm_config()
     assert persisted["external_api_key"] == "external-secret-1234"
 
@@ -436,6 +524,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
         {"external_ocr_backend": "other"},
         {"external_enable_llm_judge": "true"},
         {"external_enable_risk_assessment": 1},
+        {"external_truncate_to_original_pages": "yes"},
     ],
 )
 def test_external_api_config_rejects_invalid_values(client, payload):

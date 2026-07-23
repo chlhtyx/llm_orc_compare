@@ -17,7 +17,7 @@ from .models import TamperReport
 from .ocr import get_ocr_engine
 from .ocr.quality import apply_recognition_gate
 from .observability import timed_stage
-from .parsing import get_page_metas, parse_word
+from .parsing import count_pages, estimate_page_count, get_page_metas, parse_word, slice_pdf
 from .report import build_report
 from .structure import blocks_to_raw, build_clauses
 
@@ -36,6 +36,8 @@ def run_pipeline(
     enable_llm_judge: bool = False,
     ocr_backend: str | None = None,
     enable_risk_assessment: bool = False,
+    truncate_to_original_pages: bool = False,
+    original_page_count: int | None = None,
 ) -> TamperReport:
     cfg = cfg or settings
     # 标准管线需要 PDF 标注：PaddleOCR 内容无坐标时追加 Spotting 调用。
@@ -55,6 +57,30 @@ def run_pipeline(
         word_clauses = build_clauses(word_raw, "word")
     logger.info("word structured items=%s clauses=%s", len(word_raw), len(word_clauses))
     _progress("word_done", 0.08)
+
+    # —— 回收件页数截取(可选)——
+    # 回收 PDF 页数超过原始合同时,物理截取到原始页数。物理截断而非逻辑截断:
+    # 下游 burn_pdf/高亮图按 len(doc) 逐页遍历并索引 page_meta,截断后文件页数
+    # 与 page_metas/page_meta 自动一致,避免越界。
+    pdf_path = Path(pdf_path)
+    if truncate_to_original_pages:
+        orig_pages = original_page_count or estimate_page_count(word_path)
+        try:
+            pdf_pages = count_pages(pdf_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("count pdf pages failed, skip truncation: %s", exc)
+            pdf_pages = 0
+        if pdf_pages > orig_pages:
+            logger.info(
+                "truncate recovered pdf to original pages: pdf=%s original=%s -> slice",
+                pdf_pages, orig_pages,
+            )
+            pdf_path = slice_pdf(pdf_path, orig_pages)
+        else:
+            logger.info(
+                "truncate option on but no truncation needed: pdf=%s original=%s",
+                pdf_pages, orig_pages,
+            )
 
     # —— ① PDF + ② OCR + ③ 切分 ——
     _progress("ocr", 0.10)

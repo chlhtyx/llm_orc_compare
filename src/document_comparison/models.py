@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # —— 枚举(用 Literal,JSON 友好)——
 DocType = Literal["word", "pdf"]
@@ -280,6 +280,19 @@ class CompareOptions(BaseModel):
     enable_risk_assessment: bool = False
     # OCR 引擎选择(每次提交时由对比页选择);None 表示用默认 llm。
     ocr_backend: Literal["llm", "paddleocr"] | None = None
+    # 回收件页数截取:开启后,回收 PDF 页数超过原始合同时,截取到原始页数再比对。
+    # 用物理截断(生成前 N 页子集 PDF)保证 OCR/报告/高亮图在页数维度一致。
+    truncate_to_original_pages: bool = False
+    # 原始合同页数(可选显式覆盖);不传时按 docx OOXML 分页符估算。
+    # 外部系统已知真实页数时应优先传此值,避免渲染器差异导致的估算偏差。
+    original_page_count: int | None = None
+
+    @field_validator("original_page_count")
+    @classmethod
+    def _check_original_page_count(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("original_page_count 必须 >= 1")
+        return v
 
 
 class RawCompareOptions(BaseModel):

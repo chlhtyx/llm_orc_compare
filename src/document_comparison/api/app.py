@@ -425,6 +425,7 @@ def create_app() -> FastAPI:
             "external_max_upload_mb", "external_image_dpi",
             "external_ocr_backend", "external_enable_llm_judge",
             "external_enable_risk_assessment",
+            "external_truncate_to_original_pages",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
@@ -535,6 +536,9 @@ def create_app() -> FastAPI:
         if "external_enable_risk_assessment" in body:
             if not isinstance(body["external_enable_risk_assessment"], bool):
                 raise HTTPException(400, "external_enable_risk_assessment 必须为布尔值")
+        if "external_truncate_to_original_pages" in body:
+            if not isinstance(body["external_truncate_to_original_pages"], bool):
+                raise HTTPException(400, "external_truncate_to_original_pages 必须为布尔值")
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
         overrides = dict(body)
@@ -599,6 +603,7 @@ def create_app() -> FastAPI:
                 "external_ocr_backend": settings.external_ocr_backend,
                 "external_enable_llm_judge": settings.external_enable_llm_judge,
                 "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+                "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
                 "external_enabled": external_config_enabled(),
             },
         }
@@ -666,6 +671,7 @@ def create_app() -> FastAPI:
                 enable_llm_judge=settings.external_enable_llm_judge,
                 ocr_backend=settings.external_ocr_backend,
                 enable_risk_assessment=settings.external_enable_risk_assessment,
+                truncate_to_original_pages=settings.external_truncate_to_original_pages,
             )
         )
         return {"task_id": task_id, "document_no": document_no, "status": "pending"}
@@ -789,6 +795,7 @@ def create_app() -> FastAPI:
             enable_llm_judge=settings.external_enable_llm_judge,
             ocr_backend=settings.external_ocr_backend,
             enable_risk_assessment=settings.external_enable_risk_assessment,
+            truncate_to_original_pages=settings.external_truncate_to_original_pages,
         )
         if sync:
             # 同步模式:阻塞至比对完成,直接在响应体内返回完整结果。
@@ -865,12 +872,16 @@ def create_app() -> FastAPI:
         enable_llm_judge = False
         ocr_backend: str | None = None
         enable_risk_assessment = False
+        truncate_to_original_pages = False
+        original_page_count: int | None = None
         if options:
             try:
                 opts = CompareOptions.model_validate_json(options)
                 enable_llm_judge = opts.enable_llm_judge
                 ocr_backend = opts.ocr_backend
                 enable_risk_assessment = opts.enable_risk_assessment
+                truncate_to_original_pages = opts.truncate_to_original_pages
+                original_page_count = opts.original_page_count
                 if (
                     opts.similarity_identical is not None
                     or opts.similarity_modified is not None
@@ -923,6 +934,8 @@ def create_app() -> FastAPI:
                 enable_llm_judge=enable_llm_judge,
                 ocr_backend=ocr_backend,
                 enable_risk_assessment=enable_risk_assessment,
+                truncate_to_original_pages=truncate_to_original_pages,
+                original_page_count=original_page_count,
             )
         )
         return {"task_id": task_id, "status": "pending"}

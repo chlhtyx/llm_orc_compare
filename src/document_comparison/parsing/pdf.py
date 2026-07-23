@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 
 try:  # PyMuPDF 新版包名 pymupdf,旧版为 fitz
@@ -34,6 +35,35 @@ def count_pages_from_bytes(data: bytes) -> int:
     """与 count_pages 相同,但接收内存中的 PDF 字节(供上传预检使用)。"""
     with fitz.open(stream=data, filetype="pdf") as doc:
         return len(doc)
+
+
+def slice_pdf(src: str | Path, n_pages: int) -> Path:
+    """生成只含前 n_pages 页的 PDF,返回其路径(临时文件)。
+
+    用于「回收件页数截取」:回收 PDF 页数超过原始合同时,物理截断到原始页数
+    再走流水线,使 OCR / build_report / burn_pdf / 高亮图渲染等全部下游在
+    页数维度上自动一致(下游按 `len(doc)` 逐页遍历并索引 `page_meta`)。
+
+    `n_pages <= 0` 或 `n_pages >= 现有页数` 时直接返回原路径(不复制),避免
+    无意义或越界的截断(PyMuPDF 的 to_page=-1 会复制全部页,语义反直觉)。
+    """
+    src = Path(src)
+    n_pages = int(n_pages)
+    if n_pages <= 0:
+        return src
+    with fitz.open(str(src)) as doc:
+        total = len(doc)
+        if n_pages >= total:
+            return src
+        out_path = Path(tempfile.mkstemp(prefix="dc-slice-", suffix=".pdf")[1])
+        subset = fitz.open()
+        try:
+            subset.insert_pdf(doc, from_page=0, to_page=n_pages - 1)
+            subset.save(str(out_path))
+        finally:
+            subset.close()
+    logger.info("pdf sliced src=%s total=%s -> %s pages", src.name, total, n_pages)
+    return out_path
 
 
 def get_page_metas(path: str | Path, dpi: int = 300) -> list[PageMeta]:

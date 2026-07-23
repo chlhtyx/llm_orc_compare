@@ -94,6 +94,30 @@ def _table_to_structure(table: Table) -> TableStructure | None:
     return TableStructure(headers=headers, rows=rows)
 
 
+def estimate_page_count(path: str | Path) -> int:
+    """估算 Word 文档页数(用于回收件页数截取)。
+
+    .docx 无固定分页(取决于渲染器),这里通过 OOXML 中的分页标记做保守估算:
+    - `<w:br w:type="page"/>`:显式手动分页符。
+    - `<w:lastRenderedPageBreak/>`:Word 上次保存时记录的软分页位置
+      (仅由 Word 写入,LibreOffice 等不一定生成,缺失时估算会偏少)。
+
+    页数 = 命中数 + 1(末尾内容默认占一页),最小钳制为 1。
+    这只是近似值;调用方已知真实页数时应直接传 original_page_count 覆盖。
+    """
+    from docx.oxml.ns import qn  # type: ignore[import-untyped]
+
+    doc = Document(str(path))
+    body = doc.element.body
+    breaks = 0
+    for child in body.iter():
+        if child.tag == qn("w:br") and child.get(qn("w:type")) == "page":
+            breaks += 1
+        elif child.tag == qn("w:lastRenderedPageBreak"):
+            breaks += 1
+    return max(1, breaks + 1)
+
+
 def parse_word(path: str | Path) -> list[RawItem]:
     """把 Word 文档解析为 RawItem 列表(文档流顺序即阅读顺序)。"""
     started_at = time.perf_counter()

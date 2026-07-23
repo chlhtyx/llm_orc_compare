@@ -145,6 +145,12 @@ class Settings:
             "DC_EXTERNAL_ENABLE_RISK_ASSESSMENT", "0"
         ).lower() in ("1", "true", "yes")
     )
+    # 外部接口默认:回收件页数截取(回收 PDF 超过原始合同时,截取到原始页数再比对)。
+    external_truncate_to_original_pages: bool = field(
+        default_factory=lambda: _env(
+            "DC_EXTERNAL_TRUNCATE_TO_ORIGINAL_PAGES", "0"
+        ).lower() in ("1", "true", "yes")
+    )
 
     # —— Postgres(SQLAlchemy 引擎;硬依赖,未配置时启动失败)——
     # 连接串示例:postgresql+psycopg://dc:dcpass@localhost:5432/doc_compare
@@ -218,6 +224,7 @@ _LLM_CONFIG_FIELDS = (
     "external_ocr_backend",
     "external_enable_llm_judge",
     "external_enable_risk_assessment",
+    "external_truncate_to_original_pages",
 )
 
 # dataclass 字段默认值,供 PG 无记录时合并使用(不再写入种子配置)。
@@ -257,6 +264,7 @@ _LLM_DEFAULTS: dict = {
     "external_ocr_backend": settings.external_ocr_backend,
     "external_enable_llm_judge": settings.external_enable_llm_judge,
     "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+    "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
 }
 
 def _legacy_llm_config_path() -> Path:
@@ -389,6 +397,10 @@ def apply_llm_overrides() -> None:
     if "external_enable_risk_assessment" in cfg:
         settings.external_enable_risk_assessment = bool(
             cfg["external_enable_risk_assessment"]
+        )
+    if "external_truncate_to_original_pages" in cfg:
+        settings.external_truncate_to_original_pages = bool(
+            cfg["external_truncate_to_original_pages"]
         )
 
 

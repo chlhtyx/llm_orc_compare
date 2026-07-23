@@ -21,6 +21,7 @@ const form = reactive({
   external_ocr_backend: 'paddleocr' as 'llm' | 'paddleocr',
   external_enable_llm_judge: false,
   external_enable_risk_assessment: false,
+  external_truncate_to_original_pages: false,
 })
 
 const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWith('.docx'))
@@ -40,6 +41,7 @@ function syncFromConfig(config: LlmConfig | null): void {
   form.external_ocr_backend = config.external_ocr_backend || 'paddleocr'
   form.external_enable_llm_judge = config.external_enable_llm_judge ?? false
   form.external_enable_risk_assessment = config.external_enable_risk_assessment ?? false
+  form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
   keyDirty.value = false
 }
 
@@ -63,6 +65,7 @@ async function onSave(): Promise<void> {
     external_enable_llm_judge:
       form.external_enable_risk_assessment && form.external_enable_llm_judge,
     external_enable_risk_assessment: form.external_enable_risk_assessment,
+    external_truncate_to_original_pages: form.external_truncate_to_original_pages,
   })
   if (!ok) {
     saveError.value = configStore.error
@@ -217,6 +220,17 @@ async function onReset(): Promise<void> {
               type="checkbox"
               role="switch"
               :disabled="!form.external_enable_risk_assessment"
+            />
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>回收件页数截取</strong>
+              <small>回收 PDF 超过原始合同页数时，自动截取前 N 页再比对。</small>
+            </span>
+            <input
+              v-model="form.external_truncate_to_original_pages"
+              type="checkbox"
+              role="switch"
             />
           </label>
         </div>

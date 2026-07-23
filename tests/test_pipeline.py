@@ -249,3 +249,90 @@ def test_pipeline_recovers_inline_pdf_boundaries_and_marks_only_real_change(tmp_
     annotated_pdf = tmp_path / "annotated.pdf"
     burn_pdf(ppath, report, annotated_pdf)
     assert annotated_pdf.exists() and annotated_pdf.stat().st_size > 0
+
+
+def _make_multipage_pdf(tmp_path: Path, n_pages: int) -> Path:
+    """生成 n 页的文本层 PDF,每页写入唯一页码文本。"""
+    path = tmp_path / f"{n_pages}p.pdf"
+    pdf = fitz.open()
+    for i in range(n_pages):
+        page = pdf.new_page(width=595, height=842)
+        page.insert_text((72, 100), f"PAGE-{i}", fontname="helv", fontsize=24)
+    pdf.save(path)
+    pdf.close()
+    return path
+
+
+def test_pipeline_truncates_pdf_when_exceeds_original_pages(tmp_path: Path):
+    """开启截取且回收 PDF 页数 > 估算原始页数时,按原始页数截取后比对。
+
+    Word 无分页符 -> 估算 1 页;回收 PDF 3 页 -> 截取到 1 页。
+    验证:report.page_meta 仅 1 页,且 burn_pdf(下游按 len(doc) 逐页渲染)不抛。
+    """
+    word_buf = _make_word([
+        ("h1", "第一条 合同标的"),
+        ("p", "甲方提供设备。"),
+    ])
+    wpath = tmp_path / "c.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    ppath = _make_multipage_pdf(tmp_path, 3)
+
+    report = run_pipeline(
+        wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding(),
+        truncate_to_original_pages=True,
+    )
+    # 截断后只剩 1 页(原始合同估算页数)
+    assert len(report.page_meta) == 1
+    assert report.page_meta[0].page_index == 0
+
+    # 下游 burn_pdf 必须能在截断后的 PDF 上逐页渲染而不越界
+    annotated = tmp_path / "annotated.pdf"
+    burn_pdf(ppath, report, annotated)
+    assert annotated.exists() and annotated.stat().st_size > 0
+
+
+def test_pipeline_truncate_respects_explicit_page_count(tmp_path: Path):
+    """显式 original_page_count 覆盖 docx 估算:2 页 PDF 中保留 2 页中的前 1 页。"""
+    word_buf = _make_word([
+        ("h1", "第一条 合同标的"),
+        ("p", "甲方提供设备。"),
+    ])
+    wpath = tmp_path / "c.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    # 回收 PDF 2 页,显式指定原始合同 1 页
+    ppath = _make_multipage_pdf(tmp_path, 2)
+
+    report = run_pipeline(
+        wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding(),
+        truncate_to_original_pages=True, original_page_count=1,
+    )
+    assert len(report.page_meta) == 1
+
+
+def test_pipeline_no_truncation_when_pdf_within_original_pages(tmp_path: Path):
+    """回收 PDF 页数 <= 原始页数时不截取:页数不变。"""
+    word_buf = _make_word([
+        ("h1", "第一条 合同标的"),
+        ("p", "甲方提供设备。"),
+    ])
+    wpath = tmp_path / "c.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    # 估算 1 页,PDF 也 1 页 -> 不截取
+    ppath = _make_multipage_pdf(tmp_path, 1)
+
+    report = run_pipeline(
+        wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding(),
+        truncate_to_original_pages=True,
+    )
+    assert len(report.page_meta) == 1
+
+
+def test_pipeline_truncate_off_by_default(tmp_path: Path):
+    """默认不开启截取:回收 PDF 多页保持不变。"""
+    word_buf = _make_word([("h1", "第一条 合同标的"), ("p", "甲方提供设备。")])
+    wpath = tmp_path / "c.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    ppath = _make_multipage_pdf(tmp_path, 3)
+
+    report = run_pipeline(wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding())
+    assert len(report.page_meta) == 3
