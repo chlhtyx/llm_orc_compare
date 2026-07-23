@@ -569,6 +569,13 @@ onMounted(refresh)
 </template>
 
 <style scoped>
+/* 本页表格列较多,突破全局 .app-main 的 1080px 限制,
+   让卡片按视口宽度的 98% 居中显示,留出 1% 两侧呼吸空间。 */
+.history {
+  width: 98vw;
+  margin-left: calc(50% - 49vw);
+  margin-right: calc(50% - 49vw);
+}
 .toolbar {
   padding: 18px 24px 16px;
 }

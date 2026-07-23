@@ -296,23 +296,6 @@ margin-bottom: 12px;
 display: flex;
 gap: 6px;
 }
-.chip {
-background: var(--surface);
-border: 1px solid var(--border);
-border-radius: 999px;
-padding: 4px 12px;
-font-size: 12px;
-cursor: pointer;
-color: var(--text-muted);
-}
-.chip:hover {
-background: var(--surface-2);
-}
-.chip.on {
-background: var(--primary);
-border-color: var(--primary);
-color: #fff;
-}
 .err {
 color: var(--risk-high);
 }
