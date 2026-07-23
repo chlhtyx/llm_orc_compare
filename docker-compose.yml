@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:0.0.33
+    image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:${DC_VERSION}
     container_name: llm-ocr-compare
     platform: linux/amd64
     restart: unless-stopped
@@ -40,6 +40,15 @@ services:
     environment:
       # DATABASE_URL 内部走服务名 + 容器内端口 5432(不是宿主映射端口)。
       DATABASE_URL: postgresql+psycopg://dc:${POSTGRES_PASSWORD:-dcpass}@postgres:5432/doc_compare
+      # Postgres 连接池与迁移(可选透传;未设置时用代码默认:pool 5 / overflow 10 / timeout 30s / 自动迁移开)。
+      # 启用多 worker 时注意:N workers × (pool+overflow) 需 ≤ PG max_connections(默认 100)。
+      DC_DB_AUTO_MIGRATE: ${DC_DB_AUTO_MIGRATE:-1}
+      DC_DB_POOL_SIZE: ${DC_DB_POOL_SIZE:-5}
+      DC_DB_MAX_OVERFLOW: ${DC_DB_MAX_OVERFLOW:-10}
+      DC_DB_POOL_TIMEOUT: ${DC_DB_POOL_TIMEOUT:-30.0}
+      # 多 worker / 并发上限(可选透传,默认 1 worker、4 并发,与单进程行为一致)。
+      DC_UVICORN_WORKERS: ${DC_UVICORN_WORKERS:-1}
+      DC_MAX_CONCURRENT_TASKS: ${DC_MAX_CONCURRENT_TASKS:-4}
     volumes:
       # 绑定宿主目录:持久化 uploads 文件与日志(logs/app.log)
       # LLM/OCR 配置写入同栈 Postgres(llm_config 表),不再读写此卷下的 llm_config.json

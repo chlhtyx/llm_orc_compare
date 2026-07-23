@@ -29,34 +29,98 @@ const canSubmit = computed(
   () => props.enabled && sourceValid.value && targetValid.value && !submitting.value && !running.value,
 )
 const progressPercent = computed(() => Math.round((info.value?.progress ?? 0) * 100))
-const resultClass = computed(() => `result-${info.value?.result?.change_status ?? 'clean'}`)
+const resultClass = computed(() => `result-${info.value?.change_status ?? 'clean'}`)
 const resultLabel = computed(() => ({
   clean: '未发现内容变化',
   changed: '发现确认内容变化',
   needs_review: '存在待人工复核',
-}[info.value?.result?.change_status ?? 'clean']))
+}[info.value?.change_status ?? 'clean']))
 const exampleBaseUrl = computed(
   () => props.publicBaseUrl.trim().replace(/\/$/, '') || 'https://compare.example.com',
 )
-const callExample = computed(() => [
-  '# 1. 提交异步比对任务(加 -F sync=true 可改为同步,直接在响应体内拿结果)',
-  `curl -X POST '${exampleBaseUrl.value}/api/v1/external/contractCompare' \\`,
-  "  -H 'X-API-Key: <YOUR_API_KEY>' \\",
-  "  -F 'source=@./original-contract.docx' \\",
-  "  -F 'target=@./returned-contract.pdf' \\",
-  "  -F 'document_no=DOC-2026-0001' \\",
-  "  -F 'callback_url=https://business.example.com/callbacks/contract-compare' \\",
-  "  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'  # 可选,留空则回调不带签名",
-  '',
-  '# 2. 使用提交响应中的 task_id 查询结果(同步模式无需此步)',
-  `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
-  `  '${exampleBaseUrl.value}/api/v1/external/contractCompare/<TASK_ID>'`,
-  '',
-  '# 3. 下载指定页高亮 PNG',
-  `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
-  "  -o page-0001.png \\",
-  `  '${exampleBaseUrl.value}/api/v1/external/contractCompare/<TASK_ID>/images/1'`,
-].join('\n'))
+const callExample = computed(() => {
+  const base = exampleBaseUrl.value
+  const taskId = '<TASK_ID>'
+  const endpoint = `${base}/api/v1/external/contractCompare`
+  return [
+    '# ===== 1. 异步模式(默认:sync 缺省或 false)=====',
+    '# 提交后立即返回 task_id,callback_url 必填,结果经回调或查询端点获取。',
+    `curl -X POST '${endpoint}' \\`,
+    "  -H 'X-API-Key: <YOUR_API_KEY>' \\",
+    "  -F 'source=@./original-contract.docx' \\",
+    "  -F 'target=@./returned-contract.pdf' \\",
+    "  -F 'document_no=DOC-2026-0001' \\",
+    "  -F 'callback_url=https://business.example.com/callbacks/contract-compare' \\",
+    '# 提交返回(HTTP 202):',
+    '# {',
+    '#   "task_id": "a1b2c3d4e5f6",',
+    '#   "document_no": "DOC-2026-0001",',
+    '#   "status": "pending"',
+    '# }',
+    '',
+    '# 用 task_id 查询完整结果(同步模式无需此步):',
+    `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
+    `  '${endpoint}/${taskId}'`,
+    '',
+    '# ===== 2. 同步模式(sync=true)=====',
+    '# HTTP 保持至比对完成,结果直接在响应体内;callback_url 非必填。',
+    `curl -X POST '${endpoint}' \\`,
+    "  -H 'X-API-Key: <YOUR_API_KEY>' \\",
+    "  -F 'source=@./original-contract.docx' \\",
+    "  -F 'target=@./returned-contract.pdf' \\",
+    "  -F 'document_no=DOC-2026-0001' \\",
+    "  -F 'sync=true'",
+    '',
+    '# 同步提交 / 异步查询返回(HTTP 200,顶层扁平结构,识别状态与高亮定位并入 result_text):',
+    '# {',
+    `#   "task_id": "${taskId}",`,
+    '#   "document_no": "DOC-2026-0001",',
+    '#   "status": "done",',
+    '#   "stage": "done",',
+    '#   "progress": 1.0,',
+    '#   "error": null,',
+    '#   "change_status": "changed",            // clean / changed / needs_review',
+    '#   "result_text": "单据号：DOC-2026-0001\\n结论：发现确认内容变化\\n识别状态：可靠\\n高亮定位：完整\\n差异数量：3\\n[1] ...",',
+    '#   "highlight_images": [',
+    `#     "${endpoint}/${taskId}/images/1",`,
+    `#     "${endpoint}/${taskId}/images/2"`,
+    '#   ],',
+    `#   "result_url": "${endpoint}/${taskId}"`,
+    '# }',
+    '# 任务失败时 status="failed"、error 为失败原因,其余结果字段缺省。',
+    '',
+    '# ===== 3. 完成回调(异步模式 callback_url 非空时触发)=====',
+    '# 服务端向 callback_url POST,请求头:',
+    '#   Content-Type: application/json',
+    '#   X-Event-Id: <UUID>          // 与 body 中 event_id 一致,幂等去重用',
+    '# 完成回调 body:',
+    '# {',
+    '#   "event_id": "9f2c1b7a-...",',
+    `#   "task_id": "${taskId}",`,
+    '#   "status": "done",',
+    '#   "event_type": "contract.compare.completed",',
+    '#   "document_no": "DOC-2026-0001",',
+    '#   "change_status": "changed",',
+    '#   "result_text": "...(同查询 result_text)",',
+    '#   "highlight_images": [".../images/1", ".../images/2"],',
+    `#   "result_url": "${endpoint}/${taskId}"`,
+    '# }',
+    '# 失败回调 body(status=failed,仅含失败原因):',
+    '# {',
+    '#   "event_id": "9f2c1b7a-...",',
+    `#   "task_id": "${taskId}",`,
+    '#   "status": "failed",',
+    '#   "event_type": "contract.compare.failed",',
+    '#   "document_no": "DOC-2026-0001",',
+    '#   "error": "OCR 解析失败"',
+    '# }',
+    '',
+    '# ===== 4. 下载指定页高亮 PNG(响应体为二进制 PNG)=====',
+    `curl -H 'X-API-Key: <YOUR_API_KEY>' \\`,
+    "  -o page-0001.png \\",
+    `  '${endpoint}/${taskId}/images/1'`,
+  ].join('\n')
+})
 
 function stopPolling(): void {
   if (pollTimer) clearTimeout(pollTimer)
@@ -159,32 +223,31 @@ onBeforeUnmount(() => {
     </p>
     <p v-if="error || info?.error" class="err">{{ error || info?.error }}</p>
 
-    <div v-if="info?.status === 'done' && info.result" class="test-result" :class="resultClass">
+    <div v-if="info?.status === 'done' && info.change_status" class="test-result" :class="resultClass">
       <div class="result-heading">
         <strong>管线测试完成</strong>
         <span>{{ resultLabel }}</span>
       </div>
-      <pre>{{ info.result.result_text }}</pre>
+      <pre>{{ info.result_text }}</pre>
 
       <div v-if="info.highlight_images?.length" class="image-section">
         <h4>逐页高亮图片（{{ info.highlight_images.length }} 页）</h4>
         <div class="image-grid">
           <a
-            v-for="item in info.highlight_images"
-            :key="item.page_number"
-            :href="imageUrl(item.page_number)"
+            v-for="(_url, index) in info.highlight_images"
+            :key="index + 1"
+            :href="imageUrl(index + 1)"
             target="_blank"
             rel="noopener"
             class="image-card"
           >
             <img
-              :src="imageUrl(item.page_number)"
-              :alt="`第 ${item.page_number} 页高亮结果`"
+              :src="imageUrl(index + 1)"
+              :alt="`第 ${index + 1} 页高亮结果`"
               loading="lazy"
             />
             <span>
-              第 {{ item.page_number }} 页
-              <em>{{ item.has_highlight ? '有高亮' : '无高亮' }}</em>
+              第 {{ index + 1 }} 页
             </span>
           </a>
         </div>

@@ -47,11 +47,8 @@ async def test_external_task_callback_contract(monkeypatch):
         "build_external_result",
         lambda *_a: {
             "change_status": "clean",
-            "recognition_status": "reliable",
-            "location_status": "complete",
-            "summary": {"status_counts": {}},
             "result_text": "未发现内容变化",
-            "highlight_images": [{"page_number": 1, "has_highlight": False, "url": "u"}],
+            "highlight_images": ["u"],
             "result_url": "https://example.test/result",
         },
     )
@@ -74,11 +71,10 @@ async def test_external_task_callback_contract(monkeypatch):
 
     delivered: dict = {}
 
-    async def _deliver(url, raw, secret, event_id, **_kwargs):
+    async def _deliver(url, raw, event_id, **_kwargs):
         delivered.update(
             url=url,
             body=json.loads(raw),
-            secret=secret,
             event_id=event_id,
         )
         return {"success": True, "http_status": 200, "error": None}
@@ -88,7 +84,6 @@ async def test_external_task_callback_contract(monkeypatch):
     task_id = manager.create(
         "compare",
         callback_url="http://internal/hook",
-        callback_secret="secret",
         document_no="BILL-1",
         external_request=True,
     )
@@ -99,8 +94,8 @@ async def test_external_task_callback_contract(monkeypatch):
     assert body["event_type"] == "contract.compare.completed"
     assert body["task_id"] == task_id
     assert body["document_no"] == "BILL-1"
-    assert body["result"]["result_text"] == "未发现内容变化"
-    assert body["highlight_images"][0]["page_number"] == 1
+    assert body["result_text"] == "未发现内容变化"
+    assert body["highlight_images"] == ["u"]
     assert body["result_url"] == "https://example.test/result"
     assert delivered["event_id"] == body["event_id"]
     # 交付结果应回写为成功
@@ -133,7 +128,7 @@ async def test_external_image_failure_sends_failed_callback(monkeypatch):
 
     delivered: dict = {}
 
-    async def _deliver(_url, raw, _secret, _event_id, **_kwargs):
+    async def _deliver(_url, raw, _event_id, **_kwargs):
         delivered.update(json.loads(raw))
         return {"success": True, "http_status": 200, "error": None}
 
@@ -142,7 +137,6 @@ async def test_external_image_failure_sends_failed_callback(monkeypatch):
     task_id = manager.create(
         "compare",
         callback_url="http://internal/hook",
-        callback_secret="secret",
         document_no="BILL-2",
         external_request=True,
     )
@@ -156,64 +150,73 @@ async def test_external_image_failure_sends_failed_callback(monkeypatch):
     assert delivered["error"] == "image render failed"
 
 
-async def test_external_callback_fires_without_secret(monkeypatch):
-    """callback_secret 非必填:留空时回调仍触发,deliver 收到 secret=None。"""
+# —— event_stream(从 PG task_events 增量推送里程碑)——
+
+
+class _FakeEvent:
+    """模拟 TaskEvent ORM 对象,仅含 event_stream 用到的字段。"""
+
+    def __init__(self, id, stage, progress, stage_timings):
+        self.id = id
+        self.stage = stage
+        self.progress = progress
+        self.stage_timings = stage_timings
+
+
+async def test_event_stream_reads_milestones_from_pg(monkeypatch):
+    """event_stream 应从 PG 增量拉里程碑,并在终态后退出。"""
     from document_comparison import tasks as tasks_module
-    from document_comparison.models import TamperReport
     from document_comparison.tasks import TaskManager
 
-    report = TamperReport(
-        source="source.docx",
-        target="target.pdf",
-        overall_risk="clean",
-        change_status="clean",
-        summary={"status_counts": {}},
-    )
-    monkeypatch.setattr(tasks_module, "run_pipeline", lambda *_a, **_kw: report)
-    monkeypatch.setattr(tasks_module, "render_external_highlight_images", lambda *_a: [])
+    # 模拟两次轮询:第一次返回 start 里程碑(running),第二次返回 done 里程碑(终态)。
+    events_db = {
+        0: [_FakeEvent(1, "start", 0.0, {})],
+        1: [_FakeEvent(2, "done", 1.0, {"ocr": 5.0})],
+        # 终态后再拉一次(id=2 已发,返回空)
+    }
+    status_seq = iter(["running", "done"])
+
+    def _events_after(task_id, last_id):
+        return events_db.get(last_id, [])
+
+    def _status(task_id):
+        return next(status_seq)
+
+    monkeypatch.setattr(tasks_module.db_repo, "get_task_events_after", _events_after)
+    monkeypatch.setattr(tasks_module.db_repo, "get_task_status", _status)
     monkeypatch.setattr(
-        tasks_module,
-        "build_external_result",
-        lambda *_a: {
-            "change_status": "clean",
-            "recognition_status": "reliable",
-            "location_status": "complete",
-            "summary": {"status_counts": {}},
-            "result_text": "未发现内容变化",
-            "highlight_images": [],
-            "result_url": "https://example.test/result",
-        },
+        "document_comparison.tasks.asyncio.sleep", lambda _t: _noop_coro()
     )
-    for name in (
-        "create_task", "update_task_status", "save_milestone_event",
-        "save_compare_report", "save_llm_calls_batch", "update_callback_result",
-    ):
-        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
 
-    delivered: dict = {}
-
-    async def _deliver(url, raw, secret, event_id, **_kwargs):
-        delivered.update(
-            url=url,
-            body=json.loads(raw),
-            secret=secret,
-            event_id=event_id,
-        )
-        return {"success": True, "http_status": 200, "error": None}
-
-    monkeypatch.setattr(tasks_module.webhook, "deliver", _deliver)
     manager = TaskManager()
-    # 提交时不带 callback_secret
-    task_id = manager.create(
-        "compare",
-        callback_url="http://internal/hook",
-        document_no="BILL-NO-SECRET",
-        external_request=True,
+    collected = []
+    async for ev in manager.event_stream("t1"):
+        collected.append(ev)
+
+    # 应只含两条里程碑,且 stage/progress/timings 正确
+    assert [e["stage"] for e in collected] == ["start", "done"]
+    assert collected[1]["stage_timings"] == {"ocr": 5.0}
+
+
+async def test_event_stream_returns_when_task_not_found(monkeypatch):
+    """任务不存在(status=None)时,event_stream 立即返回,不产生任何事件。"""
+    from document_comparison import tasks as tasks_module
+    from document_comparison.tasks import TaskManager
+
+    monkeypatch.setattr(
+        tasks_module.db_repo, "get_task_events_after", lambda *_a, **_kw: []
     )
+    monkeypatch.setattr(tasks_module.db_repo, "get_task_status", lambda *_a, **_kw: None)
 
-    await manager.run(task_id, "source.docx", "target.pdf")
+    manager = TaskManager()
+    collected = []
+    async for ev in manager.event_stream("missing"):
+        collected.append(ev)
 
-    # 回调仍触发,且 deliver 收到的 secret 为 None(调用方据此省略 X-Signature)
-    assert delivered["url"] == "http://internal/hook"
-    assert delivered["body"]["task_id"] == task_id
-    assert delivered["secret"] is None
+    assert collected == []
+
+
+async def _noop_coro():
+    """给 monkeypatch asyncio.sleep 用的空 awaitable。"""
+    return None
+

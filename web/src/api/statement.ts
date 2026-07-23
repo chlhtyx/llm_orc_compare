@@ -17,7 +17,6 @@ export interface StatementSubmitArgs {
   targets: File[]
   options?: StatementOptions
   callbackUrl?: string
-  callbackSecret?: string
 }
 
 export function submitStatement(
@@ -28,7 +27,6 @@ export function submitStatement(
   args.targets.forEach((f) => form.append('target', f))
   if (args.options) form.append('options', JSON.stringify(args.options))
   if (args.callbackUrl) form.append('callback_url', args.callbackUrl)
-  if (args.callbackSecret) form.append('callback_secret', args.callbackSecret)
   return request('/api/v1/statement', { method: 'POST', body: form })
 }
 

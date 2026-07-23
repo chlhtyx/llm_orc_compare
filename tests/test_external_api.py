@@ -129,7 +129,6 @@ def test_external_submit_echoes_document_no_and_allows_duplicates(
     data = {
         "document_no": "BILL-2026-001",
         "callback_url": "http://10.0.0.8/callback",
-        "callback_secret": "callback-secret",
     }
 
     def submit():
@@ -152,44 +151,6 @@ def test_external_submit_echoes_document_no_and_allows_duplicates(
     task = task_manager.get(first.json()["task_id"])
     assert task is not None and task.external_request is True
     assert task.document_no == "BILL-2026-001"
-
-
-def test_external_submit_accepts_missing_or_blank_callback_secret(
-    external_client, monkeypatch
-):
-    """callback_secret 非必填:缺失或空白均应接受,且归一化为 None。"""
-    from document_comparison.api.app import task_manager
-
-    async def _no_run(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(task_manager, "run", _no_run)
-    headers = {"X-API-Key": "external-test-key"}
-
-    def submit(secret_value):
-        data = {
-            "document_no": "BILL-NO-SECRET",
-            "callback_url": "http://10.0.0.8/callback",
-        }
-        if secret_value is not None:
-            data["callback_secret"] = secret_value
-        return external_client.post(
-            "/api/v1/external/contractCompare",
-            headers=headers,
-            data=data,
-            files={
-                "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
-                "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
-            },
-        )
-
-    for secret_value in (None, "   "):
-        response = submit(secret_value)
-        assert response.status_code == 202, response.json()
-        task = task_manager.get(response.json()["task_id"])
-        assert task is not None
-        assert task.callback_url == "http://10.0.0.8/callback"
-        assert task.callback_secret is None
 
 
 def test_compare_page_api_test_reuses_external_artifact_flow_without_callback(
@@ -217,7 +178,7 @@ def test_compare_page_api_test_reuses_external_artifact_flow_without_callback(
     task = task_manager.get(body["task_id"])
     assert task is not None
     assert task.external_request is True
-    assert task.callback_url is None and task.callback_secret is None
+    assert task.callback_url is None
     assert captured["kwargs"]["enable_llm_judge"] is False
     assert captured["kwargs"]["ocr_backend"] == "paddleocr"
     assert captured["kwargs"]["enable_risk_assessment"] is False
@@ -251,7 +212,6 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
         data={
             "document_no": "BILL-OPTIONS",
             "callback_url": "http://internal/callback",
-            "callback_secret": "secret",
         },
         files={
             "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
@@ -291,7 +251,6 @@ def test_external_submit_validation(external_client, data_override, expected):
     data = {
         "document_no": "BILL-1",
         "callback_url": "http://internal/callback",
-        "callback_secret": "secret",
         **data_override,
     }
     response = external_client.post(
@@ -315,7 +274,6 @@ def test_external_upload_limit(external_client, monkeypatch):
         data={
             "document_no": "BILL-1",
             "callback_url": "http://internal/callback",
-            "callback_secret": "secret",
         },
         files={
             "source": ("source.docx", io.BytesIO(b"x" * (1024 * 1024 + 1)), "application/octet-stream"),
@@ -358,8 +316,8 @@ def test_external_sync_returns_inline_result_without_callback_url(
     body = response.json()
     assert body["status"] == "done"
     assert body["document_no"] == "BILL-SYNC"
-    assert body["result"]["change_status"] == "changed"
-    assert "result_text" in body["result"]
+    assert body["change_status"] == "changed"
+    assert "result_text" in body
     assert "highlight_images" in body
     assert "result_url" in body
     task = task_manager.get(body["task_id"])
@@ -460,7 +418,7 @@ def test_external_query_and_image_download(external_client, monkeypatch, tmp_pat
     assert response.status_code == 200
     body = response.json()
     assert body["document_no"] == "BILL-QUERY"
-    assert body["result"]["change_status"] == "changed"
+    assert body["change_status"] == "changed"
     assert len(body["highlight_images"]) == 2
 
     image = external_client.get(
@@ -491,7 +449,7 @@ def test_compare_page_api_test_query_and_image_preview(external_client, monkeypa
 
     response = external_client.get(f"/api/v1/compare/api-test/{task_id}")
     assert response.status_code == 200
-    assert response.json()["result"]["change_status"] == "changed"
+    assert response.json()["change_status"] == "changed"
 
     image = external_client.get(
         f"/api/v1/compare/api-test/{task_id}/images/1"
@@ -518,8 +476,10 @@ def test_result_text_and_all_page_images(monkeypatch, tmp_path):
     assert "回收件：金额900元" in text
 
     result = build_external_result("task-1", "BILL-1", report)
-    assert [item["has_highlight"] for item in result["highlight_images"]] == [True, False]
-    assert result["highlight_images"][0]["url"].startswith("https://dc.example.test/")
+    assert result["highlight_images"] == [
+        "https://dc.example.test/api/v1/external/contractCompare/task-1/images/1",
+        "https://dc.example.test/api/v1/external/contractCompare/task-1/images/2",
+    ]
 
 
 def test_missing_location_does_not_claim_highlight(monkeypatch, tmp_path):
@@ -534,8 +494,9 @@ def test_missing_location_does_not_claim_highlight(monkeypatch, tmp_path):
 
     render_external_highlight_images("task-2", pdf_path, report)
     result = build_external_result("task-2", "BILL-2", report)
-    assert result["location_status"] == "missing"
-    assert result["highlight_images"][0]["has_highlight"] is False
+    assert "location_status" not in result
+    assert "recognition_status" not in result
+    assert "summary" not in result
     assert "高亮定位：缺失" in result["result_text"]
 
 

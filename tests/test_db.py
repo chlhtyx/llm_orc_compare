@@ -120,6 +120,62 @@ def test_save_milestone_event_orphan_skipped(db_isolated):
     assert db_repo.get_task_events("ghost") == []
 
 
+def test_get_task_events_after_incremental(db_isolated):
+    """get_task_events_after 按 last_id 增量返回(id 升序)。"""
+    db_repo.create_task("ea1", "compare")
+    db_repo.save_milestone_event("ea1", "start", 0.0, {})
+    db_repo.save_milestone_event("ea1", "word_done", 0.1, {"word": 0.5})
+    db_repo.save_milestone_event("ea1", "done", 1.0, {"word": 0.5, "ocr": 1.2})
+
+    all_events = db_repo.get_task_events("ea1")
+    assert len(all_events) == 3
+
+    # last_id=0 → 全部
+    evs = db_repo.get_task_events_after("ea1", 0)
+    assert [e.stage for e in evs] == ["start", "word_done", "done"]
+
+    # last_id=第一条的 id → 剩余两条
+    first_id = all_events[0].id
+    evs2 = db_repo.get_task_events_after("ea1", first_id)
+    assert [e.stage for e in evs2] == ["word_done", "done"]
+
+    # last_id=最后一条的 id → 空
+    last_id = all_events[-1].id
+    assert db_repo.get_task_events_after("ea1", last_id) == []
+
+
+def test_get_task_status(db_isolated):
+    """get_task_status 返回状态字符串,不存在返回 None。"""
+    db_repo.create_task("st1", "compare")
+    db_repo.update_task_status("st1", "running")
+    assert db_repo.get_task_status("st1") == "running"
+    db_repo.update_task_status("st1", "done")
+    assert db_repo.get_task_status("st1") == "done"
+    assert db_repo.get_task_status("missing-task") is None
+
+
+def test_count_active_tasks(db_isolated):
+    """count_active_tasks 只统计 pending/running,跨 worker 全局计数。"""
+    # 准备:2 pending + 1 running + 2 done + 1 failed
+    db_repo.create_task("ca-p1", "compare")  # pending
+    db_repo.create_task("ca-p2", "compare")  # pending
+    db_repo.create_task("ca-r1", "compare")
+    db_repo.update_task_status("ca-r1", "running")  # running
+    db_repo.create_task("ca-d1", "compare")
+    db_repo.update_task_status("ca-d1", "done")  # done
+    db_repo.create_task("ca-d2", "compare")
+    db_repo.update_task_status("ca-d2", "done")  # done
+    db_repo.create_task("ca-f1", "compare")
+    db_repo.update_task_status("ca-f1", "failed")  # failed
+
+    assert db_repo.count_active_tasks() == 3  # 2 pending + 1 running
+
+    # 一个 running 转为 done → 计数下降
+    db_repo.update_task_status("ca-r1", "done")
+    assert db_repo.count_active_tasks() == 2
+
+
+
 def test_list_tasks_filter_and_pagination(db_isolated):
     """kind/status 过滤 + 分页 + 倒序。"""
     # 准备:3 条 compare done + 2 条 statement done + 1 条 raw running

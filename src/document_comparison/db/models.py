@@ -58,7 +58,7 @@ class TaskRecord(Base):
         Boolean, nullable=False, default=False, index=True
     )
 
-    # 回调交付记录(callback_secret 永不落库,仅内存态持有用于 HMAC 签名)。
+    # 回调交付记录。
     # callback_url 存在 → callback_status 初始为 "pending";交付后写 "success"/"failed"。
     callback_url: Mapped[str | None] = mapped_column(String(1024), nullable=True, default=None)
     callback_status: Mapped[str | None] = mapped_column(

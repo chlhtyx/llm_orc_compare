@@ -46,6 +46,22 @@ curl http://localhost:8000/health
 
 更完整的容器运维说明见 [Docker 部署指南](docs/deploy.md)。
 
+## 并发与多 worker
+
+默认单进程(`DC_UVICORN_WORKERS=1`)、并发任务上限 4(`DC_MAX_CONCURRENT_TASKS=4`)。
+
+- **多 worker**:设 `DC_UVICORN_WORKERS=N` 启用 gunicorn 多 worker。任务提交 / 执行 / SSE / 查询可落在不同 worker,系统已通过 Postgres 共享任务状态(无 Redis 依赖)。
+- **全局并发上限**:由 `task_records.status` 计数强制,跨 worker 一致;超限返回 `429`。执行端另有进程内信号量作第二道保险。
+- **SSE 进度**:多 worker 下读 PG 里程碑事件,粒度为里程碑级(start / `*_done` / done,约 6-10 个节点/任务),非逐页细粒度。
+- **DB 连接数**:每个 worker 独立持有连接池(`DC_DB_POOL_SIZE` + `DC_DB_MAX_OVERFLOW`,默认 5+10=15)。N worker 下连接数上限 = N × 15,需确认 PG `max_connections`(默认 100)够用。
+
+```bash
+# 启用 2 worker、8 并发:
+DC_UVICORN_WORKERS=2 DC_MAX_CONCURRENT_TASKS=8 docker compose up -d --build
+```
+
+> 回退:`DC_UVICORN_WORKERS=1` 即完全恢复单进程行为。
+
 ## 本地开发
 
 ### 后端
@@ -198,37 +214,138 @@ Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 
 ### 外部合同比对调用示例
 
+接口 `POST /api/v1/external/contractCompare`,请求体 `multipart/form-data`,公共表单参数:
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `source` | 是 | 原始合同 `.docx` |
+| `target` | 是 | 回收件 `.pdf` |
+| `document_no` | 是 | 外部单据号(≤255 字符) |
+| `callback_url` | 异步必填,同步可选 | HTTP/HTTPS 完成回调地址 |
+| `sync` | 否 | `true` 同步模式;缺省=`false` 异步模式 |
+
+所有请求都必须带 `X-API-Key` 头。
+
+#### 异步模式(默认,`sync` 缺省或 `false`)
+
+提交即返回 `task_id`,比对在后台进行;`callback_url` 必填,结果经**回调**或**查询端点**获取。
+
 ```bash
-# 提交任务(默认异步:返回 task_id,结果经回调或查询端点获取)
 curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
   -H 'X-API-Key: <YOUR_API_KEY>' \
   -F 'source=@./original-contract.docx' \
   -F 'target=@./returned-contract.pdf' \
   -F 'document_no=DOC-2026-0001' \
-  -F 'callback_url=https://business.example.com/callbacks/contract-compare' \
-  -F 'callback_secret=<YOUR_CALLBACK_SECRET>'   # 可选,留空则回调不带签名
+  -F 'callback_url=https://business.example.com/callbacks/contract-compare'
+```
 
-# 同步模式(sync=true):HTTP 连接保持至比对完成,响应体内直接返回完整结果;
-# 此模式下 callback_url 非必填(不传则不触发回调)。
+提交响应(HTTP 202,仅 `task_id` + 状态):
+
+```json
+{
+  "task_id": "a1b2c3d4e5f6",
+  "document_no": "DOC-2026-0001",
+  "status": "pending"
+}
+```
+
+比对完成后用 `task_id` 主动查询(请求头需带 `X-API-Key`):
+
+```bash
+curl -H 'X-API-Key: <YOUR_API_KEY>' \
+  'https://compare.example.com/api/v1/external/contractCompare/<TASK_ID>'
+```
+
+#### 同步模式(`sync=true`)
+
+HTTP 连接保持至比对完成,完整结果**直接在提交响应体内**返回;此模式下 `callback_url` 非必填(传了也会触发回调,不传则不触发)。
+
+```bash
 curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
   -H 'X-API-Key: <YOUR_API_KEY>' \
   -F 'source=@./original-contract.docx' \
   -F 'target=@./returned-contract.pdf' \
   -F 'document_no=DOC-2026-0001' \
   -F 'sync=true'
+```
 
-# 使用响应中的 task_id 查询完整结果(异步模式)
-curl -H 'X-API-Key: <YOUR_API_KEY>' \
-  'https://compare.example.com/api/v1/external/contractCompare/<TASK_ID>'
+同步提交响应 / 异步查询响应(HTTP 200,顶层扁平结构;`result_text` 含逐条差异明细,识别状态与高亮定位并入其文案,不再单列字段):
 
-# 下载第 1 页高亮 PNG
+```jsonc
+{
+  "task_id": "a1b2c3d4e5f6",
+  "document_no": "DOC-2026-0001",
+  "status": "done",
+  "stage": "done",
+  "progress": 1.0,
+  "error": null,
+  "change_status": "changed",            // clean / changed / needs_review
+  "result_text": "单据号：DOC-2026-0001\n结论：发现确认内容变化\n识别状态：可靠\n高亮定位：完整\n差异数量：3\n[1] ...",
+  "highlight_images": [
+    "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/1",
+    "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/2"
+  ],
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6"
+}
+// 任务失败时 status="failed"、error 为失败原因,其余结果字段缺省。
+```
+
+#### 完成回调(异步模式 `callback_url` 非空时触发)
+
+比对结束(成功或失败)后,服务端向 `callback_url` 发起 `POST`,请求体为 JSON,请求头:
+
+| 头 | 始终携带 | 说明 |
+| --- | --- | --- |
+| `Content-Type` | 是 | `application/json` |
+| `X-Event-Id` | 是 | 事件唯一 ID,与 body 中 `event_id` 一致,便于幂等去重 |
+
+比对完成回调 body:
+
+```jsonc
+{
+  "event_id": "9f2c1b7a-1234-5678-9abc-def012345678",
+  "task_id": "a1b2c3d4e5f6",
+  "status": "done",
+  "event_type": "contract.compare.completed",
+  "document_no": "DOC-2026-0001",
+  "change_status": "changed",            // clean / changed / needs_review
+  "result_text": "单据号：DOC-2026-0001\n结论：发现确认内容变化\n识别状态：可靠\n高亮定位：完整\n差异数量：3\n[1] ...",
+  "highlight_images": [
+    "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/1",
+    "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/2"
+  ],
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6"
+}
+```
+
+比对失败回调 body(`status="failed"`,仅含失败原因):
+
+```jsonc
+{
+  "event_id": "9f2c1b7a-1234-5678-9abc-def012345678",
+  "task_id": "a1b2c3d4e5f6",
+  "status": "failed",
+  "event_type": "contract.compare.failed",
+  "document_no": "DOC-2026-0001",
+  "error": "OCR 解析失败"
+}
+```
+
+> 投递失败按指数退避(1/4/16 秒)最多重试 3 次;调用方应按 `X-Event-Id`/`event_id` 幂等处理。
+
+#### 下载高亮 PNG
+
+```bash
+# 响应体为二进制 PNG:
+#   Content-Type: image/png
+#   Content-Disposition: inline; filename="<TASK_ID>-page-0001.png"
 curl -H 'X-API-Key: <YOUR_API_KEY>' \
   -o page-0001.png \
   'https://compare.example.com/api/v1/external/contractCompare/<TASK_ID>/images/1'
 ```
 
 “合同比对 API”页也提供相同示例和一键复制功能；页面会自动使用已保存的服务公开地址，
-但不会显示或写入真实 API Key、回调密钥。
+但不会显示或写入真实 API Key。
 
 #### 外部接口调用审计
 

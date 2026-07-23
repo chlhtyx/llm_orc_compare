@@ -84,7 +84,6 @@ class Task:
     events: list[dict] = field(default_factory=list)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
-    callback_secret: str | None = None
     document_no: str | None = None
     external_request: bool = False
     start_time: float = field(default_factory=time.monotonic)
@@ -140,7 +139,6 @@ class TaskManager:
         target_names: list[str] | None = None,
         ocr_backend: str | None = None,
         callback_url: str | None = None,
-        callback_secret: str | None = None,
         document_no: str | None = None,
         external_request: bool = False,
     ) -> str:
@@ -153,7 +151,6 @@ class TaskManager:
             info=TaskInfo(task_id=task_id, status="pending"),
             kind=kind,
             callback_url=callback_url,
-            callback_secret=callback_secret,
             document_no=document_no,
             external_request=external_request,
         )
@@ -273,19 +270,12 @@ class TaskManager:
             )
             if task.external_request and task.document_no:
                 external = build_external_result(task_id, task.document_no, report)
-                await self._fire_callback(task_id, "done", {
+                payload = {
                     "event_type": "contract.compare.completed",
                     "document_no": task.document_no,
-                    "result": {
-                        key: external[key]
-                        for key in (
-                            "change_status", "recognition_status", "location_status",
-                            "summary", "result_text",
-                        )
-                    },
-                    "highlight_images": external["highlight_images"],
-                    "result_url": external["result_url"],
-                })
+                }
+                payload.update(external)
+                await self._fire_callback(task_id, "done", payload)
             else:
                 await self._fire_callback(task_id, "done", {
                     "overall_risk": report.overall_risk,
@@ -488,7 +478,6 @@ class TaskManager:
         result = await webhook.deliver(
             task.callback_url,
             raw,
-            task.callback_secret,
             event["event_id"],
             max_retries=settings.webhook_max_retries,
             timeout=settings.webhook_timeout_seconds,
@@ -502,18 +491,41 @@ class TaskManager:
         )
 
     async def event_stream(self, task_id: str):
-        """SSE 事件生成器:增量推送事件,直到任务终态。"""
-        task = self._tasks.get(task_id)
-        if task is None:
-            return
-        last = 0
+        """SSE 事件生成器:从 PG task_events 增量推送里程碑,直到任务终态。
+
+        多 worker 安全:任意 worker 都能服务 SSE,因为只依赖 PG。
+        进度粒度从"逐页 OCR"降级为"里程碑"(约 6-10 个节点/任务),
+        与 AGENTS.md「高频进度事件只留内存,仅里程碑入库」一致。
+        """
+        last_id = 0
         while True:
-            while last < len(task.events):
-                yield task.events[last]
-                last += 1
-            if task.done.is_set() and last >= len(task.events):
+            events = await asyncio.to_thread(
+                db_repo.get_task_events_after, task_id, last_id
+            )
+            for ev in events:
+                yield {
+                    "stage": ev.stage,
+                    "progress": ev.progress,
+                    "stage_timings": dict(ev.stage_timings or {}),
+                }
+                last_id = ev.id
+            status = await asyncio.to_thread(db_repo.get_task_status, task_id)
+            if status is None:
+                # 任务不存在:无任何事件可推,直接结束。
                 return
-            await asyncio.sleep(0.3)
+            if status in ("done", "failed"):
+                # 终态:再拉一次确保补齐终态事件后退出(避免漏推 done/failed)。
+                tail = await asyncio.to_thread(
+                    db_repo.get_task_events_after, task_id, last_id
+                )
+                for ev in tail:
+                    yield {
+                        "stage": ev.stage,
+                        "progress": ev.progress,
+                        "stage_timings": dict(ev.stage_timings or {}),
+                    }
+                return
+            await asyncio.sleep(1.0)  # 里程碑低频,1s 轮询足够
 
 
 # 进程内单例。多进程部署需换共享存储。

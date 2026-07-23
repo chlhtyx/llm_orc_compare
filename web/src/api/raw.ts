@@ -16,7 +16,6 @@ export interface RawSubmitArgs {
   target: File // .pdf
   options?: RawCompareOptions
   callbackUrl?: string
-  callbackSecret?: string
 }
 
 export function submitRawCompare(args: RawSubmitArgs): Promise<{ task_id: string; status: TaskStatus }> {
@@ -25,7 +24,6 @@ export function submitRawCompare(args: RawSubmitArgs): Promise<{ task_id: string
   form.append('target', args.target)
   if (args.options) form.append('options', JSON.stringify(args.options))
   if (args.callbackUrl) form.append('callback_url', args.callbackUrl)
-  if (args.callbackSecret) form.append('callback_secret', args.callbackSecret)
   return request('/api/v1/raw-compare', { method: 'POST', body: form })
 }
 

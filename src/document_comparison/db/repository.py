@@ -47,7 +47,7 @@ def create_task(
     update_callback_result 改写为 success/failed);无 callback 则保持 None。
     """
     targets = list(target_names) if target_names else []
-    # 有回调地址即视为待交付;callback_secret 永不落库。
+    # 有回调地址即视为待交付。
     cb_status = "pending" if callback_url else None
     with session_scope() as s:
         existing = s.get(TaskRecord, task_id)
@@ -246,6 +246,42 @@ def get_task_events(task_id: str) -> list[TaskEvent]:
         return list(s.scalars(
             select(TaskEvent).where(TaskEvent.task_id == task_id).order_by(TaskEvent.id)
         ))
+
+
+def get_task_events_after(task_id: str, last_id: int) -> list[TaskEvent]:
+    """返回该任务 id > last_id 的所有事件(按 id 升序),供 SSE 增量轮询。"""
+    with session_scope() as s:
+        return list(s.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task_id, TaskEvent.id > last_id)
+            .order_by(TaskEvent.id)
+        ))
+
+
+def get_task_status(task_id: str) -> str | None:
+    """轻量查任务状态(不拉报告 JSONB),供 SSE 终态检测。
+
+    返回 None 表示任务不存在。
+    """
+    with session_scope() as s:
+        return s.scalar(
+            select(TaskRecord.status).where(TaskRecord.task_id == task_id)
+        )
+
+
+def count_active_tasks() -> int:
+    """统计 pending/running 状态的任务数。
+
+    供 API 层 429 限流,实现跨 worker 的全局并发上限。
+    注意:这是事务级一致性检查,两个并发请求可能同时读到同一计数后双双通过,
+    导致瞬时略超 max_concurrent_tasks;此误差由执行端的进程内信号量
+    (tasks.py::TaskManager._sem)与任务自然排队消化,可接受。
+    """
+    with session_scope() as s:
+        return s.scalar(
+            select(func.count()).select_from(TaskRecord)
+            .where(TaskRecord.status.in_(("pending", "running")))
+        ) or 0
 
 
 def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:
@@ -480,7 +516,7 @@ def list_external_calls(
 def external_call_to_dict(rec: ExternalApiCall) -> dict[str, Any]:
     """把 ExternalApiCall 序列化为 JSON 友好 dict(供 API 返回)。
 
-    api_key_sha256 仅返回指纹(本就非明文);secret/callback_secret 永不涉及。
+    api_key_sha256 仅返回指纹(本就非明文),永不涉及明文。
     """
     return {
         "id": rec.id,

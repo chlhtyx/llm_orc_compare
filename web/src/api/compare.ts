@@ -18,7 +18,6 @@ export interface SubmitArgs {
   target: File // .pdf
   options?: CompareOptions
   callbackUrl?: string
-  callbackSecret?: string
 }
 
 export function submitCompare(args: SubmitArgs): Promise<SubmitResponse> {
@@ -27,14 +26,7 @@ export function submitCompare(args: SubmitArgs): Promise<SubmitResponse> {
   form.append('target', args.target)
   if (args.options) form.append('options', JSON.stringify(args.options))
   if (args.callbackUrl) form.append('callback_url', args.callbackUrl)
-  if (args.callbackSecret) form.append('callback_secret', args.callbackSecret)
   return request('/api/v1/compare', { method: 'POST', body: form })
-}
-
-export interface CompareApiTestImage {
-  page_number: number
-  has_highlight: boolean
-  url: string
 }
 
 export interface CompareApiTestInfo {
@@ -44,14 +36,9 @@ export interface CompareApiTestInfo {
   stage?: string
   progress?: number
   error?: string | null
-  result?: {
-    change_status: 'clean' | 'changed' | 'needs_review'
-    recognition_status: 'reliable' | 'needs_review'
-    location_status: 'complete' | 'partial' | 'missing'
-    summary: Record<string, unknown>
-    result_text: string
-  }
-  highlight_images?: CompareApiTestImage[]
+  change_status?: 'clean' | 'changed' | 'needs_review'
+  result_text?: string
+  highlight_images?: string[]
 }
 
 /** 使用合同比对页已选文件验证外部 API 的完整产物管线，不发送回调。 */

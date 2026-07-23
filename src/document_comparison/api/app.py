@@ -1,7 +1,7 @@
 """FastAPI 应用:比对端点 + 对外集成(§7、§14)。
 
 端点:
-  POST /api/v1/compare              提交(支持 callback_url/callback_secret,均可选)
+  POST /api/v1/compare              提交(支持 callback_url,可选)
   GET  /api/v1/compare/{task_id}    查询结果
   GET  /api/v1/compare/{task_id}/events   SSE 进度(§7.3)
   GET  /api/v1/compare/{task_id}/report   下载报告(json/pdf)
@@ -229,15 +229,7 @@ async def _external_task_response(task_id: str) -> dict:
 
     if status == "done" and report is not None:
         external = build_external_result(task_id, document_no, report)
-        response["result"] = {
-            key: external[key]
-            for key in (
-                "change_status", "recognition_status", "location_status",
-                "summary", "result_text",
-            )
-        }
-        response["highlight_images"] = external["highlight_images"]
-        response["result_url"] = external["result_url"]
+        response.update(external)
     return response
 
 
@@ -644,11 +636,9 @@ def create_app() -> FastAPI:
                     f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
                 )
 
-        running = sum(
-            1
-            for task in task_manager._tasks.values()
-            if task.info.status in ("pending", "running")
-        )
+        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
+        # 进程内信号量 + 任务排队消化。
+        running = await asyncio.to_thread(db_repo.count_active_tasks)
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
 
@@ -707,7 +697,6 @@ def create_app() -> FastAPI:
         target: UploadFile = File(..., description="回收件 PDF(.pdf)"),
         document_no: str = Form(...),
         callback_url: str | None = Form(default=None),
-        callback_secret: str | None = Form(default=None),
         sync: bool = Form(default=False),
         _auth: None = Depends(require_external_api_key),
     ):
@@ -726,8 +715,6 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "document_no 不能为空")
         if len(document_no) > 255:
             raise HTTPException(400, "document_no 不能超过 255 个字符")
-        # callback_secret 可选(留空则回调不带 X-Signature 签名);空白规整化为 None。
-        callback_secret = (callback_secret or "").strip() or None
         # callback_url:异步模式必填,同步模式可选(结果随响应返回)。
         callback_url = (callback_url or "").strip() or None
         if callback_url is None and not sync:
@@ -764,11 +751,9 @@ def create_app() -> FastAPI:
                     f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
                 )
 
-        running = sum(
-            1
-            for task in task_manager._tasks.values()
-            if task.info.status in ("pending", "running")
-        )
+        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
+        # 进程内信号量 + 任务排队消化。
+        running = await asyncio.to_thread(db_repo.count_active_tasks)
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
 
@@ -778,7 +763,6 @@ def create_app() -> FastAPI:
             target_names=[target.filename or ""],
             ocr_backend=settings.external_ocr_backend,
             callback_url=callback_url,
-            callback_secret=callback_secret,
             document_no=document_no,
             external_request=True,
         )
@@ -860,7 +844,6 @@ def create_app() -> FastAPI:
         target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
         options: str | None = Form(default=None),
         callback_url: str | None = Form(default=None),
-        callback_secret: str | None = Form(default=None),
     ):
         # 基本类型校验
         if not (source.filename or "").lower().endswith(".docx"):
@@ -893,11 +876,9 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
         # 限流:运行中任务达上限则拒绝(§14.4)
-        running = sum(
-            1
-            for t in task_manager._tasks.values()
-            if t.info.status in ("pending", "running")
-        )
+        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
+        # 进程内信号量 + 任务排队消化。
+        running = await asyncio.to_thread(db_repo.count_active_tasks)
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
 
@@ -924,7 +905,6 @@ def create_app() -> FastAPI:
             target_names=[target.filename or ""],
             ocr_backend=ocr_backend,
             callback_url=callback_url,
-            callback_secret=callback_secret,
         )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
@@ -970,12 +950,18 @@ def create_app() -> FastAPI:
     async def events(task_id: str):
         task = task_manager.get(task_id)
         if task is None:
-            raise HTTPException(404, "task not found")
+            # 内存 miss(任务在另一 worker 执行)时回查 PG,存在才继续。
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is None:
+                raise HTTPException(404, "task not found")
+            status = rec.status
+        else:
+            status = task.info.status
 
         async def gen():
             async for ev in task_manager.event_stream(task_id):
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            yield f"event: done\ndata: {json.dumps({'status': task.info.status}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': status}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -1034,7 +1020,6 @@ def create_app() -> FastAPI:
         target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
         options: str | None = Form(default=None),
         callback_url: str | None = Form(default=None),
-        callback_secret: str | None = Form(default=None),
     ):
         if not (source.filename or "").lower().endswith(".docx"):
             raise HTTPException(400, "source 必须为 .docx")
@@ -1048,11 +1033,9 @@ def create_app() -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
-        running = sum(
-            1
-            for t in task_manager._tasks.values()
-            if t.info.status in ("pending", "running")
-        )
+        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
+        # 进程内信号量 + 任务排队消化。
+        running = await asyncio.to_thread(db_repo.count_active_tasks)
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
 
@@ -1078,7 +1061,6 @@ def create_app() -> FastAPI:
             target_names=[target.filename or ""],
             ocr_backend=opts.ocr_backend,
             callback_url=callback_url,
-            callback_secret=callback_secret,
         )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
@@ -1112,12 +1094,17 @@ def create_app() -> FastAPI:
     async def raw_events(task_id: str):
         task = task_manager.get(task_id)
         if task is None:
-            raise HTTPException(404, "task not found")
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is None:
+                raise HTTPException(404, "task not found")
+            status = rec.status
+        else:
+            status = task.info.status
 
         async def gen():
             async for ev in task_manager.event_stream(task_id):
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            yield f"event: done\ndata: {json.dumps({'status': task.info.status}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': status}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -1141,7 +1128,6 @@ def create_app() -> FastAPI:
         target: list[UploadFile] = File(..., description="对帐单 PDF(可多选,.pdf)"),
         options: str | None = Form(default=None),
         callback_url: str | None = Form(default=None),
-        callback_secret: str | None = Form(default=None),
     ):
         if not target:
             raise HTTPException(400, "至少上传一个 PDF")
@@ -1157,11 +1143,9 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
         # 限流:与 compare/raw 共享并发上限
-        running = sum(
-            1
-            for t in task_manager._tasks.values()
-            if t.info.status in ("pending", "running")
-        )
+        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
+        # 进程内信号量 + 任务排队消化。
+        running = await asyncio.to_thread(db_repo.count_active_tasks)
         if running >= settings.max_concurrent_tasks:
             raise HTTPException(429, "并发任务已达上限,请稍后重试")
 
@@ -1189,7 +1173,6 @@ def create_app() -> FastAPI:
             target_names=[t.filename or f"target-{i}.pdf" for i, t in enumerate(target)],
             ocr_backend=opts.ocr_backend,
             callback_url=callback_url,
-            callback_secret=callback_secret,
         )
         # 多文件保存:role="target" + index,避免覆盖
         pdf_paths: list[str] = []
@@ -1230,12 +1213,17 @@ def create_app() -> FastAPI:
     async def statement_events(task_id: str):
         task = task_manager.get(task_id)
         if task is None:
-            raise HTTPException(404, "task not found")
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is None:
+                raise HTTPException(404, "task not found")
+            status = rec.status
+        else:
+            status = task.info.status
 
         async def gen():
             async for ev in task_manager.event_stream(task_id):
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            yield f"event: done\ndata: {json.dumps({'status': task.info.status}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'status': status}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 

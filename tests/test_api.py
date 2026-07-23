@@ -835,3 +835,47 @@ def test_get_task_llm_calls_empty_for_task_without_calls(client):
     r = client.get("/api/v1/tasks/lc-empty/llm-calls")
     assert r.status_code == 200
     assert r.json()["items"] == []
+
+
+def test_compare_rejects_429_when_pg_count_at_limit(client, monkeypatch):
+    """PG 计数达到 max_concurrent_tasks 时,提交端点返回 429。
+
+    多 worker 全局并发上限走 db_repo.count_active_tasks;此测试直接打桩计数,
+    验证限流逻辑(不依赖内存 _tasks,跨 worker 一致)。
+    """
+    import io
+
+    from docx import Document  # type: ignore[import-untyped]
+
+    from document_comparison.db import repository as db_repo
+
+    # 计数打桩为满值(= max_concurrent_tasks,默认 4)
+    monkeypatch.setattr(db_repo, "count_active_tasks", lambda: settings.max_concurrent_tasks)
+
+    doc = Document()
+    doc.add_paragraph("第一条 测试条款")
+    doc_buf = io.BytesIO()
+    doc.save(doc_buf)
+    doc_buf.seek(0)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page(width=595, height=842)
+    pdf.save(pdf_buf)
+    pdf_buf.seek(0)
+
+    r = client.post(
+        "/api/v1/compare",
+        files={
+            "source": ("contract.docx", doc_buf,
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            "target": ("scan.pdf", pdf_buf, "application/pdf"),
+        },
+    )
+    assert r.status_code == 429
+    assert "并发" in r.json()["message"]
+

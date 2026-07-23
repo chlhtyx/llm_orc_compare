@@ -110,7 +110,11 @@ class Settings:
     max_pdf_pages: int = 0
 
     # —— 任务 ——
-    max_concurrent_tasks: int = 4
+    # 全局并发上限。多 worker 部署下由 PG task_records 计数强制(见 api/app.py),
+    # 单进程下另有 asyncio.Semaphore 第二道保险(见 tasks.py)。
+    max_concurrent_tasks: int = field(
+        default_factory=lambda: int(_env("DC_MAX_CONCURRENT_TASKS", "4"))
+    )
 
     # —— Webhook ——
     webhook_max_retries: int = 3
@@ -165,9 +169,17 @@ class Settings:
     db_auto_create: bool = field(
         default_factory=lambda: _env("DC_DB_AUTO_CREATE", "").lower() in ("1", "true", "yes")
     )
-    db_pool_size: int = 5
-    db_max_overflow: int = 10
-    db_pool_timeout: float = 30.0
+    # 连接池参数。注意:每个 worker 独立持有一份连接池(N workers × (pool+overflow)),
+    # 启用多 worker 时需确认 PG max_connections 足够。
+    db_pool_size: int = field(
+        default_factory=lambda: int(_env("DC_DB_POOL_SIZE", "5"))
+    )
+    db_max_overflow: int = field(
+        default_factory=lambda: int(_env("DC_DB_MAX_OVERFLOW", "10"))
+    )
+    db_pool_timeout: float = field(
+        default_factory=lambda: float(_env("DC_DB_POOL_TIMEOUT", "30.0"))
+    )
 
     @property
     def uploads_dir(self) -> Path:

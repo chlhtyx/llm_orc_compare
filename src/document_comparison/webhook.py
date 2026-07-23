@@ -1,9 +1,7 @@
-"""Webhook 回调交付:HMAC-SHA256 签名 + 指数退避重试(§14.3)。"""
+"""Webhook 回调交付:指数退避重试(§14.3)。"""
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import uuid
@@ -22,12 +20,8 @@ class DeliveryResult(TypedDict):
     error: str | None
 
 
-def sign(body: bytes, secret: str) -> str:
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-
 def build_event(task_id: str, status: str, payload: dict) -> tuple[dict, bytes]:
-    """构造事件:返回 (event_dict, 用于签名的 raw body bytes)。"""
+    """构造事件:返回 (event_dict, 用于 POST 的 raw body bytes)。"""
     event = {
         "event_id": str(uuid.uuid4()),
         "task_id": task_id,
@@ -41,13 +35,12 @@ def build_event(task_id: str, status: str, payload: dict) -> tuple[dict, bytes]:
 async def deliver(
     url: str,
     raw_body: bytes,
-    secret: str | None,
     event_id: str,
     *,
     max_retries: int = 3,
     timeout: float = 10.0,
 ) -> DeliveryResult:
-    """POST 事件到 url;secret 非空时带 X-Signature,失败按指数退避重试。
+    """POST 事件到 url,失败按指数退避重试。
 
     返回 DeliveryResult(成功与否 / 最终 HTTP 状态码 / 错误原因),
     供调用方回写 task_records 的 callback 交付状态。
@@ -56,8 +49,6 @@ async def deliver(
         "Content-Type": "application/json",
         "X-Event-Id": event_id,
     }
-    if secret:
-        headers["X-Signature"] = sign(raw_body, secret)
     backoff = (1, 4, 16)  # 秒
     logger.info("webhook deliver start event_id=%s url=%s", event_id, url)
     last_status: int | None = None
@@ -89,9 +80,3 @@ async def deliver(
             await asyncio.sleep(wait)
     logger.error("webhook give up event_id=%s url=%s after %s attempts", event_id, url, max_retries)
     return DeliveryResult(success=False, http_status=last_status, error=last_error)
-
-
-def verify(raw_body: bytes, secret: str, signature: str) -> bool:
-    """调用方可用于校验签名。"""
-    expected = sign(raw_body, secret)
-    return hmac.compare_digest(expected, signature)

@@ -67,21 +67,6 @@ def external_image_path(task_id: str, page_number: int) -> Path:
     return external_images_dir(task_id) / f"page-{page_number:04d}.png"
 
 
-def _highlighted_page_indexes(report: TamperReport) -> set[int]:
-    highlighted: set[int] = set()
-    targets = [
-        *report.diffs,
-        *(
-            diff
-            for diff in report.unmatched_clauses
-            if diff.status == "added" and diff.page_regions
-        ),
-    ]
-    for diff in targets:
-        highlighted.update(region.page_index for region in diff.page_regions)
-    return highlighted
-
-
 def render_external_highlight_images(
     task_id: str,
     pdf_path: str | Path,
@@ -167,26 +152,18 @@ def build_external_result(
     document_no: str,
     report: TamperReport,
 ) -> dict:
-    """构造查询响应与完成回调共享的稳定结果结构。"""
-    highlighted = _highlighted_page_indexes(report)
-    images = []
+    """构造查询响应与完成回调共享的稳定结果结构(扁平:key 全在顶层)。"""
+    images: list[str] = []
     page_number = 1
     while external_image_path(task_id, page_number).is_file():
         images.append(
-            {
-                "page_number": page_number,
-                "has_highlight": page_number - 1 in highlighted,
-                "url": _absolute_external_url(
-                    f"/api/v1/external/contractCompare/{task_id}/images/{page_number}"
-                ),
-            }
+            _absolute_external_url(
+                f"/api/v1/external/contractCompare/{task_id}/images/{page_number}"
+            )
         )
         page_number += 1
     return {
         "change_status": report.change_status,
-        "recognition_status": report.recognition_status,
-        "location_status": report.location_status,
-        "summary": report.summary,
         "result_text": build_result_text(document_no, report),
         "highlight_images": images,
         "result_url": _absolute_external_url(f"/api/v1/external/contractCompare/{task_id}"),

@@ -132,7 +132,6 @@ def test_submit_success_records_audit_with_task_and_document(external_client, mo
         data={
             "document_no": "BILL-AUDIT-1",
             "callback_url": "http://internal/callback",
-            "callback_secret": "secret",
         },
         files={
             "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
@@ -247,7 +246,6 @@ def test_413_upload_limit_records_audit(external_client, monkeypatch):
         data={
             "document_no": "BILL-BIG",
             "callback_url": "http://internal/callback",
-            "callback_secret": "secret",
         },
         files={
             "source": ("source.docx", io.BytesIO(b"x" * (1024 * 1024 + 1)), "application/octet-stream"),

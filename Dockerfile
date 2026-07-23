@@ -37,6 +37,7 @@ COPY pyproject.toml ./
 RUN pip install --no-cache-dir \
     "fastapi>=0.110" \
     "uvicorn[standard]>=0.27" \
+    "gunicorn>=21.0" \
     "python-multipart>=0.0.9" \
     "pydantic>=2.6" \
     "python-docx>=1.1" \
@@ -61,6 +62,9 @@ RUN pip install --no-cache-dir --no-deps .
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 
+# 拷 gunicorn 启动配置(CMD 引用)
+COPY gunicorn.conf.py ./
+
 # 拷前端构建产物
 COPY --from=frontend-build /build/dist ./static
 
@@ -79,5 +83,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -fs http://localhost:8000/health || exit 1
 
-CMD ["python", "-m", "uvicorn", "document_comparison.api.app:app", \
-     "--host", "0.0.0.0", "--port", "8000"]
+# gunicorn + uvicorn worker,worker 数由 DC_UVICORN_WORKERS 控制(默认 1)。
+# 本地开发可用 `python -m document_comparison.api.app`(单进程 uvicorn)。
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "document_comparison.api.app:app"]
