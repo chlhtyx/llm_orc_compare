@@ -55,6 +55,26 @@ def test_build_clauses_by_number():
     assert "100万元" in clauses[1].text
 
 
+def test_build_clauses_records_parent_section_path():
+    items = [
+        RawItem(text="第一条 付款方式", kind="heading"),
+        RawItem(text="1.1 付款期限", kind="heading"),
+        RawItem(text="（1）验收后30日内付款"),
+        RawItem(text="第二条 违约责任", kind="heading"),
+        RawItem(text="（1）逾期每日承担违约金"),
+    ]
+
+    clauses = build_clauses(items, "word")
+
+    assert clauses[0].parent_path == []
+    assert clauses[1].parent_path[-1].endswith("付款方式")
+    assert [item.split()[-1] for item in clauses[2].parent_path] == [
+        "付款方式",
+        "付款期限",
+    ]
+    assert clauses[4].parent_path[-1].endswith("违约责任")
+
+
 def test_build_clauses_multiline_in_one_block():
     items = [
         RawItem(text="第三条\n第三条正文内容。\n第四条\n第四条正文。", kind="paragraph"),
@@ -103,6 +123,24 @@ def test_build_clauses_splits_inline_numbered_and_field_boundaries():
     assert [clause.field_key for clause in clauses[3:]] == ["开户行", "账户名"]
     assert clauses[1].text == "服务内容。"
     assert clauses[2].text == "支付方式。"
+
+
+def test_build_clauses_splits_spaced_chinese_number_inside_merged_block():
+    clauses = build_clauses(
+        [
+            RawItem(
+                text="乙方：(供方)湖北欧朗机械有限公司。 一 、 合同标的",
+                page_index=0,
+                bbox=[10, 10, 500, 50],
+            )
+        ],
+        "pdf",
+    )
+
+    assert [(clause.field_key, clause.number, clause.text) for clause in clauses] == [
+        ("乙方", "", "(供方)湖北欧朗机械有限公司。"),
+        ("", "一", "合同标的"),
+    ]
 
 
 def test_blocks_to_raw_maps_labels():

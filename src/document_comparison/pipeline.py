@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Callable
 
 from .align import align_clauses
+from .align.llm_resolver import (
+    resolve_alignment_candidates,
+    resolve_raw_alignment_plan,
+)
+from .align.raw_plan import align_raw_items
 from .config import Settings, settings
 from .embed import get_embed_engine, is_mock_engine
 from .models import TamperReport, TruncationRecord
@@ -34,10 +39,12 @@ def run_pipeline(
     embed=None,
     on_progress: ProgressCb | None = None,
     enable_llm_judge: bool = False,
+    enable_llm_alignment: bool = False,
     ocr_backend: str | None = None,
     enable_risk_assessment: bool = False,
     truncate_to_original_pages: bool = False,
     original_page_count: int | None = None,
+    truncated_pdf_output_path: str | Path | None = None,
 ) -> TamperReport:
     cfg = cfg or settings
     # 标准管线需要 PDF 标注：PaddleOCR 内容无坐标时追加 Spotting 调用。
@@ -54,8 +61,15 @@ def run_pipeline(
     _progress("word_parsing", 0.02)
     with timed_stage(logger, "word_parse_and_structure"):
         word_raw = parse_word(word_path)
-        word_clauses = build_clauses(word_raw, "word")
-    logger.info("word structured items=%s clauses=%s", len(word_raw), len(word_clauses))
+        # RawSpan 联合对齐成功时不应依赖 Clause 切分；仅在关闭或失败回退时构建。
+        word_clauses = (
+            None if enable_llm_alignment else build_clauses(word_raw, "word")
+        )
+    logger.info(
+        "word structured items=%s clauses=%s",
+        len(word_raw),
+        "deferred" if word_clauses is None else len(word_clauses),
+    )
     _progress("word_done", 0.08)
 
     # —— 回收件页数截取(可选)——
@@ -79,7 +93,11 @@ def run_pipeline(
                 "truncate recovered pdf to original pages: pdf=%s original=%s -> slice",
                 pdf_pages, orig_pages,
             )
-            pdf_path = slice_pdf(pdf_path, orig_pages)
+            pdf_path = slice_pdf(
+                pdf_path,
+                orig_pages,
+                output_path=truncated_pdf_output_path,
+            )
             truncation = TruncationRecord(
                 original_pdf_page_count=pdf_pages,
                 truncated_pdf_page_count=orig_pages,
@@ -117,8 +135,13 @@ def run_pipeline(
     _progress("structure", 0.72)
     with timed_stage(logger, "pdf_structure"):
         pdf_raw = blocks_to_raw(pages_blocks)
-        pdf_clauses = build_clauses(pdf_raw, "pdf")
-    logger.info("pdf structured clauses=%s", len(pdf_clauses))
+        pdf_clauses = (
+            None if enable_llm_alignment else build_clauses(pdf_raw, "pdf")
+        )
+    logger.info(
+        "pdf structured clauses=%s",
+        "deferred" if pdf_clauses is None else len(pdf_clauses),
+    )
     _progress("structure_done", 0.78)
 
     # —— ④ 对齐 ——
@@ -126,9 +149,44 @@ def run_pipeline(
     align_threshold = cfg.align_similarity_mock if is_mock_engine(embed) else cfg.align_similarity
     _progress("align", 0.80)
     with timed_stage(logger, "clause_alignment"):
-        alignments = align_clauses(
-            word_clauses, pdf_clauses, embed, align_threshold
+        raw_alignment = (
+            align_raw_items(
+                word_raw,
+                pdf_raw,
+                embed=embed,
+                planner=resolve_raw_alignment_plan,
+            )
+            if enable_llm_alignment
+            else None
         )
+        if raw_alignment is not None:
+            word_by = raw_alignment.word_by
+            pdf_by = raw_alignment.pdf_by
+            alignments = raw_alignment.alignments
+            word_clauses = list(word_by.values())
+            pdf_clauses = list(pdf_by.values())
+            logger.info(
+                "raw-span alignment plan accepted groups=%s",
+                len(alignments),
+            )
+        else:
+            if word_clauses is None:
+                word_clauses = build_clauses(word_raw, "word")
+            if pdf_clauses is None:
+                pdf_clauses = build_clauses(pdf_raw, "pdf")
+            alignments = align_clauses(
+                word_clauses,
+                pdf_clauses,
+                embed,
+                align_threshold,
+                llm_resolver=(
+                    resolve_alignment_candidates if enable_llm_alignment else None
+                ),
+            )
+            word_by = {c.clause_id: c for c in word_clauses}
+            pdf_by = {c.clause_id: c for c in pdf_clauses}
+            if enable_llm_alignment:
+                logger.info("raw-span alignment unavailable, used clause fallback")
     logger.info(
         "aligned word=%s pdf=%s total=%s threshold=%.2f",
         len(word_clauses), len(pdf_clauses), len(alignments), align_threshold,
@@ -136,8 +194,6 @@ def run_pipeline(
     _progress("align_done", 0.88)
 
     # —— ⑤⑥ 比对 + 报告 ——
-    word_by = {c.clause_id: c for c in word_clauses}
-    pdf_by = {c.clause_id: c for c in pdf_clauses}
     _progress("compare", 0.90)
     with timed_stage(logger, "compare_and_report"):
         report = build_report(

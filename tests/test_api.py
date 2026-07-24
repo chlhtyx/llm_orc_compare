@@ -78,8 +78,8 @@ def test_compare_accepts_valid_files(client):
     assert "task_id" in r.json()
 
 
-def test_compare_accepts_enable_risk_assessment_option(client, monkeypatch):
-    """options 携带 enable_risk_assessment 应被正确解析并透传到 task_manager.run。"""
+def test_compare_accepts_llm_alignment_and_risk_options(client, monkeypatch):
+    """LLM 对齐和风险说明是相互独立的提交选项，并应完整透传。"""
     import io
     from docx import Document  # type: ignore[import-untyped]
 
@@ -114,11 +114,17 @@ def test_compare_accepts_enable_risk_assessment_option(client, monkeypatch):
                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             "target": ("scan.pdf", pdf_buf, "application/pdf"),
         },
-        data={"options": '{"enable_risk_assessment": true, "enable_llm_judge": true}'},
+        data={
+            "options": (
+                '{"enable_llm_alignment": true, '
+                '"enable_risk_assessment": true, "enable_llm_judge": true}'
+            )
+        },
     )
     assert r.status_code == 200, r.json()
     assert captured.get("enable_risk_assessment") is True
     assert captured.get("enable_llm_judge") is True
+    assert captured.get("enable_llm_alignment") is True
 
 
 def test_compare_rejects_bad_options(client):
@@ -183,6 +189,53 @@ def test_compare_accepts_truncate_options(client, monkeypatch):
     assert r.status_code == 200, r.json()
     assert captured.get("truncate_to_original_pages") is True
     assert captured.get("original_page_count") == 5
+
+
+def test_preview_and_annotated_report_use_truncated_task_pdf(client, monkeypatch, tmp_path):
+    """报告页的预览与标注下载不应重新返回原始全页回收件。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    from document_comparison.api.app import task_manager
+    from document_comparison.models import TamperReport, TruncationRecord
+    from document_comparison.storage import compared_pdf_path
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare")
+    task = task_manager.get(task_id)
+    assert task is not None
+
+    original = settings.uploads_dir / f"{task_id}-target.pdf"
+    compared = compared_pdf_path(task_id)
+    for path, page_count in ((original, 3), (compared, 1)):
+        pdf = fitz.open()
+        for _ in range(page_count):
+            pdf.new_page(width=300, height=400)
+        pdf.save(path)
+        pdf.close()
+
+    task.report = TamperReport(
+        source="source.docx",
+        target=str(compared),
+        truncation=TruncationRecord(
+            original_pdf_page_count=3,
+            truncated_pdf_page_count=1,
+            original_doc_page_count=1,
+            doc_page_count_source="explicit",
+        ),
+    )
+
+    preview = client.get(f"/api/v1/compare/{task_id}/source")
+    annotated = client.get(f"/api/v1/compare/{task_id}/report?format=pdf")
+    assert preview.status_code == 200
+    assert annotated.status_code == 200
+    with fitz.open(stream=preview.content, filetype="pdf") as doc:
+        assert len(doc) == 1
+    with fitz.open(stream=annotated.content, filetype="pdf") as doc:
+        assert len(doc) == 1
 
 
 def test_compare_rejects_nonpositive_original_page_count(client):
@@ -479,6 +532,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
             "external_image_dpi": 180,
             "external_ocr_backend": "llm",
             "external_enable_llm_judge": True,
+            "external_enable_llm_alignment": True,
             "external_enable_risk_assessment": True,
             "external_truncate_to_original_pages": True,
         },
@@ -493,6 +547,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
     assert config["external_image_dpi"] == 180
     assert config["external_ocr_backend"] == "llm"
     assert config["external_enable_llm_judge"] is True
+    assert config["external_enable_llm_alignment"] is True
     assert config["external_enable_risk_assessment"] is True
     assert config["external_truncate_to_original_pages"] is True
     assert config["external_enabled"] is True
@@ -506,6 +561,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
     fetched = client.get("/api/v1/config/llm")
     assert fetched.status_code == 200
     body = fetched.json()
+    assert body["external_truncate_to_original_pages"] is True
     assert body["external_api_key"] != "external-secret-1234"
     assert body["persisted"]["external_api_key"] != "external-secret-1234"
     # 现有模型 Key 的持久化快照也一并保持脱敏。
@@ -523,6 +579,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
         {"external_image_dpi": 601},
         {"external_ocr_backend": "other"},
         {"external_enable_llm_judge": "true"},
+        {"external_enable_llm_alignment": "true"},
         {"external_enable_risk_assessment": 1},
         {"external_truncate_to_original_pages": "yes"},
     ],
@@ -878,4 +935,3 @@ def test_compare_rejects_429_when_pg_count_at_limit(client, monkeypatch):
     )
     assert r.status_code == 429
     assert "并发" in r.json()["message"]
-

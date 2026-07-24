@@ -168,7 +168,7 @@ class TaskLlmCall(Base):
         String(32), ForeignKey("task_records.task_id", ondelete="CASCADE"), index=True
     )
     # kind 与 observability._COLLECTED_KINDS 对齐:
-    # ocr | ocr-whole | paddleocr | judge | llm-diff | statement-column
+    # ocr | ocr-whole | paddleocr | judge | alignment | llm-diff | statement-column
     kind: Mapped[str] = mapped_column(String(32), index=True)
     # 第几次尝试(1-based;重试递增)。每次 attempt 各一行,便于看重试模式。
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

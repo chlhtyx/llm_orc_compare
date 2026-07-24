@@ -72,7 +72,7 @@ def render_external_highlight_images(
     pdf_path: str | Path,
     report: TamperReport,
 ) -> list[Path]:
-    """烧录现有标注后，将回收件所有页面渲染为 PNG。"""
+    """烧录现有标注后，将实际参与比对的 PDF 全部页面渲染为 PNG。"""
     settings.ensure_dirs()
     annotated_pdf = settings.reports_dir / f"{task_id}_external_annotated.pdf"
     burn_pdf(pdf_path, report, annotated_pdf)

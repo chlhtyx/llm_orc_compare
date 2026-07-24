@@ -43,3 +43,20 @@ def upload_path(task_id: str, role: str) -> Path | None:
         if f.is_file() and f.name.startswith(f"{task_id}-{role}"):
             return f
     return None
+
+
+def compared_pdf_path(task_id: str) -> Path:
+    """返回任务截断后实际参与比对的 PDF 固定产物路径。"""
+    return settings.reports_dir / f"{task_id}_compared.pdf"
+
+
+def effective_target_path(task_id: str) -> Path | None:
+    """返回实际比对的回收件；未截取时回退到上传的原始 PDF。
+
+    页数截取发生时，OCR、报告和高亮必须使用同一份物理 PDF，不能再回读
+    上传的全页回收件，否则预览或导出产物会重新出现被排除的页面。
+    """
+    compared = compared_pdf_path(task_id)
+    if compared.is_file():
+        return compared
+    return upload_path(task_id, "target")

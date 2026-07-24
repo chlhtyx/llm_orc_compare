@@ -100,6 +100,7 @@ def external_client(db_isolated, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "external_max_upload_mb", 50)
     monkeypatch.setattr(settings, "external_ocr_backend", "paddleocr")
     monkeypatch.setattr(settings, "external_enable_llm_judge", False)
+    monkeypatch.setattr(settings, "external_enable_llm_alignment", False)
     monkeypatch.setattr(settings, "external_enable_risk_assessment", False)
     yield client
     task_manager._tasks.clear()
@@ -180,6 +181,7 @@ def test_compare_page_api_test_reuses_external_artifact_flow_without_callback(
     assert task.external_request is True
     assert task.callback_url is None
     assert captured["kwargs"]["enable_llm_judge"] is False
+    assert captured["kwargs"]["enable_llm_alignment"] is False
     assert captured["kwargs"]["ocr_backend"] == "paddleocr"
     assert captured["kwargs"]["enable_risk_assessment"] is False
 
@@ -197,6 +199,7 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
     monkeypatch.setattr(task_manager, "run", _capture_run)
     monkeypatch.setattr(settings, "external_ocr_backend", "llm")
     monkeypatch.setattr(settings, "external_enable_llm_judge", True)
+    monkeypatch.setattr(settings, "external_enable_llm_alignment", True)
     monkeypatch.setattr(settings, "external_enable_risk_assessment", True)
 
     test_response = external_client.post(
@@ -224,6 +227,7 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
     assert len(captured) == 2
     assert all(item["ocr_backend"] == "llm" for item in captured)
     assert all(item["enable_llm_judge"] is True for item in captured)
+    assert all(item["enable_llm_alignment"] is True for item in captured)
     assert all(item["enable_risk_assessment"] is True for item in captured)
 
 

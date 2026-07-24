@@ -77,6 +77,73 @@ def test_align_field_key_same_role_multiple():
     assert by_field[1].pdf_clause_id == "p2"
 
 
+def test_repeated_number_missing_on_one_side_does_not_shift_anchor_pairs():
+    """重复子编号缺失一条时，后续同编号不能按出现顺序被强制错配。"""
+    class TextEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, left, right):
+            return 0.95 if left == right else 0.10
+
+    word = [
+        _clause("w1", "1", "第一章交付要求"),
+        _clause("w2", "1", "第二章付款要求"),
+    ]
+    pdf = [
+        _clause("p1", "1", "第二章付款要求", "pdf"),
+    ]
+
+    alignments = align_clauses(word, pdf, TextEmbedding(), threshold=0.85)
+
+    assert any(
+        item.word_clause_id == "w2" and item.pdf_clause_id == "p1"
+        for item in alignments
+    )
+    assert any(
+        item.word_clause_id == "w1"
+        and item.pdf_clause_id is None
+        and item.match_type == "unmatched"
+        for item in alignments
+    )
+
+
+def test_semantic_alignment_cannot_cross_confirmed_anchor_boundaries():
+    """锚点前后的剩余条款必须分段匹配，不能跨越已确认编号锚点。"""
+    class CrossingEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, left, right):
+            return 0.95 if {left, right} == {"锚点前条款", "锚点后新增文本"} else 0.1
+
+    word = [
+        _clause("w-anchor-1", "1", "第一条"),
+        _clause("w-before", "", "锚点前条款"),
+        _clause("w-anchor-2", "2", "第二条"),
+    ]
+    pdf = [
+        _clause("p-anchor-1", "1", "第一条", "pdf"),
+        _clause("p-anchor-2", "2", "第二条", "pdf"),
+        _clause("p-after", "", "锚点后新增文本", "pdf"),
+    ]
+
+    alignments = align_clauses(word, pdf, CrossingEmbedding(), threshold=0.85)
+
+    assert not any(
+        item.word_clause_id == "w-before" and item.pdf_clause_id == "p-after"
+        for item in alignments
+    )
+    assert any(
+        item.word_clause_id == "w-before" and item.pdf_clause_id is None
+        for item in alignments
+    )
+    assert any(
+        item.word_clause_id is None and item.pdf_clause_id == "p-after"
+        for item in alignments
+    )
+
+
 def test_aligns_layout_whitespace_variants_without_embedding():
     """OCR 字间空格只是版式噪声，不应生成一条 added 和一条 deleted。"""
     class RejectingEmbedding:
@@ -200,3 +267,112 @@ def test_semantic_alignment_uses_global_monotonic_optimum():
         ("w2", "p2"),
     ]
     assert not [item for item in alignments if item.match_type == "unmatched"]
+
+
+def test_semantic_alignment_supports_one_word_to_two_pdf_clauses():
+    """解析边界不同时，应原生表达 1↔2，而不是生成一条误报 added。"""
+    class SplitAwareEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, left, right):
+            values = {left, right}
+            if values == {"交付后付款\n验收合格", "交付后付款 验收合格"}:
+                return 0.96
+            return 0.20
+
+    word = [_clause("w1", "", "交付后付款 验收合格")]
+    pdf = [
+        _clause("p1", "", "交付后付款", "pdf"),
+        _clause("p2", "", "验收合格", "pdf"),
+    ]
+
+    alignments = align_clauses(word, pdf, SplitAwareEmbedding(), threshold=0.85)
+
+    assert len(alignments) == 1
+    assert alignments[0].word_clause_ids == ["w1"]
+    assert alignments[0].pdf_clause_ids == ["p1", "p2"]
+    assert alignments[0].match_type == "semantic"
+
+
+def test_llm_resolver_can_select_bounded_near_threshold_split_candidate():
+    """LLM 只能从代码候选中选择，并可确认略低于常规阈值的 1↔2 歧义项。"""
+    class SplitEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, left, right):
+            if "\n" in left or "\n" in right:
+                return 0.80
+            return 0.30
+
+    def resolver(candidates):
+        split = next(
+            item
+            for item in candidates
+            if item.word_clause_ids == ("w1",)
+            and item.pdf_clause_ids == ("p1", "p2")
+        )
+        return [
+            {
+                "candidate_id": split.candidate_id,
+                "confidence": 0.92,
+                "reason": "同一付款条款被 PDF 解析为相邻两段",
+            }
+        ]
+
+    alignments = align_clauses(
+        [_clause("w1", "", "交付后付款并在验收后结清")],
+        [
+            _clause("p1", "", "交付后付款", "pdf"),
+            _clause("p2", "", "验收后结清", "pdf"),
+        ],
+        SplitEmbedding(),
+        threshold=0.85,
+        llm_resolver=resolver,
+    )
+
+    assert len(alignments) == 1
+    assert alignments[0].match_type == "llm"
+    assert alignments[0].pdf_clause_ids == ["p1", "p2"]
+    assert "0.920" in alignments[0].alignment_reason
+
+
+def test_llm_resolver_can_break_close_one_to_one_candidate_tie():
+    """第一、第二候选分数接近时，LLM 可在受限 1↔1 候选中重排。"""
+    class TieEmbedding:
+        def embed_batch(self, texts):
+            return texts
+
+        def similarity(self, left, right):
+            if "\n" in left or "\n" in right:
+                return 0.10
+            return {
+                ("候选甲", "待匹配条款"): 0.84,
+                ("候选乙", "待匹配条款"): 0.82,
+            }.get((left, right), 0.0)
+
+    def resolver(candidates):
+        selected = next(
+            item for item in candidates if item.pdf_clause_ids == ("p1",)
+        )
+        return [{
+            "candidate_id": selected.candidate_id,
+            "confidence": 0.90,
+            "reason": "主体和履约条件更一致",
+        }]
+
+    alignments = align_clauses(
+        [_clause("w1", "", "待匹配条款")],
+        [
+            _clause("p1", "", "候选甲", "pdf"),
+            _clause("p2", "", "候选乙", "pdf"),
+        ],
+        TieEmbedding(),
+        threshold=0.85,
+        llm_resolver=resolver,
+    )
+
+    selected = next(item for item in alignments if item.word_clause_id == "w1")
+    assert selected.pdf_clause_id == "p1"
+    assert selected.match_type == "llm"

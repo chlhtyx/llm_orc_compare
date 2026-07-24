@@ -17,7 +17,7 @@ from document_comparison.models import (
     PageRegion,
     TamperReport,
 )
-from document_comparison.parsing.pdf import extract_text_blocks
+from document_comparison.parsing.pdf import count_pages, extract_text_blocks
 from document_comparison.pipeline import run_pipeline
 from document_comparison.report.builder import burn_pdf
 
@@ -185,6 +185,178 @@ def test_pipeline_identical(tmp_path):
     assert len(report.diffs) == 0
 
 
+def test_pipeline_uses_raw_span_plan_when_llm_alignment_enabled(
+    tmp_path,
+    monkeypatch,
+):
+    """开启后先联合规划 RawSpan，关闭时不得产生隐式模型调用。"""
+    from document_comparison import pipeline as pipeline_module
+    from document_comparison.models import (
+        RawAlignmentGroup,
+        RawAlignmentPlan,
+        RawSpan,
+    )
+
+    preamble = "甲乙双方本着平等互利,诚实信用的原则,经过协商一致订立本合同,恪守合同规定。"
+    word_buf = _make_word([
+        ("p", "乙方：(供方)湖北欧朗机械有限公司"),
+        ("p", preamble),
+        ("p", "一 、 合同标的"),
+    ])
+    pdf_buf = _make_pdf_from_lines([
+        "乙方：(供方)湖北欧朗机械有限公司",
+        preamble,
+        "一、合同标的",
+    ])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    calls: list[tuple[int, int]] = []
+
+    def planner(word_blocks, pdf_blocks):
+        calls.append((len(word_blocks), len(pdf_blocks)))
+        assert len(word_blocks) == len(pdf_blocks) == 3
+        return RawAlignmentPlan(
+            groups=[
+                RawAlignmentGroup(
+                    word_spans=[
+                        RawSpan(block_id=f"w-{index}", start=0, end=len(word.text))
+                    ],
+                    pdf_spans=[
+                        RawSpan(block_id=f"p-{index}", start=0, end=len(pdf.text))
+                    ],
+                    confidence=0.99,
+                    reason="对应原始段落",
+                )
+                for index, (word, pdf) in enumerate(
+                    zip(word_blocks, pdf_blocks), start=1
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_raw_alignment_plan",
+        planner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_clauses",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("成功的 RawSpan 联合计划不应依赖 Clause 切分")
+        ),
+    )
+
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+        enable_llm_alignment=True,
+    )
+
+    assert calls == [(3, 3)]
+    assert report.change_status == "clean"
+    assert report.diffs == []
+    assert report.unmatched_clauses == []
+
+
+def test_pipeline_raw_span_plan_cannot_clear_amount_change(tmp_path, monkeypatch):
+    """联合计划只决定配对；金额字符变化仍由确定性裁决报告。"""
+    from document_comparison import pipeline as pipeline_module
+    from document_comparison.models import (
+        RawAlignmentGroup,
+        RawAlignmentPlan,
+        RawSpan,
+    )
+
+    word_buf = _make_word([
+        ("h1", "第二条 合同金额"),
+        ("p", "金额为100万元。"),
+    ])
+    pdf_buf = _make_pdf_from_lines([
+        "第二条 合同金额",
+        "金额为200万元。",
+    ])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+
+    def planner(word_blocks, pdf_blocks):
+        return RawAlignmentPlan(
+            groups=[
+                RawAlignmentGroup(
+                    word_spans=[
+                        RawSpan(
+                            block_id=f"w-{index}",
+                            start=0,
+                            end=len(word.text),
+                        )
+                    ],
+                    pdf_spans=[
+                        RawSpan(
+                            block_id=f"p-{index}",
+                            start=0,
+                            end=len(pdf.text),
+                        )
+                    ],
+                    confidence=0.99,
+                    reason="同一位置段落",
+                )
+                for index, (word, pdf) in enumerate(
+                    zip(word_blocks, pdf_blocks), start=1
+                )
+            ]
+        )
+
+    monkeypatch.setattr(pipeline_module, "resolve_raw_alignment_plan", planner)
+
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+        enable_llm_alignment=True,
+        enable_risk_assessment=True,
+    )
+
+    assert report.change_status == "changed"
+    assert any(diff.status == "modified" for diff in report.diffs)
+    assert any(element.kind == "amount" for element in report.key_elements)
+
+
+def test_pipeline_invalid_raw_plan_falls_back_to_clause_alignment(
+    tmp_path,
+    monkeypatch,
+):
+    from document_comparison import pipeline as pipeline_module
+
+    word_buf = _make_word([("h1", "第一条 合同标的")])
+    pdf_buf = _make_pdf_from_lines(["第一条 合同标的"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+    build_calls: list[str] = []
+    real_build = pipeline_module.build_clauses
+
+    def spy_build(items, doc_type):
+        build_calls.append(doc_type)
+        return real_build(items, doc_type)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_raw_alignment_plan",
+        lambda _word, _pdf: None,
+    )
+    monkeypatch.setattr(pipeline_module, "build_clauses", spy_build)
+
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+        enable_llm_alignment=True,
+    )
+
+    assert build_calls == ["word", "pdf"]
+    assert report.change_status == "clean"
+
+
 def test_pipeline_detects_amount_tamper(tmp_path):
     parts = [
         ("h1", "第二条 合同金额"),
@@ -325,6 +497,7 @@ def test_pipeline_truncates_pdf_when_exceeds_original_pages(tmp_path: Path):
     report = run_pipeline(
         wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding(),
         truncate_to_original_pages=True,
+        truncated_pdf_output_path=tmp_path / "compared.pdf",
     )
     # 截断后只剩 1 页(原始合同估算页数)
     assert len(report.page_meta) == 1
@@ -340,8 +513,10 @@ def test_pipeline_truncates_pdf_when_exceeds_original_pages(tmp_path: Path):
 
     # 下游 burn_pdf 必须能在截断后的 PDF 上逐页渲染而不越界
     annotated = tmp_path / "annotated.pdf"
-    burn_pdf(ppath, report, annotated)
+    burn_pdf(report.target, report, annotated)
     assert annotated.exists() and annotated.stat().st_size > 0
+    assert count_pages(report.target) == 1
+    assert count_pages(annotated) == 1
 
 
 def test_pipeline_truncate_respects_explicit_page_count(tmp_path: Path):

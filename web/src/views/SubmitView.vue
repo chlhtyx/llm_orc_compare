@@ -20,6 +20,7 @@ const form = reactive({
   external_image_dpi: 144,
   external_ocr_backend: 'paddleocr' as 'llm' | 'paddleocr',
   external_enable_llm_judge: false,
+  external_enable_llm_alignment: false,
   external_enable_risk_assessment: false,
   external_truncate_to_original_pages: false,
 })
@@ -40,6 +41,7 @@ function syncFromConfig(config: LlmConfig | null): void {
   form.external_image_dpi = config.external_image_dpi ?? 144
   form.external_ocr_backend = config.external_ocr_backend || 'paddleocr'
   form.external_enable_llm_judge = config.external_enable_llm_judge ?? false
+  form.external_enable_llm_alignment = config.external_enable_llm_alignment ?? false
   form.external_enable_risk_assessment = config.external_enable_risk_assessment ?? false
   form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
   keyDirty.value = false
@@ -64,6 +66,7 @@ async function onSave(): Promise<void> {
     external_ocr_backend: form.external_ocr_backend,
     external_enable_llm_judge:
       form.external_enable_risk_assessment && form.external_enable_llm_judge,
+    external_enable_llm_alignment: form.external_enable_llm_alignment,
     external_enable_risk_assessment: form.external_enable_risk_assessment,
     external_truncate_to_original_pages: form.external_truncate_to_original_pages,
   })
@@ -203,6 +206,17 @@ async function onReset(): Promise<void> {
         </fieldset>
 
         <div class="option-toggles">
+          <label class="toggle-row">
+            <span>
+              <strong>LLM 联合分段对齐</strong>
+              <small>直接对齐 DOCX 段落与 PDF OCR 块；失败时回退规则，不会决定是否发生篡改。</small>
+            </span>
+            <input
+              v-model="form.external_enable_llm_alignment"
+              type="checkbox"
+              role="switch"
+            />
+          </label>
           <label class="toggle-row">
             <span>
               <strong>风险评估</strong>

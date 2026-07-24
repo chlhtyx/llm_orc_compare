@@ -31,6 +31,9 @@ _INLINE_NUMBER_RE = re.compile(
     # 等金额/日期小数误识别为新条款。
     r"(?:(?<!\d)\d{1,2}\.\d{1,2}(?:\.\d{1,2})?[.、]?\s+|[（(][一二三四五六七八九十\d]+[)）])"
 )
+_INLINE_CN_NUMBER_RE = re.compile(
+    r"[一二三四五六七八九十]{1,3}\s*[、.．]\s*(?=\S)"
+)
 _INLINE_CHAPTER_RE = re.compile(
     r"第[一二三四五六七八九十百千零〇\d]+(?:条|章)"
 )
@@ -45,7 +48,9 @@ _NUM_PATTERNS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"^第([一二三四五六七八九十百千零〇\d]+)(?:条|章)" + _SEP), 1),
     (re.compile(r"^(\d+\.\d+(?:\.\d+)?)" + _SEP), 2),  # X.X / X.X.X
     (re.compile(r"^[（(]([一二三四五六七八九十\d]+)[)）]"), 3),
-    (re.compile(r"^([一二三四五六七八九十]+)、"), 2),
+    # Word 自动编号转纯文本后可能在中文序号与顿号间留下排版空格，
+    # 如「一 、 合同标的」。只放宽行首编号前缀，不改动原文参与差异裁决。
+    (re.compile(r"^([一二三四五六七八九十]+)\s*[、.．]\s*"), 2),
     (re.compile(r"^(\d+)[\.、]"), 2),
 ]
 
@@ -249,6 +254,15 @@ def _split_logical_lines(norm: str) -> list[str]:
                 continue
             starts.append(index)
 
+        for match in _INLINE_CN_NUMBER_RE.finditer(line):
+            index = match.start()
+            if index == 0:
+                continue
+            previous = line[index - 1]
+            if not (previous.isspace() or previous in "。；;、:："):
+                continue
+            starts.append(index)
+
         for match in _INLINE_FIELD_RE.finditer(line):
             if match.start() > 0:
                 starts.append(match.start())
@@ -322,12 +336,18 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
     clauses: list[Clause] = []
     current: Clause | None = None
     counter = 0
+    hierarchy: dict[int, str] = {}
 
     def new_clause(number, level, title, text, item: RawItem, field_key: str = "") -> Clause:
         nonlocal counter
         counter += 1
         blocks = [_raw_to_block(item)] if item.bbox else []
-        return Clause(
+        parent_path = [
+            hierarchy[parent_level]
+            for parent_level in sorted(hierarchy)
+            if level <= 0 or parent_level < level
+        ]
+        clause = Clause(
             clause_id=f"{doc_type}-{counter}",
             doc_type=doc_type,
             level=level,
@@ -336,7 +356,14 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
             text=text,
             blocks=blocks,
             field_key=field_key,
+            parent_path=parent_path,
         )
+        if level > 0:
+            for child_level in [value for value in hierarchy if value >= level]:
+                hierarchy.pop(child_level, None)
+            label = " ".join(value for value in (number, title) if value).strip()
+            hierarchy[level] = label or text[:80]
+        return clause
 
     for item in raw_items:
         norm = normalize_text(item.text)

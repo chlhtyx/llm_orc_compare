@@ -263,6 +263,7 @@ const llmKindText: Record<string, string> = {
   'ocr-whole': '整页 OCR',
   'paddleocr': 'PaddleOCR',
   'judge': '辅助说明',
+  'alignment': '条款对齐',
   'llm-diff': '整篇比对',
   'statement-column': '列定位',
 }

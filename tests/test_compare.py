@@ -10,8 +10,10 @@ from document_comparison.compare.elements import (
 from document_comparison.compare.risk import classify_diff, max_risk
 from document_comparison.models import (
     Alignment,
+    Block,
     Clause,
     KeyElement,
+    PageMeta,
     TableStructure,
     TamperReport,
 )
@@ -168,6 +170,81 @@ def test_unmatched_plain_clause_is_low_risk():
     c = Clause(clause_id="x", doc_type="pdf", text="(以下无正文)")
     risk, _ = _unmatched_risk(c)
     assert risk == "low"
+
+
+def test_group_alignment_report_compares_all_text_and_pdf_regions():
+    """1↔2 对齐必须合并两条 PDF 的文本与坐标后再做确定性差异检测。"""
+    word = Clause(
+        clause_id="w1",
+        doc_type="word",
+        text="交付后付款。验收合格后30日内结清。",
+    )
+    pdf_first = Clause(
+        clause_id="p1",
+        doc_type="pdf",
+        text="交付后付款。",
+        blocks=[
+            Block(
+                block_id="b1",
+                page_index=0,
+                label="text",
+                bbox=[10, 10, 100, 30],
+                content="交付后付款。",
+            )
+        ],
+    )
+    pdf_second = Clause(
+        clause_id="p2",
+        doc_type="pdf",
+        text="验收合格后31日内结清。",
+        blocks=[
+            Block(
+                block_id="b2",
+                page_index=0,
+                label="text",
+                bbox=[10, 40, 120, 60],
+                content="验收合格后31日内结清。",
+            )
+        ],
+    )
+
+    report = build_report(
+        alignments=[
+            Alignment(
+                word_clause_ids=["w1"],
+                pdf_clause_ids=["p1", "p2"],
+                match_type="semantic",
+                similarity=0.96,
+            )
+        ],
+        word_by={"w1": word},
+        pdf_by={"p1": pdf_first, "p2": pdf_second},
+        embed=_TextAwareEmbedding(),
+        page_metas=[
+            PageMeta(
+                page_index=0,
+                width_px=200,
+                height_px=200,
+                pdf_width_pt=200,
+                pdf_height_pt=200,
+            )
+        ],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    assert report.change_status == "changed"
+    assert len(report.diffs) == 1
+    assert any(
+        segment.op == "delete" and "0" in segment.text
+        for segment in report.diffs[0].segments
+    )
+    assert any(
+        segment.op == "insert" and "1" in segment.text
+        for segment in report.diffs[0].segments
+    )
+    assert len(report.diffs[0].page_regions) == 2
 
 
 class _AlmostIdenticalEmbedding:

@@ -43,8 +43,8 @@ from ..models import (
 )
 from ..parsing.pdf import count_pages_from_bytes
 from ..storage import (
+    effective_target_path,
     save_upload,
-    upload_path,
 )
 from ..report.builder import burn_pdf
 from ..external_api import (
@@ -379,7 +379,9 @@ def create_app() -> FastAPI:
             "external_image_dpi": settings.external_image_dpi,
             "external_ocr_backend": settings.external_ocr_backend,
             "external_enable_llm_judge": settings.external_enable_llm_judge,
+            "external_enable_llm_alignment": settings.external_enable_llm_alignment,
             "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+            "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
             "external_enabled": external_config_enabled(),
             "persisted": _safe_persisted_config(),
         }
@@ -398,8 +400,8 @@ def create_app() -> FastAPI:
         embed_backend, embed_api_base, embed_api_key, embed_model, embed_timeout,
         pdf_render_dpi, max_pdf_pages, external_api_key,
         external_public_base_url, external_max_upload_mb, external_image_dpi,
-        external_ocr_backend, external_enable_llm_judge,
-        external_enable_risk_assessment。
+        external_ocr_backend, external_enable_llm_judge, external_enable_llm_alignment,
+        external_enable_risk_assessment, external_truncate_to_original_pages。
         空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
@@ -416,6 +418,7 @@ def create_app() -> FastAPI:
             "external_api_key", "external_public_base_url",
             "external_max_upload_mb", "external_image_dpi",
             "external_ocr_backend", "external_enable_llm_judge",
+            "external_enable_llm_alignment",
             "external_enable_risk_assessment",
             "external_truncate_to_original_pages",
         }
@@ -525,6 +528,9 @@ def create_app() -> FastAPI:
         if "external_enable_llm_judge" in body:
             if not isinstance(body["external_enable_llm_judge"], bool):
                 raise HTTPException(400, "external_enable_llm_judge 必须为布尔值")
+        if "external_enable_llm_alignment" in body:
+            if not isinstance(body["external_enable_llm_alignment"], bool):
+                raise HTTPException(400, "external_enable_llm_alignment 必须为布尔值")
         if "external_enable_risk_assessment" in body:
             if not isinstance(body["external_enable_risk_assessment"], bool):
                 raise HTTPException(400, "external_enable_risk_assessment 必须为布尔值")
@@ -594,6 +600,7 @@ def create_app() -> FastAPI:
                 "external_image_dpi": settings.external_image_dpi,
                 "external_ocr_backend": settings.external_ocr_backend,
                 "external_enable_llm_judge": settings.external_enable_llm_judge,
+                "external_enable_llm_alignment": settings.external_enable_llm_alignment,
                 "external_enable_risk_assessment": settings.external_enable_risk_assessment,
                 "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
                 "external_enabled": external_config_enabled(),
@@ -659,6 +666,7 @@ def create_app() -> FastAPI:
                 str(word_path),
                 str(pdf_path),
                 enable_llm_judge=settings.external_enable_llm_judge,
+                enable_llm_alignment=settings.external_enable_llm_alignment,
                 ocr_backend=settings.external_ocr_backend,
                 enable_risk_assessment=settings.external_enable_risk_assessment,
                 truncate_to_original_pages=settings.external_truncate_to_original_pages,
@@ -777,6 +785,7 @@ def create_app() -> FastAPI:
             str(word_path),
             str(pdf_path),
             enable_llm_judge=settings.external_enable_llm_judge,
+            enable_llm_alignment=settings.external_enable_llm_alignment,
             ocr_backend=settings.external_ocr_backend,
             enable_risk_assessment=settings.external_enable_risk_assessment,
             truncate_to_original_pages=settings.external_truncate_to_original_pages,
@@ -851,8 +860,9 @@ def create_app() -> FastAPI:
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
-        # 解析 options(可选);提取 enable_llm_judge / ocr_backend / enable_risk_assessment 透传到 pipeline
+        # 解析 options(可选);提取 LLM 对齐/说明、OCR 与风险选项透传到 pipeline
         enable_llm_judge = False
+        enable_llm_alignment = False
         ocr_backend: str | None = None
         enable_risk_assessment = False
         truncate_to_original_pages = False
@@ -861,6 +871,7 @@ def create_app() -> FastAPI:
             try:
                 opts = CompareOptions.model_validate_json(options)
                 enable_llm_judge = opts.enable_llm_judge
+                enable_llm_alignment = opts.enable_llm_alignment
                 ocr_backend = opts.ocr_backend
                 enable_risk_assessment = opts.enable_risk_assessment
                 truncate_to_original_pages = opts.truncate_to_original_pages
@@ -912,6 +923,7 @@ def create_app() -> FastAPI:
             task_manager.run(
                 task_id, str(word_path), str(pdf_path),
                 enable_llm_judge=enable_llm_judge,
+                enable_llm_alignment=enable_llm_alignment,
                 ocr_backend=ocr_backend,
                 enable_risk_assessment=enable_risk_assessment,
                 truncate_to_original_pages=truncate_to_original_pages,
@@ -982,7 +994,7 @@ def create_app() -> FastAPI:
         if format == "json":
             return JSONResponse(content=report.model_dump())
         if format == "pdf":
-            target_path = upload_path(task_id, "target")
+            target_path = effective_target_path(task_id)
             if target_path is None:
                 raise HTTPException(404, "源 PDF 文件已过期,无法生成标注报告")
             out = settings.reports_dir / f"{task_id}_annotated.pdf"
@@ -999,12 +1011,11 @@ def create_app() -> FastAPI:
         "/api/v1/compare/{task_id}/source",
     )
     async def get_source_file(task_id: str):
-        """返回上传的原始 PDF 扫描件,供前端预览。
+        """返回实际参与比对的 PDF,供前端预览。
 
-        在报告查看模式下,前端可通过此端点获取 PDF 文件路径,
-        以浏览器原生 <iframe> 或 pdf.js 渲染预览。
+        页数截取发生时返回持久化的前 N 页文件；其他任务返回上传的原始 PDF。
         """
-        path = upload_path(task_id, "target")  # PDF 扫描件是 target
+        path = effective_target_path(task_id)
         if path is None:
             raise HTTPException(404, "source file not found (may have been cleaned up)")
         return FileResponse(

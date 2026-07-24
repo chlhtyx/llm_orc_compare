@@ -37,8 +37,12 @@ def count_pages_from_bytes(data: bytes) -> int:
         return len(doc)
 
 
-def slice_pdf(src: str | Path, n_pages: int) -> Path:
-    """生成只含前 n_pages 页的 PDF,返回其路径(临时文件)。
+def slice_pdf(
+    src: str | Path,
+    n_pages: int,
+    output_path: str | Path | None = None,
+) -> Path:
+    """生成只含前 n_pages 页的 PDF,返回其路径。
 
     用于「回收件页数截取」:回收 PDF 页数超过原始合同时,物理截断到原始页数
     再走流水线,使 OCR / build_report / burn_pdf / 高亮图渲染等全部下游在
@@ -55,7 +59,11 @@ def slice_pdf(src: str | Path, n_pages: int) -> Path:
         total = len(doc)
         if n_pages >= total:
             return src
-        out_path = Path(tempfile.mkstemp(prefix="dc-slice-", suffix=".pdf")[1])
+        if output_path is None:
+            out_path = Path(tempfile.mkstemp(prefix="dc-slice-", suffix=".pdf")[1])
+        else:
+            out_path = Path(output_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
         subset = fitz.open()
         try:
             subset.insert_pdf(doc, from_page=0, to_page=n_pages - 1)

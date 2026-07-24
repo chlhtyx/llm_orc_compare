@@ -327,8 +327,8 @@ def build_report(
     for idx, al in enumerate(alignments):
         if al.match_type not in ("number", "field") or not al.word_clause_id or not al.pdf_clause_id:
             continue
-        wc = word_by.get(al.word_clause_id)
-        pc = pdf_by.get(al.pdf_clause_id)
+        wc = _alignment_clause(al.word_clause_ids, al.word_clause_id, word_by)
+        pc = _alignment_clause(al.pdf_clause_ids, al.pdf_clause_id, pdf_by)
         if wc and pc and wc.text != pc.text:
             anchored_pairs.append((idx, wc, pc))
     anchored_similarities: dict[int, float] = {}
@@ -345,8 +345,8 @@ def build_report(
         if idx in covered_boundary_alignments:
             logger.info("suppress covered boundary fragment alignment=%s", idx)
             continue
-        wc = word_by.get(al.word_clause_id) if al.word_clause_id else None
-        pc = pdf_by.get(al.pdf_clause_id) if al.pdf_clause_id else None
+        wc = _alignment_clause(al.word_clause_ids, al.word_clause_id, word_by)
+        pc = _alignment_clause(al.pdf_clause_ids, al.pdf_clause_id, pdf_by)
 
         if al.match_type == "unmatched":
             if pc and not wc:  # added
@@ -453,6 +453,7 @@ def build_report(
             verdict=decision.verdict,
             confidence=decision.confidence,
             judged_by=judged_by,
+            alignment_reason=al.alignment_reason,
             page_regions=_normalize_regions(pc.blocks, pmeta),
             number=wc.number or pc.number,
             title=wc.title or pc.title,
@@ -493,6 +494,55 @@ def build_report(
         page_meta=page_metas,
         truncation=truncation,
     )
+
+
+def _alignment_clause(
+    clause_ids: list[str],
+    legacy_clause_id: str | None,
+    clauses_by_id: dict[str, Clause],
+) -> Clause | None:
+    """把 1↔N 对齐侧合成为一条仅供裁决/报告使用的 Clause。
+
+    原始 Clause 不变；合并文本按文档顺序连接，并汇总 PDF blocks 与结构化表格，
+    因而字符/字段/表格判定和高亮定位仍覆盖全部参与条款。
+    """
+    ids = clause_ids or ([legacy_clause_id] if legacy_clause_id else [])
+    clauses = [clauses_by_id[item] for item in ids if item in clauses_by_id]
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    first = clauses[0]
+    return first.model_copy(
+        update={
+            "clause_id": "+".join(clause.clause_id for clause in clauses),
+            "text": _merge_clause_texts(
+                [clause.text for clause in clauses]
+            ),
+            "blocks": [
+                block for clause in clauses for block in clause.blocks
+            ],
+            "tables": [
+                table for clause in clauses for table in clause.tables
+            ],
+        }
+    )
+
+
+def _merge_clause_texts(texts: list[str]) -> str:
+    """合并拆分条款且不把解析边界本身写成字符差异。"""
+    merged = ""
+    for text in texts:
+        if not merged:
+            merged = text
+            continue
+        needs_space = (
+            not merged[-1].isspace()
+            and not text[:1].isspace()
+            and merged[-1] not in "，,。；;:：、!?！？)]）】》"
+        )
+        merged += (" " if needs_space else "") + text
+    return merged
 
 
 # ---- PDF 烧录：将高亮标注直接写入 PDF 页面 ----

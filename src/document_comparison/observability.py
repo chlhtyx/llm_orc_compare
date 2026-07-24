@@ -61,7 +61,15 @@ current_llm_collector: contextvars.ContextVar[list[LlmCallRecord] | None] = (
 
 # 对话型 LLM kind 白名单;embedding 不收集(文本→向量,量太大)。
 _COLLECTED_KINDS = frozenset(
-    {"ocr", "ocr-whole", "paddleocr", "judge", "llm-diff", "statement-column"}
+    {
+        "ocr",
+        "ocr-whole",
+        "paddleocr",
+        "judge",
+        "alignment",
+        "llm-diff",
+        "statement-column",
+    }
 )
 
 # response 截断上限(字符数)。PaddleOCR max_tokens=8000 响应可能接近上限,64KB 足够覆盖。

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from document_comparison.models import TaskInfo
 from document_comparison.tasks import Task
@@ -102,6 +103,53 @@ async def test_external_task_callback_contract(monkeypatch):
     assert callback_results == [
         {"task_id": task_id, "success": True, "http_status": 200, "error": None}
     ]
+
+
+async def test_external_task_renders_persisted_truncated_pdf(monkeypatch, tmp_path: Path):
+    """外部高亮图不能重新使用上传的全页回收件。"""
+    from document_comparison import tasks as tasks_module
+    from document_comparison.config import settings
+    from document_comparison.models import TamperReport, TruncationRecord
+    from document_comparison.storage import compared_pdf_path
+    from document_comparison.tasks import TaskManager
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    report = TamperReport(
+        source="source.docx",
+        target="compared.pdf",
+        truncation=TruncationRecord(
+            original_pdf_page_count=3,
+            truncated_pdf_page_count=1,
+            original_doc_page_count=1,
+            doc_page_count_source="explicit",
+        ),
+    )
+    captured: dict[str, Path] = {}
+
+    def _pipeline(*_args, **kwargs):
+        compared = Path(kwargs["truncated_pdf_output_path"])
+        compared.parent.mkdir(parents=True, exist_ok=True)
+        compared.write_bytes(b"truncated")
+        return report
+
+    def _render(task_id, pdf_path, _report):
+        captured["path"] = Path(pdf_path)
+        assert Path(pdf_path) == compared_pdf_path(task_id)
+        return []
+
+    monkeypatch.setattr(tasks_module, "run_pipeline", _pipeline)
+    monkeypatch.setattr(tasks_module, "render_external_highlight_images", _render)
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_compare_report", "save_llm_calls_batch",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    manager = TaskManager()
+    task_id = manager.create("compare", external_request=True)
+    await manager.run(task_id, "source.docx", "uploaded-full.pdf", truncate_to_original_pages=True)
+
+    assert captured["path"] == compared_pdf_path(task_id)
 
 
 async def test_external_image_failure_sends_failed_callback(monkeypatch):
@@ -219,4 +267,3 @@ async def test_event_stream_returns_when_task_not_found(monkeypatch):
 async def _noop_coro():
     """给 monkeypatch asyncio.sleep 用的空 awaitable。"""
     return None
-

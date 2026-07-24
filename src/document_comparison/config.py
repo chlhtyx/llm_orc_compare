@@ -144,6 +144,11 @@ class Settings:
             "DC_EXTERNAL_ENABLE_LLM_JUDGE", "0"
         ).lower() in ("1", "true", "yes")
     )
+    external_enable_llm_alignment: bool = field(
+        default_factory=lambda: _env(
+            "DC_EXTERNAL_ENABLE_LLM_ALIGNMENT", "0"
+        ).lower() in ("1", "true", "yes")
+    )
     external_enable_risk_assessment: bool = field(
         default_factory=lambda: _env(
             "DC_EXTERNAL_ENABLE_RISK_ASSESSMENT", "0"
@@ -235,6 +240,7 @@ _LLM_CONFIG_FIELDS = (
     "external_image_dpi",
     "external_ocr_backend",
     "external_enable_llm_judge",
+    "external_enable_llm_alignment",
     "external_enable_risk_assessment",
     "external_truncate_to_original_pages",
 )
@@ -275,6 +281,7 @@ _LLM_DEFAULTS: dict = {
     "external_image_dpi": settings.external_image_dpi,
     "external_ocr_backend": settings.external_ocr_backend,
     "external_enable_llm_judge": settings.external_enable_llm_judge,
+    "external_enable_llm_alignment": settings.external_enable_llm_alignment,
     "external_enable_risk_assessment": settings.external_enable_risk_assessment,
     "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
 }
@@ -406,6 +413,10 @@ def apply_llm_overrides() -> None:
         settings.external_ocr_backend = str(cfg["external_ocr_backend"])
     if "external_enable_llm_judge" in cfg:
         settings.external_enable_llm_judge = bool(cfg["external_enable_llm_judge"])
+    if "external_enable_llm_alignment" in cfg:
+        settings.external_enable_llm_alignment = bool(
+            cfg["external_enable_llm_alignment"]
+        )
     if "external_enable_risk_assessment" in cfg:
         settings.external_enable_risk_assessment = bool(
             cfg["external_enable_risk_assessment"]

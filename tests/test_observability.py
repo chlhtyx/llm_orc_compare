@@ -90,6 +90,29 @@ def test_embedding_not_collected(quiet_logger):
     assert len(recs) == 0, "embedding 不应被收集"
 
 
+def test_alignment_llm_call_is_collected(quiet_logger):
+    """歧义条款 LLM 裁决属于对话型调用，必须进入任务调用明细。"""
+    with llm_call_collector() as recs:
+        started = log_model_request(
+            quiet_logger,
+            "alignment",
+            "http://x/v1/chat/completions",
+            {"model": "judge-model"},
+            1,
+        )
+        log_model_response(
+            quiet_logger,
+            "alignment",
+            200,
+            {"selected": []},
+            started,
+        )
+
+    assert len(recs) == 1
+    assert recs[0].kind == "alignment"
+    assert recs[0].status_code == 200
+
+
 # —— 图片脱敏 ——
 
 def test_image_base64_scrubbed(quiet_logger):

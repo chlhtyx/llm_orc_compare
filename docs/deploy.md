@@ -39,6 +39,7 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 | `DC_EXTERNAL_MAX_UPLOAD_MB` | `50` | 外部接口单文件上限默认值；管理端设置可覆盖 |
 | `DC_EXTERNAL_IMAGE_DPI` | `144` | 全页高亮 PNG DPI 默认值；管理端设置可覆盖 |
 | `DC_EXTERNAL_OCR_BACKEND` | `paddleocr` | 外部 API 与页面测试共用的 OCR 引擎默认值 |
+| `DC_EXTERNAL_ENABLE_LLM_ALIGNMENT` | `0` | 外部 API 是否默认启用 LLM 原始块联合分段对齐；失败自动回退 Clause 对齐 |
 | `DC_EXTERNAL_ENABLE_LLM_JUDGE` | `0` | 外部 API 是否默认启用 LLM 辅助说明 |
 | `DC_EXTERNAL_ENABLE_RISK_ASSESSMENT` | `0` | 外部 API 是否默认开启风险分级 |
 

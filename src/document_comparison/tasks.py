@@ -14,6 +14,7 @@ import logging
 import uuid
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .config import settings
 from .db import repository as db_repo
@@ -23,6 +24,7 @@ from .raw_pipeline import run_raw_pipeline
 from .statement_pipeline import run_statement_pipeline
 from .observability import llm_call_collector
 from .external_api import build_external_result, render_external_highlight_images
+from .storage import compared_pdf_path, effective_target_path
 from . import webhook
 
 logger = logging.getLogger(__name__)
@@ -213,6 +215,7 @@ class TaskManager:
     async def run(
         self, task_id: str, word_path: str, pdf_path: str,
         *, enable_llm_judge: bool = False, ocr_backend: str | None = None,
+        enable_llm_alignment: bool = False,
         enable_risk_assessment: bool = False,
         truncate_to_original_pages: bool = False,
         original_page_count: int | None = None,
@@ -220,7 +223,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start task_id=%s word=%s pdf=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", task_id, word_path, pdf_path, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
+        logger.info("task start task_id=%s word=%s pdf=%s llm_alignment=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", task_id, word_path, pdf_path, enable_llm_alignment, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
         await self._db_thread(
             db_repo.update_task_status, task_id, "running"
         )
@@ -238,21 +241,26 @@ class TaskManager:
                         run_pipeline, word_path, pdf_path, settings,
                         on_progress=self._make_progress_cb(task),
                         enable_llm_judge=enable_llm_judge,
+                        enable_llm_alignment=enable_llm_alignment,
                         ocr_backend=ocr_backend,
                         enable_risk_assessment=enable_risk_assessment,
                         truncate_to_original_pages=truncate_to_original_pages,
                         original_page_count=original_page_count,
+                        truncated_pdf_output_path=compared_pdf_path(task_id),
                     )
                 await self._save_llm_calls(task_id, llm_calls)
             task.report = report
             await self._db_thread(
                 db_repo.save_compare_report, task_id, report
             )
-            # 外部任务把“全页高亮 PNG”作为成功结果的一部分。先持久化报告，
+            # 外部任务把“比对范围内的全页高亮 PNG”作为成功结果的一部分。先持久化报告，
             # 再生成图片；渲染失败会进入 failed 回调，但报告仍保留便于排查。
             if task.external_request:
+                # 正常任务必有上传件；这里保留调用方传入路径作兼容兜底，
+                # 使不落盘的测试/自定义执行器仍可生成外部产物。
+                effective_pdf_path = effective_target_path(task_id) or Path(pdf_path)
                 await asyncio.to_thread(
-                    render_external_highlight_images, task_id, pdf_path, report
+                    render_external_highlight_images, task_id, effective_pdf_path, report
                 )
             task.info.overall_risk = report.overall_risk
             task.info.status = "done"

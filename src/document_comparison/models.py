@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # —— 枚举(用 Literal,JSON 友好)——
 DocType = Literal["word", "pdf"]
-MatchType = Literal["number", "field", "normalized_exact", "semantic", "unmatched"]
+MatchType = Literal["number", "field", "normalized_exact", "semantic", "llm", "unmatched"]
 DiffStatus = Literal["identical", "modified", "added", "deleted"]
 RiskLevel = Literal["high", "medium", "low", "none"]
 OverallRisk = Literal["high", "medium", "low", "changed", "clean", "needs_review"]
@@ -73,6 +73,45 @@ class RawItem(BaseModel):
     table: TableStructure | None = Field(default=None, description="kind=table 时的结构化表头/行")
 
 
+class RawAlignmentBlock(BaseModel):
+    """交给联合分段对齐器的只读原始块视图。"""
+
+    block_id: str
+    text: str
+    kind: Literal["paragraph", "heading", "table", "title"] = "paragraph"
+    page_index: int = 0
+    bbox: list[float] = Field(default_factory=list)
+
+
+class RawSpan(BaseModel):
+    """原始块内的半开字符区间 ``[start, end)``。"""
+
+    block_id: str
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+
+class RawAlignmentGroup(BaseModel):
+    """联合分段后的一组 Word/PDF 对应区间；允许一侧为空表示增删。"""
+
+    word_spans: list[RawSpan] = Field(default_factory=list)
+    pdf_spans: list[RawSpan] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _require_one_side(self) -> "RawAlignmentGroup":
+        if not self.word_spans and not self.pdf_spans:
+            raise ValueError("raw alignment group 至少需要一侧包含 span")
+        return self
+
+
+class RawAlignmentPlan(BaseModel):
+    """LLM 返回的整段联合分段与对齐计划。"""
+
+    groups: list[RawAlignmentGroup] = Field(default_factory=list)
+
+
 class Clause(BaseModel):
     """条款(两端统一结构)。"""
 
@@ -88,6 +127,10 @@ class Clause(BaseModel):
         description="条款内含的结构化表格(来自 table 块),供单元格级比对",
     )
     field_key: str = Field(default="", description="键值块的字段名锚点(如甲方/乙方/地址/日期),供对齐层字段锚定;非键值块为空")
+    parent_path: list[str] = Field(
+        default_factory=list,
+        description="从外到内的父章节路径,用于约束重复编号/字段候选的对齐范围",
+    )
 
 
 class Alignment(BaseModel):
@@ -95,12 +138,33 @@ class Alignment(BaseModel):
 
     word_clause_id: str | None = None
     pdf_clause_id: str | None = None
+    word_clause_ids: list[str] = Field(
+        default_factory=list,
+        description="参与本次对齐的 Word 条款 ID；支持 1↔N，旧报告为空时使用 word_clause_id",
+    )
+    pdf_clause_ids: list[str] = Field(
+        default_factory=list,
+        description="参与本次对齐的 PDF 条款 ID；支持 N↔1，旧报告为空时使用 pdf_clause_id",
+    )
     match_type: MatchType
     similarity: float = 0.0
     alignment_reason: str = Field(
         default="",
         description="未对齐时记录最近候选、阈值判断和主要字符差异；已对齐时为空",
     )
+
+    @model_validator(mode="after")
+    def _sync_clause_ids(self) -> "Alignment":
+        """兼容旧单 ID 报告，并让新分组对齐始终保留首个单 ID。"""
+        if not self.word_clause_ids and self.word_clause_id:
+            self.word_clause_ids = [self.word_clause_id]
+        if not self.pdf_clause_ids and self.pdf_clause_id:
+            self.pdf_clause_ids = [self.pdf_clause_id]
+        if self.word_clause_id is None and self.word_clause_ids:
+            self.word_clause_id = self.word_clause_ids[0]
+        if self.pdf_clause_id is None and self.pdf_clause_ids:
+            self.pdf_clause_id = self.pdf_clause_ids[0]
+        return self
 
 
 class DiffSegment(BaseModel):
@@ -303,6 +367,10 @@ class CompareOptions(BaseModel):
     similarity_identical: float | None = Field(default=None, deprecated=True)
     similarity_modified: float | None = Field(default=None, deprecated=True)
     enable_llm_judge: bool = False
+    # 开启后优先让纯文本 LLM 基于 DOCX 段落/PDF OCR block 的字符区间联合
+    # 分段并对齐；整份计划校验失败时回退 Clause 对齐与受限候选裁决。
+    # 最终字符/字段/表格变化始终由确定性裁决。
+    enable_llm_alignment: bool = False
     # 是否启用风险判别(高风险要素抽取 + 严重度分级 + LLM 辅助说明)。
     # 默认 False:仅列举字符级/表格级差异,不做风险判定、不抽取高风险要素。
     # True 时恢复完整风险分级行为(向后兼容)。

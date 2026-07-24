@@ -352,11 +352,13 @@ async function onReset(): Promise<void> {
     </section>
 
     <section class="card">
-      <h2 class="page-title">LLM 辅助说明服务</h2>
+      <h2 class="page-title">LLM 联合分段对齐与辅助说明服务</h2>
       <p class="muted page-desc">
-        对已确认「modified」的条款调用 LLM 补充严重度建议和解释；LLM 不得撤销变化或降低规则下限。
+        同一纯文本 LLM 可基于 DOCX 段落和 PDF OCR 块的字符区间联合分段与对齐，
+        也可对已确认「modified」条款补充严重度建议和解释；
+        联合计划必须通过全覆盖、无重叠和单调校验，LLM 不得撤销变化或降低规则下限。
         需<b>纯文本 LLM</b>(如 Qwen3.5),与 OCR 的多模态 VL 模型分开配置。
-        “合同比对 API”页启用 LLM 辅助说明后生效；未配置则沿用规则说明。
+        “合同比对 API”页分别启用联合对齐或辅助说明后生效；未配置时回退原 Clause 向量与规则链路。
       </p>
 
       <div class="form-grid">

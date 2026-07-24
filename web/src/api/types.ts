@@ -2,7 +2,7 @@
 // 后端字段命名若变更,需同步此处。
 
 export type DocType = 'word' | 'pdf'
-export type MatchType = 'number' | 'field' | 'normalized_exact' | 'semantic' | 'unmatched'
+export type MatchType = 'number' | 'field' | 'normalized_exact' | 'semantic' | 'llm' | 'unmatched'
 export type DiffStatus = 'identical' | 'modified' | 'added' | 'deleted'
 export type RiskLevel = 'high' | 'medium' | 'low' | 'none'
 export type OverallRisk = 'high' | 'medium' | 'low' | 'changed' | 'clean' | 'needs_review'
@@ -113,6 +113,8 @@ export interface TamperReport {
 
 export interface CompareOptions {
   enable_llm_judge?: boolean
+  /** 仅对歧义候选和 1↔N 拆并关系使用纯文本 LLM 辅助选择 */
+  enable_llm_alignment?: boolean
   /**
    * 是否启用风险判别(高风险要素抽取 + 严重度分级 + LLM 辅助说明)。
    * 默认 false:仅列举字符级/表格级差异,不做风险判定。
