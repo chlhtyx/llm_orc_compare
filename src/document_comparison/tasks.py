@@ -55,6 +55,7 @@ _MILESTONE_STAGES: frozenset[str] = frozenset({
     "done",
     "failed",
     "word_done",
+    "pdf_truncated",
     "ocr_done",
     "structure_done",
     "align_done",

@@ -22,6 +22,7 @@ from ..models import (
     PageMeta,
     PageRegion,
     TamperReport,
+    TruncationRecord,
 )
 from ..structure.normalize import normalize_text
 
@@ -157,6 +158,144 @@ def _covered_boundary_alignments(
     return covered
 
 
+# 回收件 PDF 上一行文本的近似高度(pt),用于占位框的最小高度与偏移。
+_PLACEHOLDER_LINE_PT = 14.0
+
+
+def _neighbor_page_regions(
+    position: int,
+    direction: int,
+    word_pos: dict[str, int],
+    paired: list[Alignment],
+    pdf_by: dict[str, Clause],
+    pmeta: dict[int, PageMeta],
+) -> list[PageRegion]:
+    """从 position 出发沿 direction(+1 向后/-1 向前)找第一个已配对邻居,
+    返回该邻居 PDF clause 的真实高亮 PageRegion(已归一化)。
+    找不到返回空列表。
+    """
+    offset = direction
+    while 0 <= position + offset < len(word_pos):
+        candidate_pos = position + offset
+        for pair in paired:
+            if word_pos.get(pair.word_clause_id) == candidate_pos:
+                pc = pdf_by.get(pair.pdf_clause_id)
+                if pc:
+                    regions = _normalize_regions(pc.blocks, pmeta)
+                    if regions:
+                        return regions
+        offset += direction
+    return []
+
+
+def _estimate_deleted_page_regions(
+    word_clause_id: str,
+    alignments: list[Alignment],
+    word_by: dict[str, Clause],
+    pdf_by: dict[str, Clause],
+    pmeta: dict[int, PageMeta],
+) -> list[PageRegion]:
+    """deleted 条款在回收件上无对应内容,这里用相邻已配对条款的高亮区域
+    插值出一个 placeholder PageRegion,仅表示「按文档顺序应在此处附近」。
+
+    策略(优先级递减):
+    - 前后邻居均存在且同页:取前邻居底部 → 后邻居顶部之间的间隙。
+    - 间隙过小(< 一行高度):贴在前邻居下方,高度取一行。
+    - 仅前向邻居:贴前邻居下方同页,高度一行。
+    - 仅后向邻居:贴后邻居顶部上方同页,高度一行。
+    - 前后邻居跨页 / 均无:返回空列表(不生成占位框,deleted 仍以文本形式体现)。
+    """
+    word_ids = list(word_by)
+    word_pos = {clause_id: index for index, clause_id in enumerate(word_ids)}
+    if word_clause_id not in word_pos:
+        return []
+    position = word_pos[word_clause_id]
+    paired = [
+        al
+        for al in alignments
+        if al.match_type != "unmatched" and al.word_clause_id and al.pdf_clause_id
+    ]
+    pre = _neighbor_page_regions(position, -1, word_pos, paired, pdf_by, pmeta)
+    post = _neighbor_page_regions(position, +1, word_pos, paired, pdf_by, pmeta)
+
+    def _placeholder(page_index: int, bbox: list[float]) -> PageRegion:
+        return PageRegion(page_index=page_index, bbox=bbox, shape="rect", kind="placeholder")
+
+    # 前后邻居都有
+    if pre and post:
+        pre_r = pre[-1]
+        post_r = post[0]
+        if pre_r.page_index == post_r.page_index:
+            meta = pmeta.get(pre_r.page_index)
+            if meta and meta.pdf_width_pt and meta.pdf_height_pt:
+                pw, ph = meta.pdf_width_pt, meta.pdf_height_pt
+                gap_top_pt = pre_r.bbox[3] * ph
+                gap_bottom_pt = post_r.bbox[1] * ph
+                x_left = min(pre_r.bbox[0], post_r.bbox[0])
+                x_right = max(pre_r.bbox[2], post_r.bbox[2])
+                # 间隙过小:贴前邻居下方,给一行高度
+                if gap_bottom_pt - gap_top_pt < _PLACEHOLDER_LINE_PT:
+                    top_pt = pre_r.bbox[3] * ph + 2.0
+                    bottom_pt = top_pt + _PLACEHOLDER_LINE_PT
+                else:
+                    top_pt = gap_top_pt
+                    bottom_pt = gap_bottom_pt
+                left, top, right, bottom = _clean_bbox(
+                    [x_left * pw, top_pt, x_right * pw, bottom_pt], pw, ph
+                )
+                if right > left and bottom > top:
+                    return [_placeholder(
+                        pre_r.page_index,
+                        [left / pw, top / ph, right / pw, bottom / ph],
+                    )]
+        # 跨页:退化为贴前邻居下方(若前邻居存在)
+        if pre:
+            return _attach_to_neighbor(pre[-1], pmeta, after=True, _placeholder=_placeholder)
+
+    # 仅前向邻居:贴其下方
+    if pre:
+        return _attach_to_neighbor(pre[-1], pmeta, after=True, _placeholder=_placeholder)
+
+    # 仅后向邻居:贴其上方
+    if post:
+        return _attach_to_neighbor(post[0], pmeta, after=False, _placeholder=_placeholder)
+
+    return []
+
+
+def _attach_to_neighbor(
+    region: PageRegion,
+    pmeta: dict[int, PageMeta],
+    *,
+    after: bool,
+    _placeholder,
+) -> list[PageRegion]:
+    """在邻居 region 同页贴一个一行高度的占位框。
+    after=True 贴下方(仅前向邻居时),after=False 贴上方(仅后向邻居时)。
+    超出页面边界则放弃。
+    """
+    meta = pmeta.get(region.page_index)
+    if not meta or not (meta.pdf_width_pt and meta.pdf_height_pt):
+        return []
+    pw, ph = meta.pdf_width_pt, meta.pdf_height_pt
+    x_left = region.bbox[0]
+    x_right = region.bbox[2]
+    if after:
+        top_pt = region.bbox[3] * ph + 2.0
+        bottom_pt = top_pt + _PLACEHOLDER_LINE_PT
+    else:
+        bottom_pt = region.bbox[1] * ph - 2.0
+        top_pt = bottom_pt - _PLACEHOLDER_LINE_PT
+    left, top, right, bottom = _clean_bbox(
+        [x_left * pw, top_pt, x_right * pw, bottom_pt], pw, ph
+    )
+    if right <= left or bottom <= top:
+        return []
+    return [_placeholder(
+        region.page_index, [left / pw, top / ph, right / pw, bottom / ph]
+    )]
+
+
 def build_report(
     *,
     alignments: list[Alignment],
@@ -169,6 +308,7 @@ def build_report(
     target: str,
     enable_llm_judge: bool = False,
     enable_risk_assessment: bool = False,
+    truncation: TruncationRecord | None = None,
 ) -> TamperReport:
     pmeta = {m.page_index: m for m in page_metas}
     diffs: list[Diff] = []
@@ -236,6 +376,12 @@ def build_report(
                     risk_reasons = [reason]
                 else:
                     risk, risk_reasons = "none", []
+                # deleted 在回收件无对应内容,用相邻已配对条款插值出推断占位区域。
+                placeholder_regions: list[PageRegion] = []
+                if wc and wc.clause_id:
+                    placeholder_regions = _estimate_deleted_page_regions(
+                        wc.clause_id, alignments, word_by, pdf_by, pmeta
+                    )
                 d = Diff(
                     alignment_id=f"al{idx}",
                     status="deleted",
@@ -245,6 +391,7 @@ def build_report(
                     confidence=confidence,
                     alignment_reason=al.alignment_reason,
                     segments=[DiffSegment(op="delete", text=wc.text)] if wc else [],
+                    page_regions=placeholder_regions,
                     number=wc.number if wc else "",
                     title=wc.title if wc else "",
                 )
@@ -344,6 +491,7 @@ def build_report(
         key_elements=changed_elems,
         unmatched_clauses=unmatched,
         page_meta=page_metas,
+        truncation=truncation,
     )
 
 
@@ -375,6 +523,10 @@ _STATUS_STROKE = {
     "deleted": (0.85, 0.15, 0.15),
     "identical": (0.4, 0.45, 0.5),
 }
+# deleted 推断占位框:虚线红框 + 极淡红填充(与实线高亮框区分,提示位置为推断)。
+_PLACEHOLDER_FILL = (1.0, 0.85, 0.85)
+_PLACEHOLDER_STROKE = (0.85, 0.15, 0.15)
+_PLACEHOLDER_TAG = "缺"
 
 
 def burn_pdf(
@@ -384,22 +536,22 @@ def burn_pdf(
 ) -> Path:
     """在源 PDF 页面上烧录差异标注矩形框,保存为新文件。
 
-    标注来自 report.diffs 中所有带 page_regions 的条款。每个区域:
-    - 按风险等级着色半透明矩形
-    - 在矩形右上角附加简短编号标签
+    标注来自 report.diffs 及 unmatched_clauses 中所有带 page_regions 的条款。每个区域:
+    - 真实高亮(real): 按风险等级/status 着色半透明实线矩形 + 编号标签
+    - 推断占位框(placeholder, deleted 条款): 虚线红框 + 极淡填充 + [缺] 标签
 
     返回输出文件路径。
     """
     doc = pymupdf.open(str(pdf_path))
     pmeta = {m.page_index: m for m in report.page_meta}
-    # 逐页收集标注
+    # 逐页收集标注:diffs(已配对 modified) + unmatched 中的 added / deleted 占位框
     page_regions: dict[int, list[tuple[Diff, PageRegion]]] = {}
     targets = [
         *report.diffs,
         *(
             diff
             for diff in report.unmatched_clauses
-            if diff.status == "added" and diff.page_regions
+            if diff.status in ("added", "deleted") and diff.page_regions
         ),
     ]
     for d in targets:
@@ -422,6 +574,33 @@ def burn_pdf(
             right = x2 * pw
             bottom = y2 * ph
             rect = pymupdf.Rect(left, top, right, bottom)
+
+            # deleted 推断占位框:虚线红框 + [缺] 标签(用 draw_rect,annotation 不支持虚线)。
+            if r.kind == "placeholder":
+                page.draw_rect(
+                    rect,
+                    color=_PLACEHOLDER_STROKE,
+                    fill=_PLACEHOLDER_FILL,
+                    width=1.2,
+                    dashes="[3 2] 0",
+                    fill_opacity=0.25,
+                    stroke_opacity=0.9,
+                    overlay=True,
+                )
+                label = d.number or d.alignment_id[-6:]
+                label_text = f"{label} [{_PLACEHOLDER_TAG}]"
+                label_rect = pymupdf.Rect(right + 2, top - 10, right + 80, top + 2)
+                page.insert_textbox(
+                    label_rect,
+                    label_text,
+                    fontsize=7,
+                    color=_PLACEHOLDER_STROKE,
+                    fontname="china-s",
+                    align=0,
+                )
+                continue
+
+            # 真实高亮:add_rect_annot 半透明实线矩形。
             # 取色:risk_level 非 none 时按风险等级(醒目区分严重度);
             # risk_level == none 时(风险判别关闭或低风险)按 status 区分增删改。
             if d.risk_level != "none":

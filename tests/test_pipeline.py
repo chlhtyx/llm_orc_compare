@@ -58,6 +58,51 @@ def test_burn_pdf_includes_pdf_added_clause(tmp_path: Path):
         annotated.close()
 
 
+def test_burn_pdf_renders_deleted_placeholder_as_dashed_rect(tmp_path: Path):
+    """deleted 推断占位框(placeholder)用 draw_rect 虚线绘制,而非 add_rect_annot。
+
+    验证:占位 region 不会产生 annot(实线高亮才用 annot),
+    而是通过 page.get_drawings() 产生 rect 绘制内容。
+    """
+    pdf_path = tmp_path / "source.pdf"
+    out_path = tmp_path / "annotated.pdf"
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)
+    doc.save(pdf_path)
+    doc.close()
+    report = TamperReport(
+        source="source.docx",
+        target=str(pdf_path),
+        overall_risk="changed",
+        change_status="changed",
+        page_meta=[PageMeta(
+            page_index=0, width_px=1654, height_px=2339,
+            pdf_width_pt=595, pdf_height_pt=842,
+        )],
+        unmatched_clauses=[Diff(
+            alignment_id="al-deleted",
+            status="deleted",
+            number="第二条",
+            page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.2, 0.9, 0.3], kind="placeholder")],
+            segments=[],
+        )],
+    )
+
+    burn_pdf(pdf_path, report, out_path)
+
+    annotated = fitz.open(out_path)
+    try:
+        page = annotated[0]
+        # 占位框走 draw_rect(虚线),不应产生 annot
+        annots = list(page.annots() or [])
+        assert len(annots) == 0, "placeholder 不应产生 annot(应走 draw_rect 虚线)"
+        # draw_rect 会留下 rect 类型的绘制内容
+        rect_drawings = [d for d in page.get_drawings() if d.get("rect")]
+        assert len(rect_drawings) >= 1, "应有 draw_rect 绘制的虚线框"
+    finally:
+        annotated.close()
+
+
 class _TextLayerOCR:
     """用 PDF 文本层充当 mock OCR(避开真实 LLM 调用,测试稳定可复现)。"""
 
@@ -285,6 +330,14 @@ def test_pipeline_truncates_pdf_when_exceeds_original_pages(tmp_path: Path):
     assert len(report.page_meta) == 1
     assert report.page_meta[0].page_index == 0
 
+    # 截断留痕:report.truncation 记录截断边界(等保审计)
+    assert report.truncation is not None
+    assert report.truncation.original_pdf_page_count == 3
+    assert report.truncation.truncated_pdf_page_count == 1
+    assert report.truncation.original_doc_page_count == 1
+    # 未显式传入 original_page_count -> OOXML 估算
+    assert report.truncation.doc_page_count_source == "estimated"
+
     # 下游 burn_pdf 必须能在截断后的 PDF 上逐页渲染而不越界
     annotated = tmp_path / "annotated.pdf"
     burn_pdf(ppath, report, annotated)
@@ -307,6 +360,11 @@ def test_pipeline_truncate_respects_explicit_page_count(tmp_path: Path):
         truncate_to_original_pages=True, original_page_count=1,
     )
     assert len(report.page_meta) == 1
+    # 显式传入页数 -> source=explicit(审计可追溯页数来源)
+    assert report.truncation is not None
+    assert report.truncation.original_pdf_page_count == 2
+    assert report.truncation.truncated_pdf_page_count == 1
+    assert report.truncation.doc_page_count_source == "explicit"
 
 
 def test_pipeline_no_truncation_when_pdf_within_original_pages(tmp_path: Path):
@@ -325,6 +383,8 @@ def test_pipeline_no_truncation_when_pdf_within_original_pages(tmp_path: Path):
         truncate_to_original_pages=True,
     )
     assert len(report.page_meta) == 1
+    # 未发生截断 -> 无留痕记录
+    assert report.truncation is None
 
 
 def test_pipeline_truncate_off_by_default(tmp_path: Path):
@@ -336,3 +396,5 @@ def test_pipeline_truncate_off_by_default(tmp_path: Path):
 
     report = run_pipeline(wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding())
     assert len(report.page_meta) == 3
+    # 未开启截取 -> 无留痕记录
+    assert report.truncation is None

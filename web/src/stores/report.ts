@@ -22,7 +22,9 @@ export const useReportStore = defineStore('report', () => {
   const unmatched = computed<Diff[]>(() => report.value?.unmatched_clauses ?? [])
   const pdfHighlights = computed<Diff[]>(() => [
     ...diffs.value,
-    ...unmatched.value.filter((d) => d.status === 'added' && d.page_regions.length > 0),
+    ...unmatched.value.filter(
+      (d) => (d.status === 'added' || d.status === 'deleted') && d.page_regions.length > 0,
+    ),
   ])
 
   /** 按风险等级排序的条款差异(high → none)。 */

@@ -38,6 +38,7 @@ interface HighlightRegion {
   risk: string
   pageIndex: number
   bbox: number[]   // 归一化 [x1,y1,x2,y2]
+  kind: 'real' | 'placeholder'  // placeholder=推断占位框(deleted),位置非精确
 }
 
 const allRegions = computed<HighlightRegion[]>(() =>
@@ -50,6 +51,7 @@ const allRegions = computed<HighlightRegion[]>(() =>
         risk: d.risk_level,
         pageIndex: r.page_index,
         bbox: r.bbox,
+        kind: r.kind ?? 'real',
       })),
     ),
 )
@@ -74,6 +76,10 @@ function riskColor(level: string): string {
     default: return 'rgba(148,163,184,0.25)'
   }
 }
+
+// ---- deleted 推断占位框:虚线红框 + 极淡填充(与真实高亮区分)----
+const placeholderFill = 'rgba(220,38,38,0.10)'
+const placeholderBorder = 'rgba(220,38,38,0.85)'
 
 function riskBorder(level: string): string {
   switch (level) {
@@ -235,13 +241,14 @@ onBeforeUnmount(() => {
             :key="r.diffId + r.bbox.join(',')"
             class="pv-highlight"
             :class="{
+              'pv-highlight--placeholder': r.kind === 'placeholder',
               'pv-highlight--selected': regionIsSelected(r),
               'pv-highlight--hover': hoveredRegion === r,
             }"
             :style="{
               ...rectFromBbox(r.bbox, p.width, p.height),
-              backgroundColor: riskColor(r.risk),
-              borderColor: riskBorder(r.risk),
+              backgroundColor: r.kind === 'placeholder' ? placeholderFill : riskColor(r.risk),
+              borderColor: r.kind === 'placeholder' ? placeholderBorder : riskBorder(r.risk),
             }"
             @click="emit('selectClause', r.diffId)"
             @mouseenter="showTooltip($event, r, pi)"
@@ -336,6 +343,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: box-shadow 0.12s, background-color 0.12s;
   box-sizing: border-box;
+}
+.pv-highlight--placeholder {
+  border-style: dashed;
 }
 .pv-highlight:hover,
 .pv-highlight--hover {

@@ -13,7 +13,7 @@ from typing import Callable
 from .align import align_clauses
 from .config import Settings, settings
 from .embed import get_embed_engine, is_mock_engine
-from .models import TamperReport
+from .models import TamperReport, TruncationRecord
 from .ocr import get_ocr_engine
 from .ocr.quality import apply_recognition_gate
 from .observability import timed_stage
@@ -62,8 +62,12 @@ def run_pipeline(
     # 回收 PDF 页数超过原始合同时,物理截取到原始页数。物理截断而非逻辑截断:
     # 下游 burn_pdf/高亮图按 len(doc) 逐页遍历并索引 page_meta,截断后文件页数
     # 与 page_metas/page_meta 自动一致,避免越界。
+    # 截断发生时构造 TruncationRecord 写入报告(等保审计留痕),并推送里程碑事件。
     pdf_path = Path(pdf_path)
+    truncation: TruncationRecord | None = None
     if truncate_to_original_pages:
+        # original_page_count 显式传入优先;否则按 docx OOXML 估算(会偏少)。
+        doc_source = "explicit" if original_page_count else "estimated"
         orig_pages = original_page_count or estimate_page_count(word_path)
         try:
             pdf_pages = count_pages(pdf_path)
@@ -76,6 +80,14 @@ def run_pipeline(
                 pdf_pages, orig_pages,
             )
             pdf_path = slice_pdf(pdf_path, orig_pages)
+            truncation = TruncationRecord(
+                original_pdf_page_count=pdf_pages,
+                truncated_pdf_page_count=orig_pages,
+                original_doc_page_count=orig_pages,
+                doc_page_count_source=doc_source,
+            )
+            # 截断是影响比对范围的关键操作,经 SSE + task_events 留痕(需白名单放行)
+            _progress("pdf_truncated", 0.09)
         else:
             logger.info(
                 "truncate option on but no truncation needed: pdf=%s original=%s",
@@ -139,6 +151,7 @@ def run_pipeline(
             target=str(pdf_path),
             enable_llm_judge=enable_llm_judge,
             enable_risk_assessment=enable_risk_assessment,
+            truncation=truncation,
         )
         diagnostics = list(getattr(ocr, "last_diagnostics", []))
         apply_recognition_gate(

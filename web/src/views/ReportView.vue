@@ -109,6 +109,28 @@ function onSelectClause(id: string) {
 
     <template v-if="reportStore.report">
         <section
+          v-if="reportStore.report.truncation"
+          class="card truncation-warning"
+        >
+          <h3 class="section-title">回收件页数已截取</h3>
+          <p>
+            回收 PDF 共
+            <strong>{{ reportStore.report.truncation.original_pdf_page_count }}</strong> 页,
+            超过原始合同
+            <strong>{{ reportStore.report.truncation.original_doc_page_count }}</strong> 页
+            <span class="muted small">
+              ({{
+                reportStore.report.truncation.doc_page_count_source === 'explicit'
+                  ? '外部显式传入'
+                  : 'OOXML 估算'
+              }})
+            </span>,
+            已截取前
+            <strong>{{ reportStore.report.truncation.truncated_pdf_page_count }}</strong> 页
+            进行比对,超出部分未纳入本次比对。
+          </p>
+        </section>
+        <section
           v-if="reportStore.report.recognition_status === 'needs_review'"
           class="card recognition-warning"
         >
@@ -234,6 +256,17 @@ gap: 16px;
 .recognition-warning p,
 .recognition-warning ul {
   margin-bottom: 0;
+}
+/* 回收件页数截取提示(等保审计留痕):主色边框,区别于风险提示 */
+.truncation-warning {
+  border-left: 4px solid var(--primary);
+  background: rgba(43, 95, 214, 0.05);
+}
+.truncation-warning p {
+  margin: 0;
+}
+.truncation-warning strong {
+  color: var(--primary);
 }
 .page-title {
 margin: 0 0 10px;

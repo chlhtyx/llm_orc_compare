@@ -33,6 +33,7 @@ KeyElementKind = Literal[
     "negation",
 ]
 BBoxShape = Literal["rect", "quad", "poly"]
+RegionKind = Literal["real", "placeholder"]
 
 
 class TableStructure(BaseModel):
@@ -120,6 +121,14 @@ class PageRegion(BaseModel):
     polygon: list[list[float]] | None = Field(
         default=None, description="quad/poly 的归一化顶点(shape != rect 时)"
     )
+    kind: RegionKind = Field(
+        default="real",
+        description=(
+            "real=OCR/解析得到的真实高亮区域;"
+            "placeholder=推断占位框(deleted 条款在回收件无对应内容,"
+            "位置由相邻已配对条款插值得出,仅表示「按文档顺序应在此处附近」)"
+        ),
+    )
 
 
 class KeyElement(BaseModel):
@@ -197,6 +206,22 @@ class PageRecognitionDiagnostic(BaseModel):
     )
 
 
+class TruncationRecord(BaseModel):
+    """回收件页数截取记录(等保审计留痕)。
+
+    仅在截断真正发生且回收 PDF 页数超过原始合同页数时填充;未截断或未开启
+    截断时 TamperReport.truncation 为 None。记录截断边界与页数来源,使审计
+    可追溯"本次比对是基于截断后的前 N 页,超出部分未纳入比对"。
+    """
+
+    original_pdf_page_count: int = Field(description="截断前回收 PDF 实际页数")
+    truncated_pdf_page_count: int = Field(description="截断后页数(=原始合同页数)")
+    original_doc_page_count: int = Field(description="原始合同页数(估算或外部显式传入)")
+    doc_page_count_source: Literal["estimated", "explicit"] = Field(
+        description="原始合同页数来源:estimated=OOXML 估算,explicit=外部显式传入",
+    )
+
+
 class TamperReport(BaseModel):
     """比对报告。"""
 
@@ -212,6 +237,10 @@ class TamperReport(BaseModel):
     key_elements: list[KeyElement] = Field(default_factory=list)
     unmatched_clauses: list[Diff] = Field(default_factory=list)
     page_meta: list[PageMeta] = Field(default_factory=list)
+    truncation: TruncationRecord | None = Field(
+        default=None,
+        description="回收件页数截取记录;None 表示未发生截断(等保审计留痕)",
+    )
     recognition_status: RecognitionStatus = "reliable"
     recognition_diagnostics: list[PageRecognitionDiagnostic] = Field(default_factory=list)
     location_status: LocationStatus = Field(

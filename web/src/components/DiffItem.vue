@@ -23,6 +23,12 @@ const verdictText = computed(() => ({
   changed: '确认变化',
   needs_review: '待复核',
 }[props.diff.verdict] ?? props.diff.verdict))
+
+/** page_regions 是否全部为推断占位框(deleted 在回收件无对应内容,位置为推断)。 */
+const hasOnlyPlaceholderRegions = computed(() =>
+  props.diff.page_regions.length > 0
+  && props.diff.page_regions.every((r) => (r.kind ?? 'real') === 'placeholder'),
+)
 </script>
 
 <template>
@@ -63,7 +69,12 @@ const verdictText = computed(() => ({
     <p v-else-if="diff.status === 'deleted'" class="muted">仅在 Word 中存在、PDF 缺失</p>
 
     <div v-if="diff.page_regions.length" class="regions muted">
-      关联 PDF 区域:{{ diff.page_regions.length }} 处
+      <template v-if="hasOnlyPlaceholderRegions">
+        推断位置(回收件无对应内容):{{ diff.page_regions.length }} 处
+      </template>
+      <template v-else>
+        关联 PDF 区域:{{ diff.page_regions.length }} 处
+      </template>
       <span v-if="diff.page_regions[0]"> · 第 {{ diff.page_regions[0].page_index + 1 }} 页起</span>
     </div>
   </article>

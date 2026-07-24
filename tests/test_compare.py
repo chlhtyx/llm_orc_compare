@@ -645,6 +645,121 @@ def test_real_unmatched_clause_keeps_its_actual_text_in_report():
     )
 
 
+# ---- deleted 推断占位框:回收件缺失条款在高亮图上的位置推断 ----
+
+
+def _pdf_clause_with_bbox(clause_id, text, y1, y2, page=0, x1=72, x2=520):
+    """构造一个带 bbox 的 PDF clause(模拟 OCR 输出)。"""
+    from document_comparison.models import Block
+
+    return Clause(
+        clause_id=clause_id,
+        doc_type="pdf",
+        text=text,
+        blocks=[Block(
+            block_id=f"{clause_id}-b", page_index=page, label="text",
+            bbox=[x1, y1, x2, y2], content=text,
+        )],
+    )
+
+
+def _page_meta(page=0, w_pt=595, h_pt=842):
+    from document_comparison.models import PageMeta
+
+    return PageMeta(
+        page_index=page, width_px=w_pt * 2, height_px=h_pt * 2,
+        pdf_width_pt=w_pt, pdf_height_pt=h_pt,
+    )
+
+
+def test_deleted_clause_with_adjacent_paired_neighbors_gets_placeholder_region():
+    """deleted 前后都有已配对 PDF 邻居(带 bbox)→ 在邻居间隙生成一个 placeholder region。"""
+    word_pre = Clause(clause_id="w1", doc_type="word", text="第一条 付款。")
+    word_missing = Clause(clause_id="w2", doc_type="word", text="第二条 验收。", number="第二条")
+    word_post = Clause(clause_id="w3", doc_type="word", text="第三条 违约。")
+    pdf_pre = _pdf_clause_with_bbox("p1", "第一条 付款。", y1=72, y2=100)
+    pdf_post = _pdf_clause_with_bbox("p3", "第三条 违约。", y1=160, y2=190)
+
+    report = build_report(
+        alignments=[
+            Alignment(word_clause_id="w1", pdf_clause_id="p1", match_type="semantic", similarity=0.9),
+            Alignment(word_clause_id="w2", pdf_clause_id=None, match_type="unmatched", similarity=0.0),
+            Alignment(word_clause_id="w3", pdf_clause_id="p3", match_type="semantic", similarity=0.9),
+        ],
+        word_by={"w1": word_pre, "w2": word_missing, "w3": word_post},
+        pdf_by={"p1": pdf_pre, "p3": pdf_post},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[_page_meta()],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    deleted = [d for d in report.unmatched_clauses if d.status == "deleted"]
+    assert len(deleted) == 1
+    regions = deleted[0].page_regions
+    assert len(regions) == 1
+    r = regions[0]
+    assert r.kind == "placeholder"
+    assert r.page_index == 0
+    # 占位框 top 应 >= 前邻居底部(100/842),bottom 应 <= 后邻居顶部(160/842)
+    assert r.bbox[1] >= 100 / 842 - 0.01
+    assert r.bbox[3] <= 160 / 842 + 0.01
+
+
+def test_deleted_clause_only_pre_neighbor_placeholder_below_it():
+    """仅前向已配对邻居时,占位框贴在前邻居下方同页。"""
+    word_pre = Clause(clause_id="w1", doc_type="word", text="第一条 付款。")
+    word_missing = Clause(clause_id="w2", doc_type="word", text="第二条 验收。", number="第二条")
+    pdf_pre = _pdf_clause_with_bbox("p1", "第一条 付款。", y1=72, y2=100)
+
+    report = build_report(
+        alignments=[
+            Alignment(word_clause_id="w1", pdf_clause_id="p1", match_type="semantic", similarity=0.9),
+            Alignment(word_clause_id="w2", pdf_clause_id=None, match_type="unmatched", similarity=0.0),
+        ],
+        word_by={"w1": word_pre, "w2": word_missing},
+        pdf_by={"p1": pdf_pre},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[_page_meta()],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    deleted = [d for d in report.unmatched_clauses if d.status == "deleted"]
+    assert len(deleted) == 1
+    regions = deleted[0].page_regions
+    assert len(regions) == 1
+    assert regions[0].kind == "placeholder"
+    # 占位框 top 应在前邻居底部(100/842)下方
+    assert regions[0].bbox[1] > 100 / 842 - 0.01
+
+
+def test_deleted_clause_no_paired_neighbors_has_no_region():
+    """无任何已配对邻居时不生成占位框(deleted 仍以文本形式体现)。"""
+    missing = Clause(clause_id="w1", doc_type="word", text="第一条 验收。", number="第一条")
+
+    report = build_report(
+        alignments=[Alignment(
+            word_clause_id="w1", pdf_clause_id=None, match_type="unmatched", similarity=0.0,
+        )],
+        word_by={"w1": missing},
+        pdf_by={},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[_page_meta()],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    deleted = [d for d in report.unmatched_clauses if d.status == "deleted"]
+    assert len(deleted) == 1
+    # 无邻居 → 不生成占位 region,但 deleted 本身仍存在(文本/segment 保留)
+    assert deleted[0].page_regions == []
+    assert any(s.op == "delete" for s in deleted[0].segments)
+
+
 def test_unmatched_alignment_reason_is_preserved_in_report():
     """对齐层给出的未对齐原因应进入 JSON/前端共用的 Diff 数据。"""
     missing = Clause(clause_id="word-1", doc_type="word", text="合同必读")

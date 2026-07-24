@@ -23,6 +23,7 @@ export type KeyElementKind =
   | 'identifier'
   | 'negation'
 export type BBoxShape = 'rect' | 'quad' | 'poly'
+export type RegionKind = 'real' | 'placeholder'
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed'
 
 export interface DiffSegment {
@@ -35,6 +36,7 @@ export interface PageRegion {
   bbox: number[] // 归一化 [x1,y1,x2,y2]
   shape: BBoxShape
   polygon?: number[][] | null
+  kind?: RegionKind // real=真实高亮;placeholder=推断占位框(deleted 在回收件无对应内容,位置为推断)
 }
 
 export interface Diff {
@@ -80,6 +82,18 @@ export interface PageRecognitionDiagnostic {
   bbox_coverage: number
 }
 
+/** 回收件页数截取记录(等保审计留痕);仅在发生截断时存在。 */
+export interface TruncationRecord {
+  /** 截断前回收 PDF 实际页数 */
+  original_pdf_page_count: number
+  /** 截断后页数(=原始合同页数) */
+  truncated_pdf_page_count: number
+  /** 原始合同页数(估算或外部显式传入) */
+  original_doc_page_count: number
+  /** 原始合同页数来源:estimated=OOXML 估算,explicit=外部显式传入 */
+  doc_page_count_source: 'estimated' | 'explicit'
+}
+
 export interface TamperReport {
   source: string
   target: string
@@ -90,6 +104,8 @@ export interface TamperReport {
   key_elements: KeyElement[]
   unmatched_clauses: Diff[]
   page_meta: PageMeta[]
+  /** 回收件页数截取记录;null/undefined 表示未发生截断 */
+  truncation: TruncationRecord | null
   recognition_status: RecognitionStatus
   recognition_diagnostics: PageRecognitionDiagnostic[]
   location_status: 'complete' | 'partial' | 'missing'
