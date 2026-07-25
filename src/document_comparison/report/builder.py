@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from ..models import (
     PageMeta,
     PageRegion,
     TamperReport,
+    TextDiffHunk,
     TruncationRecord,
 )
 from ..structure.normalize import normalize_text
@@ -464,7 +466,7 @@ def build_report(
     all_report_diffs = [*diffs, *unmatched]
     change_status = _report_change_status(all_report_diffs)
     if enable_risk_assessment:
-        overall = overall_risk_from_diffs(bool(alignments), levels)
+        overall = overall_risk_from_diffs(levels)
     else:
         # 风险判别关闭:overall_risk 从 change_status 推导,只反映「有无差异」,
         # 不再表达高/中/低风险。
@@ -699,3 +701,119 @@ def burn_pdf(
     doc.save(str(output_path), incremental=False, deflate=True)
     doc.close()
     return Path(output_path)
+
+
+def _block_norm_text(s: str) -> str:
+    """归一化文本用于子串匹配。
+
+    必须与 pipeline 喂给 LLM 的 ``normalize_text`` 保持同一套 NFKC 变换,否则
+    LLM 摘出的片段(NFKC 后)与原始 block content(NFKC 前)在全角字母/数字/兼容
+    字符上对不上,导致定位落空、高亮缺失。
+    """
+    s = unicodedata.normalize("NFKC", s or "")
+    return re.sub(r"[\s,，。.;；:：、()（）\[\]【】]+", "", s).lower()
+
+
+def _match_blocks(
+    needle: str,
+    pdf_blocks_by_page: dict[int, list],
+) -> list:
+    """在 PDF 结构化 blocks 里按归一化子串匹配命中的 block(带 bbox)。
+
+    两级匹配:
+    1. 逐块匹配:needle 归一化后是某 block content 的子串 → 命中该块(精确)。
+    2. 跨块回退:LLM 摘出的语义片段常跨多个细粒度 block(尤其 SDK markdown
+       模式每行一块)。逐块未中时,把同页所有 block content 联合后做子串匹配,
+       命中则返回该页所有带 bbox 的 block(块级粗定位,保证高亮出现在正确页)。
+    needle 为空/过短时返回空列表。
+    """
+    if not needle:
+        return []
+    n = _block_norm_text(needle)
+    if len(n) < 2:
+        # 过短的片段(单字)匹配噪声大,不参与定位
+        return []
+    hits: list = []
+    for page_index, blocks in pdf_blocks_by_page.items():
+        blocks_with_content = [b for b in blocks if getattr(b, "content", "")]
+        blocks_with_bbox = [
+            b for b in blocks_with_content if len(getattr(b, "bbox", [])) >= 4
+        ]
+        # 1) 逐块精确匹配(只在带 bbox 的 block 里找)
+        page_hits = [b for b in blocks_with_bbox if n in _block_norm_text(b.content)]
+        if not page_hits and blocks_with_bbox:
+            # 2) 跨块回退:联合同页【全部】block 文本(含无 bbox 的,因为 LLM 看到
+            #    的是整篇拼接文本)做子串匹配;命中则返回该页所有带 bbox 的 block
+            #    (块级粗定位,保证高亮出现在正确页)。
+            joined = "".join(_block_norm_text(b.content) for b in blocks_with_content)
+            if n in joined:
+                page_hits = blocks_with_bbox
+        hits.extend(page_hits)
+    return hits
+
+
+def locate_hunk_regions(
+    hunks: list[TextDiffHunk],
+    pages_blocks: list[list],
+    pmeta: dict[int, PageMeta],
+) -> list[list[PageRegion]]:
+    """把 LLM 直接比对的 hunks 定位到 PDF 结构化 block 的坐标。
+
+    供 pipeline 的 ``enable_llm_direct_diff`` 分支使用:在跑完结构化 OCR(带 bbox)
+    后,把每个 hunk 的文本片段匹配到对应 block,归一化为 PageRegion 注入报告,
+    使该模式也能在报告页渲染高亮框。
+
+    - replace/insert:用 pdf_lines 在 PDF blocks 里子串匹配,命中 block 的 bbox。
+    - delete:回收件无对应内容,参照标准管线占位框语义(kind=placeholder),
+      位置取上一个已定位 hunk 同页底部偏下(表示「按文档顺序应在此处附近」);
+      找不到任何已定位锚点时留空(退化为无高亮,与该模式现状一致)。
+    - 匹配失败/无坐标时该 hunk 的 page_regions 为空,不影响其余流程。
+    """
+    pdf_blocks_by_page: dict[int, list] = {}
+    for page_index, blocks in enumerate(pages_blocks):
+        pdf_blocks_by_page[page_index] = list(blocks or [])
+
+    located: list[list[PageRegion]] = [[] for _ in hunks]
+    last_anchor: PageRegion | None = None  # 最近一个带真实坐标的 region
+
+    for idx, hunk in enumerate(hunks):
+        # replace/insert 都用 pdf 侧文本定位;delete 用 word 侧但 PDF 无内容 → 走占位框
+        needle_lines = hunk.pdf_lines if hunk.tag in {"replace", "insert"} else []
+        needle = " ".join(needle_lines).strip()
+
+        if needle:
+            hits = _match_blocks(needle, pdf_blocks_by_page)
+            if hits:
+                # 命中的 block 可能跨页;按 page_index 分组归一化,去重
+                by_page: dict[int, list] = {}
+                for b in hits:
+                    by_page.setdefault(b.page_index, []).append(b)
+                regions: list[PageRegion] = []
+                for page_index, blocks in by_page.items():
+                    page_regions = _normalize_regions(blocks, pmeta)
+                    for r in page_regions:
+                        if r not in regions:
+                            regions.append(r)
+                # 按 page_index 排序,保持稳定输出
+                regions.sort(key=lambda r: (r.page_index, r.bbox[1]))
+                located[idx] = regions
+                if regions:
+                    last_anchor = regions[0]
+                continue
+
+        # delete(或匹配失败的 replace/insert)走占位框策略
+        if hunk.tag == "delete" and last_anchor is not None:
+            meta = pmeta.get(last_anchor.page_index)
+            if meta and meta.pdf_width_pt and meta.pdf_height_pt:
+                # 贴在锚点下方占一行高度(约页面高度的 2.5%)
+                ph = meta.pdf_height_pt
+                top = min(last_anchor.bbox[3] + 0.005, 0.975)
+                bottom = min(top + 0.025, 0.985)
+                located[idx] = [PageRegion(
+                    page_index=last_anchor.page_index,
+                    bbox=[last_anchor.bbox[0], top, last_anchor.bbox[2], bottom],
+                    shape="rect",
+                    kind="placeholder",
+                )]
+
+    return located

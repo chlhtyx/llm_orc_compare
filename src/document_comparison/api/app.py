@@ -381,6 +381,7 @@ def create_app() -> FastAPI:
             "external_enable_llm_judge": settings.external_enable_llm_judge,
             "external_enable_llm_alignment": settings.external_enable_llm_alignment,
             "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+            "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
             "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
             "external_enabled": external_config_enabled(),
             "persisted": _safe_persisted_config(),
@@ -420,6 +421,7 @@ def create_app() -> FastAPI:
             "external_ocr_backend", "external_enable_llm_judge",
             "external_enable_llm_alignment",
             "external_enable_risk_assessment",
+            "external_enable_llm_direct_diff",
             "external_truncate_to_original_pages",
         }
         unknown = set(body.keys()) - allowed
@@ -602,6 +604,7 @@ def create_app() -> FastAPI:
                 "external_enable_llm_judge": settings.external_enable_llm_judge,
                 "external_enable_llm_alignment": settings.external_enable_llm_alignment,
                 "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+                "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
                 "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
                 "external_enabled": external_config_enabled(),
             },
@@ -669,6 +672,7 @@ def create_app() -> FastAPI:
                 enable_llm_alignment=settings.external_enable_llm_alignment,
                 ocr_backend=settings.external_ocr_backend,
                 enable_risk_assessment=settings.external_enable_risk_assessment,
+                enable_llm_direct_diff=settings.external_enable_llm_direct_diff,
                 truncate_to_original_pages=settings.external_truncate_to_original_pages,
             )
         )
@@ -704,6 +708,10 @@ def create_app() -> FastAPI:
         source: UploadFile = File(..., description="原始合同 Word(.docx)"),
         target: UploadFile = File(..., description="回收件 PDF(.pdf)"),
         document_no: str = Form(...),
+        original_page_count: int | None = Form(
+            default=None,
+            description="原始合同真实页数；仅用于显式截取回收 PDF",
+        ),
         callback_url: str | None = Form(default=None),
         sync: bool = Form(default=False),
         _auth: None = Depends(require_external_api_key),
@@ -723,6 +731,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "document_no 不能为空")
         if len(document_no) > 255:
             raise HTTPException(400, "document_no 不能超过 255 个字符")
+        if original_page_count is not None and original_page_count < 1:
+            raise HTTPException(400, "original_page_count 必须 >= 1")
         # callback_url:异步模式必填,同步模式可选(结果随响应返回)。
         callback_url = (callback_url or "").strip() or None
         if callback_url is None and not sync:
@@ -788,7 +798,9 @@ def create_app() -> FastAPI:
             enable_llm_alignment=settings.external_enable_llm_alignment,
             ocr_backend=settings.external_ocr_backend,
             enable_risk_assessment=settings.external_enable_risk_assessment,
+            enable_llm_direct_diff=settings.external_enable_llm_direct_diff,
             truncate_to_original_pages=settings.external_truncate_to_original_pages,
+            original_page_count=original_page_count,
         )
         if sync:
             # 同步模式:阻塞至比对完成,直接在响应体内返回完整结果。
@@ -865,6 +877,7 @@ def create_app() -> FastAPI:
         enable_llm_alignment = False
         ocr_backend: str | None = None
         enable_risk_assessment = False
+        enable_llm_direct_diff = False
         truncate_to_original_pages = False
         original_page_count: int | None = None
         if options:
@@ -874,6 +887,7 @@ def create_app() -> FastAPI:
                 enable_llm_alignment = opts.enable_llm_alignment
                 ocr_backend = opts.ocr_backend
                 enable_risk_assessment = opts.enable_risk_assessment
+                enable_llm_direct_diff = opts.enable_llm_direct_diff
                 truncate_to_original_pages = opts.truncate_to_original_pages
                 original_page_count = opts.original_page_count
                 if (
@@ -926,6 +940,7 @@ def create_app() -> FastAPI:
                 enable_llm_alignment=enable_llm_alignment,
                 ocr_backend=ocr_backend,
                 enable_risk_assessment=enable_risk_assessment,
+                enable_llm_direct_diff=enable_llm_direct_diff,
                 truncate_to_original_pages=truncate_to_original_pages,
                 original_page_count=original_page_count,
             )

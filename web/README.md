@@ -35,7 +35,6 @@ src/
 │   ├── client.ts      # fetch 封装:错误归一化、fetch-Stream SSE
 │   └── compare.ts     # 端点封装(/health、/compare、/events、/report)
 ├── stores/
-│   ├── settings.ts    # 全局设置(后续扩展用)
 │   ├── task.ts        # 提交、SSE 进度(轮询兜底)、终结态
 │   └── report.ts      # 报告派生统计(按风险分级、要素变更)
 ├── router/            # / 提交页 · /report/:taskId 报告页

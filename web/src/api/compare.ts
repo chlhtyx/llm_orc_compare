@@ -5,13 +5,8 @@ import type {
   SubmitResponse,
   TaskInfo,
   TaskStatus,
-  TamperReport,
 } from './types'
 import { ApiError, apiUrl, openEventStream, request } from './client'
-
-export function health(): Promise<{ status: string }> {
-  return request('/health')
-}
 
 export interface SubmitArgs {
   source: File // .docx
@@ -63,22 +58,9 @@ export function getTask(taskId: string): Promise<TaskInfo> {
   return request(`/api/v1/compare/${encodeURIComponent(taskId)}`)
 }
 
-export function getReport(taskId: string, format: 'json' = 'json'): Promise<TamperReport> {
-  return request(
-    `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=${format}`,
-  )
-}
-
 /** 返回 PDF 源文件的可访问 URL，供 <iframe> 或 pdf.js 加载。 */
 export function getSourcePdfUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/source`)
-}
-
-/** 返回带差异高亮框的 PDF 报告下载 URL（扫描件需 OCR/Spotting 提供坐标）。 */
-export function getAnnotatedPdfUrl(taskId: string): string {
-  return apiUrl(
-    `/api/v1/compare/${encodeURIComponent(taskId)}/report?format=pdf`,
-  )
 }
 
 export interface ProgressHandlers {

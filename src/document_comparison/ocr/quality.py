@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ..compare.risk import max_risk
-from ..models import PageRecognitionDiagnostic, TamperReport, TextDiffReport
+from ..models import PageRecognitionDiagnostic, TamperReport
 
 _QUALITY_REASON = "识别质量不足，当前差异仅供人工复核"
 
@@ -74,17 +74,3 @@ def apply_recognition_gate(
     report.summary["needs_review"] = len(review)
     return report
 
-
-def attach_raw_recognition_diagnostics(
-    report: TextDiffReport,
-    diagnostics: list[PageRecognitionDiagnostic],
-) -> TextDiffReport:
-    report.recognition_diagnostics = diagnostics
-    unreliable = [item for item in diagnostics if not item.reliable]
-    if unreliable:
-        report.recognition_status = "needs_review"
-        report.stats["recognition_quality"] = "needs_review"
-        report.stats["unreliable_pages"] = [
-            item.page_index + 1 for item in unreliable
-        ]
-    return report

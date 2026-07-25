@@ -88,8 +88,6 @@ _CN_DIGITS = {
 _CN_SMALL_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
 _CN_LARGE_UNITS = {"万": 10_000, "亿": 100_000_000}
 
-# 金额/日期为「极高」风险,其余高(§8.1)
-_SEVERE_KINDS = {"amount", "date"}
 
 # 只统一确定性的字形变体，不删除标点。句末标点缺失等差异会在裁决层进入待复核。
 _SAFE_PUNCTUATION_TRANSLATION = str.maketrans({
@@ -390,10 +388,6 @@ def elements_changed(
     return out
 
 
-def severe_changes(elems: list[KeyElement]) -> list[KeyElementKind]:
-    """返回发生变化的「极高」要素类别(金额/日期)。"""
-    return [e.kind for e in elems if e.changed and e.kind in _SEVERE_KINDS]
-
 
 # —— 结构化表格要素(一期增强)——
 
@@ -404,34 +398,6 @@ def _extract_cell_values(cell: str) -> dict[str, list[str]]:
     fact_kinds = {"amount", "date", "ratio", "account", "identifier"}
     return {kind: values for kind, values in extracted.items() if kind in fact_kinds}
 
-
-def extract_table_key_elements(
-    tables: list[TableStructure],
-) -> list[KeyElement]:
-    """从结构化表格按单元格维度抽取高风险要素。
-
-    每个命中要素的单元格生成一条 KeyElement,带 row_index + col_header 定位,
-    便于报告精确指出"第X行Y列"的要素变化。同单元格内同 kind 多值合并为列表。
-    """
-    out: list[KeyElement] = []
-    for table in tables:
-        headers = table.headers
-        for row_idx, row in enumerate(table.rows):
-            for col_idx, cell in enumerate(row):
-                col_header = headers[col_idx] if col_idx < len(headers) else ""
-                vals = _extract_cell_values(cell)
-                for kind, values in vals.items():
-                    out.append(
-                        KeyElement(
-                            kind=kind,  # type: ignore[arg-type]
-                            word_value=" | ".join(values),
-                            pdf_value=" | ".join(values),
-                            changed=False,
-                            row_index=row_idx,
-                            col_header=col_header,
-                        )
-                    )
-    return out
 
 
 def table_elements_changed(

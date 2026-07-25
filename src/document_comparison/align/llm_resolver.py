@@ -109,6 +109,9 @@ def _candidate_payload(candidate: AlignmentCandidate) -> dict[str, Any]:
 def _request_alignment_json(
     system_prompt: str,
     user_content: str,
+    *,
+    max_retries_override: int | None = None,
+    timeout_override: float | None = None,
 ) -> dict[str, Any]:
     """调用共享纯文本模型并返回 JSON；所有失败均安全返回空字典。"""
     url = settings.judge_api_base.rstrip("/") + "/chat/completions"
@@ -126,8 +129,15 @@ def _request_alignment_json(
         if settings.judge_api_key
         else {}
     )
-    timeout = httpx.Timeout(settings.judge_timeout, connect=10.0)
-    max_retries = settings.llm_max_retries
+    timeout = httpx.Timeout(
+        timeout_override or settings.judge_timeout,
+        connect=10.0,
+    )
+    max_retries = (
+        settings.llm_max_retries
+        if max_retries_override is None
+        else max_retries_override
+    )
     last_error = ""
 
     with httpx.Client(timeout=timeout) as client:
@@ -284,7 +294,14 @@ def resolve_raw_alignment_plan(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    parsed = _request_alignment_json(_RAW_PLAN_SYSTEM_PROMPT, user_content)
+    parsed = _request_alignment_json(
+        _RAW_PLAN_SYSTEM_PROMPT,
+        user_content,
+        # 联合规划本身已是可选增强；失败后立即走确定性回退，禁止在长提示上
+        # 复用通用 LLM 重试次数，避免 3×timeout 后再进入第二轮模型调用。
+        max_retries_override=0,
+        timeout_override=min(float(settings.judge_timeout), 60.0),
+    )
     if not parsed:
         return None
     try:

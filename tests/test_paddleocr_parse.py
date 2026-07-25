@@ -8,8 +8,12 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import httpx
+import pytest
 
 from document_comparison.models import PageMeta
 from document_comparison.ocr import paddleocr_http
@@ -31,6 +35,32 @@ def _meta() -> PageMeta:
         width_px=1654, height_px=2339,
         pdf_width_pt=595, pdf_height_pt=842,
     )
+
+
+def _png_bytes() -> bytes:
+    """生成有足够高度的测试 PNG，供截断后的垂直分片使用。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:  # pragma: no cover
+        import fitz
+
+    document = fitz.open()
+    try:
+        page = document.new_page(width=100, height=200)
+        return page.get_pixmap().tobytes("png")
+    finally:
+        document.close()
+
+
+class _ChatText(str):
+    """测试桩：保持 str 兼容，同时携带模型停止原因。"""
+
+    truncated: bool
+
+    def __new__(cls, value: str, *, truncated: bool = False):
+        instance = super().__new__(cls, value)
+        instance.truncated = truncated
+        return instance
 
 
 # 来自 PaddleOCR-VL-1.5 实测输出(简短「OCR」指令,已截取表格区)
@@ -501,6 +531,196 @@ def test_engine_uses_ocr_content_and_spotting_coordinates(monkeypatch):
     assert prompts == ["OCR:", "Spotting:"]
     assert out[0][0].content == "甲方：示例公司"
     assert len(out[0][0].bbox) == 4
+
+
+def test_chat_retains_length_finish_reason():
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "截断内容"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+    )
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        content = engine._chat("data:image/png;base64,eA==", client=client)
+
+    assert content == "截断内容"
+    assert content.truncated is True
+
+
+def test_chat_caps_oversized_paddleocr_output_limit():
+    captured: dict = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "识别内容"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    engine = PaddleOCREngine(
+        api_base="https://api.siliconflow.cn/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+    )
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        engine._chat(
+            "data:image/png;base64,eA==",
+            max_tokens=20_000,
+            client=client,
+        )
+
+    assert captured["max_tokens"] == 2_000
+
+
+def test_chat_logs_bounded_provider_detail_for_non_retryable_400(caplog):
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "code": 20015,
+                "message": "max_tokens must be less than model limit",
+                "ignored": "do-not-log-arbitrary-response-fields",
+            },
+        )
+
+    engine = PaddleOCREngine(
+        api_base="https://api.siliconflow.cn/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+    )
+    with (
+        httpx.Client(transport=httpx.MockTransport(respond)) as client,
+        caplog.at_level("WARNING"),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        engine._chat("data:image/png;base64,eA==", client=client)
+
+    assert "provider_code=20015" in caplog.text
+    assert "max_tokens must be less than model limit" in caplog.text
+    assert "do-not-log-arbitrary-response-fields" not in caplog.text
+
+
+def test_engine_recovers_truncated_page_once_with_overlapping_vertical_tiles(
+    monkeypatch,
+):
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+    )
+    loc_top = (
+        "<|LOC_100|><|LOC_100|><|LOC_900|><|LOC_100|>"
+        "<|LOC_900|><|LOC_180|><|LOC_100|><|LOC_180|>"
+    )
+    loc_overlap_top = (
+        "<|LOC_100|><|LOC_850|><|LOC_900|><|LOC_850|>"
+        "<|LOC_900|><|LOC_930|><|LOC_100|><|LOC_930|>"
+    )
+    loc_overlap_bottom = (
+        "<|LOC_100|><|LOC_70|><|LOC_900|><|LOC_70|>"
+        "<|LOC_900|><|LOC_150|><|LOC_100|><|LOC_150|>"
+    )
+    loc_bottom = (
+        "<|LOC_100|><|LOC_800|><|LOC_900|><|LOC_800|>"
+        "<|LOC_900|><|LOC_880|><|LOC_100|><|LOC_880|>"
+    )
+    replies = iter(
+        [
+            _ChatText(f"合同标题{loc_top}", truncated=True),
+            _ChatText(
+                f"合同标题{loc_top}\n甲乙双方协商一致{loc_overlap_top}"
+            ),
+            _ChatText(
+                f"甲乙双方协商一致{loc_overlap_bottom}\n签字盖章{loc_bottom}"
+            ),
+        ]
+    )
+    calls: list[str] = []
+
+    def fake_chat(data_url: str, **_kwargs) -> str:
+        calls.append(data_url)
+        return next(replies)
+
+    monkeypatch.setattr(
+        paddleocr_http,
+        "render_pages",
+        lambda *_args, **_kwargs: [_png_bytes()],
+    )
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+
+    pages = engine.recognize(Path("unused.pdf"), [_meta()])
+
+    assert len(calls) == 3
+    assert engine.last_truncated_pages == set()
+    assert [block.content for block in pages[0]] == [
+        "合同标题",
+        "甲乙双方协商一致",
+        "签字盖章",
+    ]
+    assert pages[0][-1].bbox[1] > _meta().pdf_height_pt / 2
+
+
+def test_engine_stops_after_one_tile_round_and_marks_persistent_truncation(
+    monkeypatch,
+):
+    engine = PaddleOCREngine(
+        api_base="https://example.test/v1",
+        api_key="test",
+        model="PaddlePaddle/PaddleOCR-VL-1.5",
+        max_retries=0,
+    )
+    loc = (
+        "<|LOC_100|><|LOC_100|><|LOC_900|><|LOC_100|>"
+        "<|LOC_900|><|LOC_180|><|LOC_100|><|LOC_180|>"
+    )
+    replies = iter(
+        [
+            _ChatText(f"整页截断{loc}", truncated=True),
+            _ChatText(f"上片仍截断{loc}", truncated=True),
+            _ChatText(f"下片完成{loc}"),
+        ]
+    )
+    calls = [0]
+
+    def fake_chat(_data_url: str, **_kwargs) -> str:
+        calls[0] += 1
+        return next(replies)
+
+    monkeypatch.setattr(
+        paddleocr_http,
+        "render_pages",
+        lambda *_args, **_kwargs: [_png_bytes()],
+    )
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+
+    pages = engine.recognize(Path("unused.pdf"), [_meta()])
+
+    assert calls[0] == 3
+    assert pages[0]
+    assert engine.last_truncated_pages == {0}
 
 
 def test_engine_skips_spotting_when_ocr_already_has_coordinates(monkeypatch):

@@ -332,11 +332,17 @@ def test_pipeline_invalid_raw_plan_falls_back_to_clause_alignment(
     pdf_buf = _make_pdf_from_lines(["第一条 合同标的"])
     wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
     build_calls: list[str] = []
+    fallback_resolvers: list[object | None] = []
     real_build = pipeline_module.build_clauses
+    real_align = pipeline_module.align_clauses
 
     def spy_build(items, doc_type):
         build_calls.append(doc_type)
         return real_build(items, doc_type)
+
+    def spy_align(*args, **kwargs):
+        fallback_resolvers.append(kwargs.get("llm_resolver"))
+        return real_align(*args, **kwargs)
 
     monkeypatch.setattr(
         pipeline_module,
@@ -344,6 +350,7 @@ def test_pipeline_invalid_raw_plan_falls_back_to_clause_alignment(
         lambda _word, _pdf: None,
     )
     monkeypatch.setattr(pipeline_module, "build_clauses", spy_build)
+    monkeypatch.setattr(pipeline_module, "align_clauses", spy_align)
 
     report = run_pipeline(
         wpath,
@@ -354,6 +361,7 @@ def test_pipeline_invalid_raw_plan_falls_back_to_clause_alignment(
     )
 
     assert build_calls == ["word", "pdf"]
+    assert fallback_resolvers == [None]
     assert report.change_status == "clean"
 
 
@@ -480,43 +488,55 @@ def _make_multipage_pdf(tmp_path: Path, n_pages: int) -> Path:
     return path
 
 
-def test_pipeline_truncates_pdf_when_exceeds_original_pages(tmp_path: Path):
-    """开启截取且回收 PDF 页数 > 估算原始页数时,按原始页数截取后比对。
+def test_pipeline_truncates_trailing_drawings_after_estimated_contract_pages(
+    tmp_path: Path,
+):
+    """自动保留三页合同并截掉回收 PDF 后面的两页图纸。
 
-    Word 无分页符 -> 估算 1 页;回收 PDF 3 页 -> 截取到 1 页。
-    验证:report.page_meta 仅 1 页,且 burn_pdf(下游按 len(doc) 逐页渲染)不抛。
+    DOCX 页数来自保存页数/分页标记；截取后全部合同页仍必须进入 OCR 和高亮。
     """
-    word_buf = _make_word([
-        ("h1", "第一条 合同标的"),
-        ("p", "甲方提供设备。"),
-    ])
     wpath = tmp_path / "c.docx"
-    wpath.write_bytes(word_buf.getvalue())
-    ppath = _make_multipage_pdf(tmp_path, 3)
+    word = Document()
+    word.add_heading("第一条 合同标的", level=1)
+    word.add_paragraph("第一页合同正文。")
+    word.add_page_break()
+    word.add_paragraph("第二页合同正文。")
+    word.add_page_break()
+    word.add_paragraph("第三页合同正文。")
+    word.save(wpath)
+    ppath = _make_multipage_pdf(tmp_path, 5)
 
     report = run_pipeline(
         wpath, ppath, ocr=_TextLayerOCR(), embed=MockEmbedding(),
         truncate_to_original_pages=True,
         truncated_pdf_output_path=tmp_path / "compared.pdf",
     )
-    # 截断后只剩 1 页(原始合同估算页数)
-    assert len(report.page_meta) == 1
-    assert report.page_meta[0].page_index == 0
-
-    # 截断留痕:report.truncation 记录截断边界(等保审计)
+    assert len(report.page_meta) == 3
+    assert [meta.page_index for meta in report.page_meta] == [0, 1, 2]
     assert report.truncation is not None
-    assert report.truncation.original_pdf_page_count == 3
-    assert report.truncation.truncated_pdf_page_count == 1
-    assert report.truncation.original_doc_page_count == 1
-    # 未显式传入 original_page_count -> OOXML 估算
+    assert report.truncation.original_pdf_page_count == 5
+    assert report.truncation.truncated_pdf_page_count == 3
+    assert report.truncation.original_doc_page_count == 3
     assert report.truncation.doc_page_count_source == "estimated"
+    assert report.target == str(tmp_path / "compared.pdf")
+    highlighted_pages = {
+        region.page_index
+        for diff in [*report.diffs, *report.unmatched_clauses]
+        for region in diff.page_regions
+    }
+    assert highlighted_pages == {0, 1, 2}
 
-    # 下游 burn_pdf 必须能在截断后的 PDF 上逐页渲染而不越界
+    # 下游 burn_pdf 必须保留全部三页合同，不带后面的图纸。
     annotated = tmp_path / "annotated.pdf"
     burn_pdf(report.target, report, annotated)
     assert annotated.exists() and annotated.stat().st_size > 0
-    assert count_pages(report.target) == 1
-    assert count_pages(annotated) == 1
+    assert count_pages(report.target) == 3
+    assert count_pages(annotated) == 3
+    with fitz.open(annotated) as annotated_doc:
+        assert [
+            len(list(page.annots() or []))
+            for page in annotated_doc
+        ] == [1, 1, 1]
 
 
 def test_pipeline_truncate_respects_explicit_page_count(tmp_path: Path):

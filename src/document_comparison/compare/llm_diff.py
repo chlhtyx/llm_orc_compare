@@ -26,7 +26,16 @@ from typing import Any
 import httpx
 
 from ..config import settings
-from ..models import DiffSegment, TextDiffHunk, TextDiffReport
+from ..models import (
+    Diff,
+    DiffSegment,
+    PageMeta,
+    PageRegion,
+    TamperReport,
+    TextDiffHunk,
+    TextDiffReport,
+    TruncationRecord,
+)
 from ..observability import log_model_failure, log_model_request, log_model_response
 
 logger = logging.getLogger(__name__)
@@ -346,3 +355,83 @@ def _extract_json(text: str) -> Any:
             pass
     logger.warning("llm diff json parse failed; raw=%s", text[:200])
     return text
+
+
+def text_diff_to_tamper_report(
+    raw: TextDiffReport,
+    *,
+    source: str = "",
+    target: str = "",
+    truncation: TruncationRecord | None = None,
+    page_regions: list[list[PageRegion]] | None = None,
+    page_metas: list[PageMeta] | None = None,
+) -> TamperReport:
+    """把 LLM 直接比对产出的 TextDiffReport 适配为标准 TamperReport。
+
+    供标准合同比对的 ``enable_llm_direct_diff`` 分支使用:LLM 已直接产出语义差异,
+    这里只做结构映射,让任务/历史/外部 API/报告页/JSON-PDF-DOCX 全链路复用。
+    映射口径:
+    - 每个 hunk → 一个 Diff;replace→modified、delete→deleted、insert→added。
+    - replace 优先用 LLM 的 char_segments(行内字符级),否则退化为整段 delete+insert。
+    - per-diff risk_level 恒 none(LLM 直接比对不做风险分级);verdict 初值 changed,
+      随后由 apply_recognition_gate 按识别质量统一校正为 needs_review。
+    - 可选传入 page_regions(经 locate_hunk_regions 定位):按 hunk 顺序挂坐标,
+    使报告页能渲染高亮框;未传入或某 hunk 无坐标时 page_regions 空(不渲染)。
+    """
+    diffs: list[Diff] = []
+    for idx, hunk in enumerate(raw.hunks):
+        if hunk.tag == "replace":
+            status = "modified"
+            if hunk.char_segments:
+                segments = list(hunk.char_segments)
+            else:
+                segments = []
+                word_text = "\n".join(hunk.word_lines)
+                pdf_text = "\n".join(hunk.pdf_lines)
+                if word_text:
+                    segments.append(DiffSegment(op="delete", text=word_text))
+                if pdf_text:
+                    segments.append(DiffSegment(op="insert", text=pdf_text))
+        elif hunk.tag == "delete":
+            status = "deleted"
+            segments = [DiffSegment(op="delete", text="\n".join(hunk.word_lines))]
+        else:  # insert
+            status = "added"
+            segments = [DiffSegment(op="insert", text="\n".join(hunk.pdf_lines))]
+
+        title = hunk.context_before[0].strip() if hunk.context_before else ""
+        regions = list(page_regions[idx]) if page_regions and idx < len(page_regions) else []
+        diffs.append(
+            Diff(
+                alignment_id=f"llm-diff-{idx + 1}",
+                status=status,  # type: ignore[arg-type]
+                segments=segments,
+                risk_level="none",
+                verdict="changed",
+                confidence="high",
+                judged_by="llm",
+                title=title,
+                page_regions=regions,
+            )
+        )
+
+    has_diffs = bool(diffs)
+    return TamperReport(
+        source=source or raw.source,
+        target=target or raw.target,
+        change_status="changed" if has_diffs else "clean",
+        overall_risk="changed" if has_diffs else "clean",
+        diffs=diffs,
+        summary={
+            "llm_direct_diff": True,
+            "similarity": raw.stats.get("similarity"),
+            "replaced": raw.stats.get("replaced", 0),
+            "deleted": raw.stats.get("deleted", 0),
+            "inserted": raw.stats.get("inserted", 0),
+            "engine": raw.stats.get("engine", "llm"),
+        },
+        recognition_status=raw.recognition_status,
+        recognition_diagnostics=list(raw.recognition_diagnostics),
+        truncation=truncation,
+        page_meta=list(page_metas) if page_metas else [],
+    )

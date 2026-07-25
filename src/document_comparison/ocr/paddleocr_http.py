@@ -48,6 +48,11 @@ from typing import Any
 import httpx
 import requests
 
+try:
+    import pymupdf as fitz
+except ImportError:  # pragma: no cover
+    import fitz  # type: ignore[no-redef]
+
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
 from ..observability import log_model_failure, log_model_request, log_model_response
@@ -63,10 +68,15 @@ _LOC_RE = re.compile(r"<\|LOC_(\d+)\|>")
 # LOC 坐标空间:PaddleOCR-VL 使用 0-1000 归一化(与 Qwen-VL 一致)
 _LOC_SPACE = 1000.0
 
-# 限制生成长度:PaddleOCR-VL 在表格行上不自我停止,会重复 hallucination
-# 直到 token 上限,导致合计行/后续内容丢失。实测 2000 足够覆盖单页合同
-# (含表格)的全部内容,过小会截断尾部,过大会放任死循环。
+# 限制生成长度:PaddleOCR-VL 在表格行上可能重复生成直到 token 上限，
+# 导致合计行/后续内容丢失。2000 作为单页安全上限；内容超出时由下方
+# 有界分片恢复，而不是继续放大单次输出。
 _MAX_TOKENS = 2000
+_SILICONFLOW_PADDLEOCR_MAX_TOKENS = 2000
+
+# 整页触发输出上限时，只做一轮上下分片恢复。分片保留少量重叠区，避免裁切
+# 穿过一行文字；禁止递归继续分片，保证模型调用次数有硬上限。
+_TILE_OVERLAP_RATIO = 0.08
 
 # 整图(长图)整体 OCR 的生成长度上限:无标注版把整篇拼成一张长图,
 # 单次调用需容纳全文,按整篇合同量级放宽到 8000。
@@ -128,6 +138,19 @@ _LAYOUT_PARSING_OPTIONS: dict[str, Any] = {
 }
 
 
+class _OCRChatContent(str):
+    """保持原有 str 接口，同时携带模型的停止原因。"""
+
+    finish_reason: str
+    truncated: bool
+
+    def __new__(cls, value: str, finish_reason: str = ""):
+        instance = super().__new__(cls, value)
+        instance.finish_reason = finish_reason
+        instance.truncated = finish_reason == "length"
+        return instance
+
+
 class PaddleOCREngine:
     """调用 PaddleOCR-VL,运行时可选 vLLM 或 PaddleOCR 官方 SDK。
 
@@ -185,6 +208,9 @@ class PaddleOCREngine:
         )
         self.enable_spotting = enable_spotting
         self._dpi = settings.pdf_render_dpi
+        # 页号使用本次 recognize 输入中的局部索引；TrustedPDFReader 会再映射
+        # 回原 PDF 页号。每次识别开始时都会重置，避免任务间串数据。
+        self.last_truncated_pages: set[int] = set()
 
     # —— 公共接口(与 LLMOCREngine 对称)——
     def recognize(
@@ -194,6 +220,7 @@ class PaddleOCREngine:
         *,
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
+        self.last_truncated_pages = set()
         if self.api_mode == "official_sdk":
             return self._recognize_official_document(
                 pdf_path, page_metas, on_progress=on_progress
@@ -217,6 +244,7 @@ class PaddleOCREngine:
         certifi.where()
 
         results: list[list[Block]] = [None] * len(images)  # type: ignore[list-item]
+        truncated_flags = [False] * len(images)
         total = len(images)
         done_count = [0]
 
@@ -225,9 +253,14 @@ class PaddleOCREngine:
                 pool.submit(
                     self._recognize_page,
                     i, img, page_metas[i], results,
-                    on_progress, total, done_count,
+                    on_progress, total, done_count, truncated_flags,
                 )
 
+        self.last_truncated_pages = {
+            page_index
+            for page_index, truncated in enumerate(truncated_flags)
+            if truncated
+        }
         return results
 
     def _recognize_official_document(
@@ -271,15 +304,19 @@ class PaddleOCREngine:
         on_progress: ProgressCb | None = None,
         total_pages: int = 1,
         done_count: list[int] | None = None,
+        truncated_flags: list[bool] | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
         content = self._chat(data_url, prompt="OCR:")
-        # 自适应解析:含 <|LOC_ 标记走 LOC 分支(带 bbox),否则走 plain 分支
-        # (Markdown 表格/段落文本,PaddleOCR-VL-1.5 的实际输出格式)。
-        if "<|LOC_" in content:
-            blocks = _parse_loc_content(content, page_index, meta)
+        if getattr(content, "truncated", False):
+            blocks, still_truncated = self._recover_truncated_page(
+                page_index, png_bytes, meta, content
+            )
         else:
-            blocks = _parse_plain_content(content, page_index, meta)
+            blocks = _parse_content(content, page_index, meta)
+            still_truncated = False
+        if truncated_flags is not None:
+            truncated_flags[page_index] = still_truncated
         coverage = _bbox_coverage(blocks)
         if self.enable_spotting and coverage < _COMPLETE_BBOX_COVERAGE:
             try:
@@ -313,6 +350,54 @@ class PaddleOCREngine:
             done_count[0] += 1
             frac = 0.10 + (done_count[0] / total_pages) * 0.60
             on_progress("ocr", frac)
+
+    def _recover_truncated_page(
+        self,
+        page_index: int,
+        png_bytes: bytes,
+        meta: PageMeta,
+        original_content: str,
+    ) -> tuple[list[Block], bool]:
+        """整页被截断后做固定一轮上下分片，不递归。"""
+        try:
+            tiles = _split_png_vertical(png_bytes, meta)
+            tile_blocks: list[list[Block]] = []
+            tile_truncated = False
+            for tile_bytes, tile_meta, y_offset_pt in tiles:
+                tile_content = self._chat(_to_data_url(tile_bytes), prompt="OCR:")
+                tile_truncated = tile_truncated or bool(
+                    getattr(tile_content, "truncated", False)
+                )
+                parsed = _parse_content(tile_content, page_index, tile_meta)
+                tile_blocks.append(
+                    _shift_blocks_y(parsed, page_index, y_offset_pt)
+                )
+            blocks = _merge_vertical_tile_blocks(
+                tile_blocks[0], tile_blocks[1], page_index
+            )
+        except Exception as exc:  # noqa: BLE001 - 恢复失败保留整页已有内容
+            logger.warning(
+                "paddleocr truncated page tile recovery failed page=%s "
+                "error_type=%s",
+                page_index,
+                type(exc).__name__,
+            )
+            return _parse_content(original_content, page_index, meta), True
+
+        if tile_truncated:
+            logger.warning(
+                "paddleocr page still truncated after one tile round page=%s; "
+                "stop recovery and mark page for review",
+                page_index,
+            )
+        else:
+            logger.info(
+                "paddleocr truncated page recovered by one tile round page=%s "
+                "blocks=%s",
+                page_index,
+                len(blocks),
+            )
+        return blocks, tile_truncated
 
     def recognize_text(
         self, image_bytes: bytes, *, client: httpx.Client | None = None
@@ -497,6 +582,15 @@ class PaddleOCREngine:
         `client` 可传入共享的 httpx.Client 以复用连接池(并发场景);不传则自建并关闭。
         """
         url = self.api_base.rstrip("/") + "/chat/completions"
+        effective_max_tokens = _bounded_paddleocr_max_tokens(
+            self.api_base, self.model, max_tokens
+        )
+        if effective_max_tokens != max_tokens:
+            logger.warning(
+                "paddleocr max_tokens capped for provider requested=%s effective=%s",
+                max_tokens,
+                effective_max_tokens,
+            )
         # PaddleOCR-VL 不遵循复杂 system prompt,用最简指令
         payload: dict[str, Any] = {
             "model": self.model,
@@ -512,7 +606,7 @@ class PaddleOCREngine:
             "temperature": 0,
             # 限制生成长度:见模块 docstring,PaddleOCR-VL 在表格行上不自我停止,
             # 会重复 hallucination 刷到默认上限,导致后续内容(合计行/签字页)丢失。
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         timeout = httpx.Timeout(self.timeout, connect=10.0)
@@ -553,8 +647,14 @@ class PaddleOCREngine:
                         try:
                             resp.raise_for_status()
                         except httpx.HTTPStatusError as exc:
+                            provider_detail = _provider_error_detail(resp)
+                            error_message = str(exc)
+                            if provider_detail:
+                                error_message = (
+                                    f"{error_message}; {provider_detail}"
+                                )
                             log_model_failure(
-                                logger, "paddleocr", request_started, str(exc),
+                                logger, "paddleocr", request_started, error_message,
                                 status_code=resp.status_code,
                             )
                             raise
@@ -565,11 +665,14 @@ class PaddleOCREngine:
                         if choice.get("finish_reason") == "length":
                             logger.warning(
                                 "paddleocr response truncated at max_tokens=%s chars=%s; "
-                                "parser will remove repeated/empty table tail but omitted "
-                                "source content cannot be recovered",
-                                max_tokens, len(content),
+                                "caller will apply bounded recovery policy because this "
+                                "response may omit source content",
+                                effective_max_tokens, len(content),
                             )
-                        return content
+                        return _OCRChatContent(
+                            content,
+                            str(choice.get("finish_reason") or ""),
+                        )
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
                     logger.info("paddleocr retry after %.1fs", backoff)
@@ -585,6 +688,53 @@ class PaddleOCREngine:
 
 
 # —— 解析函数 ——
+
+
+def _bounded_paddleocr_max_tokens(
+    api_base: str, model: str, requested: int
+) -> int:
+    """限制 SiliconFlow PaddleOCR-VL 输出，避免非法参数和退化长生成。"""
+    requested = max(1, int(requested))
+    try:
+        host = str(httpx.URL(api_base).host or "").lower()
+    except (TypeError, ValueError):
+        host = ""
+    if (
+        host == "api.siliconflow.cn"
+        and model.startswith("PaddlePaddle/PaddleOCR-VL")
+    ):
+        return min(requested, _SILICONFLOW_PADDLEOCR_MAX_TOKENS)
+    return requested
+
+
+def _provider_error_detail(response: httpx.Response) -> str:
+    """只提取供应商错误码和短消息，避免把任意响应体写入日志。"""
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+
+    error = payload.get("error")
+    error_payload = error if isinstance(error, dict) else payload
+    code = error_payload.get("code")
+    message = error_payload.get("message")
+    if code is None and error_payload is not payload:
+        code = payload.get("code")
+    if message is None and error_payload is not payload:
+        message = payload.get("message")
+
+    parts: list[str] = []
+    if isinstance(code, (str, int)):
+        safe_code = re.sub(r"[^A-Za-z0-9_.-]", "", str(code))[:64]
+        if safe_code:
+            parts.append(f"provider_code={safe_code}")
+    if isinstance(message, str):
+        safe_message = re.sub(r"\s+", " ", message).strip()[:500]
+        if safe_message:
+            parts.append(f"provider_message={safe_message}")
+    return " ".join(parts)
 
 
 def _is_layout_parsing_endpoint(api_base: str) -> bool:
@@ -743,6 +893,119 @@ def _official_bbox_to_pt(
 def _to_data_url(png_bytes: bytes) -> str:
     b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+
+def _parse_content(
+    content: str, page_index: int, meta: PageMeta
+) -> list[Block]:
+    """按 PaddleOCR 实际返回格式选择 LOC 或纯文本解析器。"""
+    if "<|LOC_" in content:
+        return _parse_loc_content(content, page_index, meta)
+    return _parse_plain_content(content, page_index, meta)
+
+
+def _split_png_vertical(
+    png_bytes: bytes, meta: PageMeta
+) -> list[tuple[bytes, PageMeta, float]]:
+    """把 PNG 切成两个带重叠区的纵向分片，并返回各片的 PDF y 偏移。"""
+    pixmap = fitz.Pixmap(png_bytes)
+    width_px = int(pixmap.width)
+    height_px = int(pixmap.height)
+    if width_px <= 0 or height_px < 2:
+        raise ValueError("page image is too small for vertical tile recovery")
+
+    overlap_px = max(1, round(height_px * _TILE_OVERLAP_RATIO))
+    midpoint = height_px // 2
+    spans = [
+        (0, min(height_px, midpoint + overlap_px)),
+        (max(0, midpoint - overlap_px), height_px),
+    ]
+    full_width_pt = meta.pdf_width_pt or (
+        meta.width_px * 72.0 / settings.pdf_render_dpi
+    )
+    full_height_pt = meta.pdf_height_pt or (
+        meta.height_px * 72.0 / settings.pdf_render_dpi
+    )
+
+    tiles: list[tuple[bytes, PageMeta, float]] = []
+    with fitz.open(stream=png_bytes, filetype="png") as image_document:
+        image_page = image_document[0]
+        scale_x = width_px / image_page.rect.width
+        scale_y = height_px / image_page.rect.height
+        matrix = fitz.Matrix(scale_x, scale_y)
+        for y0_px, y1_px in spans:
+            clip = fitz.Rect(
+                image_page.rect.x0,
+                image_page.rect.y0 + y0_px / scale_y,
+                image_page.rect.x1,
+                image_page.rect.y0 + y1_px / scale_y,
+            )
+            tile_pixmap = image_page.get_pixmap(
+                matrix=matrix, clip=clip, alpha=False
+            )
+            height_ratio = (y1_px - y0_px) / height_px
+            tile_meta = PageMeta(
+                page_index=meta.page_index,
+                width_px=tile_pixmap.width,
+                height_px=tile_pixmap.height,
+                pdf_width_pt=full_width_pt,
+                pdf_height_pt=full_height_pt * height_ratio,
+            )
+            tiles.append(
+                (
+                    tile_pixmap.tobytes("png"),
+                    tile_meta,
+                    full_height_pt * y0_px / height_px,
+                )
+            )
+    return tiles
+
+
+def _shift_blocks_y(
+    blocks: list[Block], page_index: int, y_offset_pt: float
+) -> list[Block]:
+    shifted: list[Block] = []
+    for block in blocks:
+        bbox = list(block.bbox)
+        if len(bbox) >= 4:
+            bbox[1] += y_offset_pt
+            bbox[3] += y_offset_pt
+        shifted.append(
+            block.model_copy(
+                update={
+                    "page_index": page_index,
+                    "bbox": bbox,
+                }
+            )
+        )
+    return shifted
+
+
+def _merge_vertical_tile_blocks(
+    upper: list[Block], lower: list[Block], page_index: int
+) -> list[Block]:
+    """按上下片阅读顺序合并，并清除重叠区共同识别出的连续块。"""
+    upper_keys = [_location_key(block.content) for block in upper]
+    lower_keys = [_location_key(block.content) for block in lower]
+    overlap = 0
+    for size in range(min(len(upper), len(lower), 24), 0, -1):
+        if (
+            all(upper_keys[-size:])
+            and upper_keys[-size:] == lower_keys[:size]
+        ):
+            overlap = size
+            break
+
+    merged = [*upper, *lower[overlap:]]
+    return [
+        block.model_copy(
+            update={
+                "page_index": page_index,
+                "block_id": f"p{page_index}-paddle-tile-{block_index}",
+            }
+        )
+        for block_index, block in enumerate(merged)
+    ]
 
 
 def _parse_loc_content(

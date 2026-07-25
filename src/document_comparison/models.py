@@ -375,6 +375,11 @@ class CompareOptions(BaseModel):
     # 默认 False:仅列举字符级/表格级差异,不做风险判定、不抽取高风险要素。
     # True 时恢复完整风险分级行为(向后兼容)。
     enable_risk_assessment: bool = False
+    # LLM 直接比对:开启后跳过条款切分/对齐/裁决,把 Word 与 PDF 各自解析成
+    # 纯文本后直接交给 LLM 比对差异并标注(复用无标注版管线 + llm_text_diff)。
+    # 结果适配为标准 TamperReport;LLM 仅做语义差异,不做风险分级
+    # (per-diff risk_level 恒 none)。无 PDF 坐标 -> 报告页不渲染高亮框。
+    enable_llm_direct_diff: bool = False
     # OCR 引擎选择(每次提交时由对比页选择);None 表示用默认 llm。
     ocr_backend: Literal["llm", "paddleocr"] | None = None
     # 回收件页数截取:开启后,回收 PDF 页数超过原始合同时,截取到原始页数再比对。

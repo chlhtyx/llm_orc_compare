@@ -154,6 +154,12 @@ class Settings:
             "DC_EXTERNAL_ENABLE_RISK_ASSESSMENT", "0"
         ).lower() in ("1", "true", "yes")
     )
+    # 外部 API / 管线测试默认是否启用 LLM 直接比对(解析后直接交给 LLM 比差异)。
+    external_enable_llm_direct_diff: bool = field(
+        default_factory=lambda: _env(
+            "DC_EXTERNAL_ENABLE_LLM_DIRECT_DIFF", "0"
+        ).lower() in ("1", "true", "yes")
+    )
     # 外部接口默认:回收件页数截取(回收 PDF 超过原始合同时,截取到原始页数再比对)。
     external_truncate_to_original_pages: bool = field(
         default_factory=lambda: _env(
@@ -242,6 +248,7 @@ _LLM_CONFIG_FIELDS = (
     "external_enable_llm_judge",
     "external_enable_llm_alignment",
     "external_enable_risk_assessment",
+    "external_enable_llm_direct_diff",
     "external_truncate_to_original_pages",
 )
 
@@ -283,6 +290,7 @@ _LLM_DEFAULTS: dict = {
     "external_enable_llm_judge": settings.external_enable_llm_judge,
     "external_enable_llm_alignment": settings.external_enable_llm_alignment,
     "external_enable_risk_assessment": settings.external_enable_risk_assessment,
+    "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
     "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
 }
 
@@ -420,6 +428,10 @@ def apply_llm_overrides() -> None:
     if "external_enable_risk_assessment" in cfg:
         settings.external_enable_risk_assessment = bool(
             cfg["external_enable_risk_assessment"]
+        )
+    if "external_enable_llm_direct_diff" in cfg:
+        settings.external_enable_llm_direct_diff = bool(
+            cfg["external_enable_llm_direct_diff"]
         )
     if "external_truncate_to_original_pages" in cfg:
         settings.external_truncate_to_original_pages = bool(

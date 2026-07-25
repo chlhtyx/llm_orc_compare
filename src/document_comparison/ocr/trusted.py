@@ -55,6 +55,9 @@ class TrustedPDFReader:
             fallback_pages = self._recognize_fallback_pages(
                 pdf_path, fallback_indexes, on_progress=on_progress
             )
+            truncated_fallback_pages = set(
+                getattr(self.fallback, "last_truncated_pages", set())
+            )
             for local_index, original_index in enumerate(fallback_indexes):
                 remapped = [
                     block.model_copy(
@@ -66,9 +69,20 @@ class TrustedPDFReader:
                     for block_index, block in enumerate(fallback_pages[local_index])
                 ]
                 pages[original_index] = remapped
-                diagnostics[original_index] = assess_fallback_page(
+                diagnostic = assess_fallback_page(
                     remapped, original_index
                 )
+                if local_index in truncated_fallback_pages:
+                    diagnostic = diagnostic.model_copy(
+                        update={
+                            "reliable": False,
+                            "reasons": [
+                                *diagnostic.reasons,
+                                "OCR 模型输出达到输出上限，页面尾部可能缺失",
+                            ],
+                        }
+                    )
+                diagnostics[original_index] = diagnostic
 
         self.last_diagnostics = [
             item

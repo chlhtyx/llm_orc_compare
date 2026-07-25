@@ -1,11 +1,17 @@
 """estimate_page_count:基于 OOXML 分页标记估算 docx 页数。"""
 from pathlib import Path
+from xml.etree import ElementTree
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document  # type: ignore[import-untyped]
 from docx.oxml import OxmlElement  # type: ignore[import-untyped]
 from docx.oxml.ns import qn  # type: ignore[import-untyped]
 
 from document_comparison.parsing.word import estimate_page_count
+
+_APP_PROPERTIES_NS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+)
 
 
 def _save(tmp_path: Path, name: str = "d.docx") -> Path:
@@ -30,9 +36,34 @@ def _add_last_rendered_page_break(doc: Document) -> None:
     run._r.append(OxmlElement("w:lastRenderedPageBreak"))
 
 
+def _set_saved_page_count(path: Path, page_count: int) -> None:
+    with ZipFile(path) as archive:
+        members = {
+            info.filename: archive.read(info.filename)
+            for info in archive.infolist()
+        }
+    root = ElementTree.fromstring(members["docProps/app.xml"])
+    pages = root.find(f"{{{_APP_PROPERTIES_NS}}}Pages")
+    assert pages is not None
+    pages.text = str(page_count)
+    members["docProps/app.xml"] = ElementTree.tostring(
+        root, encoding="utf-8", xml_declaration=True
+    )
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+
+
 def test_no_breaks_is_one_page(tmp_path: Path):
     path = _save(tmp_path)
     assert estimate_page_count(path) == 1
+
+
+def test_saved_word_page_count_is_used_without_break_markers(tmp_path: Path):
+    path = _save(tmp_path)
+    _set_saved_page_count(path, 4)
+
+    assert estimate_page_count(path) == 4
 
 
 def test_manual_page_breaks(tmp_path: Path):
@@ -67,4 +98,17 @@ def test_mixed_breaks(tmp_path: Path):
     path = tmp_path / "d.docx"
     doc.save(path)
     # 2 个分页标记(1 手动 + 1 渲染)-> 3 页
+    assert estimate_page_count(path) == 3
+
+
+def test_page_count_uses_larger_of_saved_metadata_and_break_markers(
+    tmp_path: Path,
+):
+    doc = Document()
+    _add_manual_page_break(doc)
+    _add_manual_page_break(doc)
+    path = tmp_path / "d.docx"
+    doc.save(path)
+    _set_saved_page_count(path, 2)
+
     assert estimate_page_count(path) == 3

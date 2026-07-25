@@ -131,3 +131,36 @@ def test_raw_plan_resolver_returns_block_character_spans(monkeypatch):
     assert prompt["word_blocks"][0]["block_id"] == "w-1"
     assert prompt["pdf_blocks"][0]["bbox"] == [10.0, 10.0, 120.0, 30.0]
     assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_raw_plan_timeout_is_not_retried(monkeypatch):
+    calls = 0
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("slow planner", request=request)
+
+    original_client = httpx.Client
+    monkeypatch.setattr(
+        "document_comparison.align.llm_resolver.httpx.Client",
+        lambda **kwargs: original_client(
+            transport=httpx.MockTransport(timeout),
+            **kwargs,
+        ),
+    )
+    monkeypatch.setattr(
+        "document_comparison.align.llm_resolver.time.sleep",
+        lambda _seconds: None,
+    )
+    monkeypatch.setattr(settings, "judge_api_base", "https://judge.example/v1")
+    monkeypatch.setattr(settings, "judge_model", "judge-model")
+    monkeypatch.setattr(settings, "llm_max_retries", 2)
+
+    plan = resolve_raw_alignment_plan(
+        [RawAlignmentBlock(block_id="w-1", text="合同标的")],
+        [RawAlignmentBlock(block_id="p-1", text="合同标的")],
+    )
+
+    assert plan is None
+    assert calls == 1

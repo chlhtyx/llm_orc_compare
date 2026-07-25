@@ -51,6 +51,8 @@ export interface LlmConfig {
   external_enable_llm_judge: boolean
   external_enable_llm_alignment: boolean
   external_enable_risk_assessment: boolean
+  /** LLM 直接比对:解析后直接交给 LLM 比差异;复用外部 API / 管线测试默认配置 */
+  external_enable_llm_direct_diff: boolean
   /** 回收件页数截取:回收 PDF 超过原始合同页数时,自动截取前 N 页再比对 */
   external_truncate_to_original_pages: boolean
   external_enabled: boolean
@@ -97,6 +99,7 @@ export interface LlmConfigUpdate {
   external_enable_llm_judge?: boolean
   external_enable_llm_alignment?: boolean
   external_enable_risk_assessment?: boolean
+  external_enable_llm_direct_diff?: boolean
   external_truncate_to_original_pages?: boolean
 }
 

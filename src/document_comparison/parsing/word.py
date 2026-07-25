@@ -9,6 +9,8 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from docx import Document  # type: ignore[import-untyped]
 from docx.document import Document as _Doc  # type: ignore[import-untyped]
@@ -21,6 +23,9 @@ from ..structure.normalize import normalize_table_text
 logger = logging.getLogger(__name__)
 
 _HEADING_RE = re.compile(r"heading\s*(\d+)", re.IGNORECASE)
+_APP_PROPERTIES_NS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+)
 
 
 def _heading_level(style_name: str) -> int:
@@ -97,12 +102,13 @@ def _table_to_structure(table: Table) -> TableStructure | None:
 def estimate_page_count(path: str | Path) -> int:
     """估算 Word 文档页数(用于回收件页数截取)。
 
-    .docx 无固定分页(取决于渲染器),这里通过 OOXML 中的分页标记做保守估算:
+    优先读取 Word 保存时写入 ``docProps/app.xml`` 的 ``Pages`` 属性，并与
+    OOXML 分页标记推导值取较大者:
     - `<w:br w:type="page"/>`:显式手动分页符。
     - `<w:lastRenderedPageBreak/>`:Word 上次保存时记录的软分页位置
       (仅由 Word 写入,LibreOffice 等不一定生成,缺失时估算会偏少)。
 
-    页数 = 命中数 + 1(末尾内容默认占一页),最小钳制为 1。
+    分页标记页数 = 命中数 + 1(末尾内容默认占一页),最小钳制为 1。
     这只是近似值;调用方已知真实页数时应直接传 original_page_count 覆盖。
     """
     from docx.oxml.ns import qn  # type: ignore[import-untyped]
@@ -115,7 +121,34 @@ def estimate_page_count(path: str | Path) -> int:
             breaks += 1
         elif child.tag == qn("w:lastRenderedPageBreak"):
             breaks += 1
-    return max(1, breaks + 1)
+    saved_pages = _saved_word_page_count(path)
+    break_pages = breaks + 1
+    selected_pages = max(1, break_pages, saved_pages)
+    logger.info(
+        "docx page count resolved saved_pages=%s break_pages=%s selected=%s",
+        saved_pages,
+        break_pages,
+        selected_pages,
+    )
+    return selected_pages
+
+
+def _saved_word_page_count(path: str | Path) -> int:
+    """读取 Word 最近一次保存时记录的页数；缺失或非法时返回 0。"""
+    try:
+        with ZipFile(path) as archive:
+            app_properties = archive.read("docProps/app.xml")
+        root = ElementTree.fromstring(app_properties)
+    except (BadZipFile, KeyError, OSError, ElementTree.ParseError):
+        return 0
+    pages = root.find(f"{{{_APP_PROPERTIES_NS}}}Pages")
+    if pages is None or pages.text is None:
+        return 0
+    try:
+        value = int(pages.text)
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
 
 
 def parse_word(path: str | Path) -> list[RawItem]:

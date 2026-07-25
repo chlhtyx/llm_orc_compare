@@ -201,6 +201,7 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
     monkeypatch.setattr(settings, "external_enable_llm_judge", True)
     monkeypatch.setattr(settings, "external_enable_llm_alignment", True)
     monkeypatch.setattr(settings, "external_enable_risk_assessment", True)
+    monkeypatch.setattr(settings, "external_truncate_to_original_pages", True)
 
     test_response = external_client.post(
         "/api/v1/compare/api-test",
@@ -215,6 +216,7 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
         data={
             "document_no": "BILL-OPTIONS",
             "callback_url": "http://internal/callback",
+            "original_page_count": "3",
         },
         files={
             "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
@@ -229,6 +231,9 @@ def test_api_comparison_options_apply_to_test_and_external_tasks(
     assert all(item["enable_llm_judge"] is True for item in captured)
     assert all(item["enable_llm_alignment"] is True for item in captured)
     assert all(item["enable_risk_assessment"] is True for item in captured)
+    assert captured[0].get("original_page_count") is None
+    assert captured[1]["truncate_to_original_pages"] is True
+    assert captured[1]["original_page_count"] == 3
 
 
 def test_compare_page_api_test_requires_complete_external_config(external_client, monkeypatch):

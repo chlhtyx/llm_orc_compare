@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import String, cast, func, or_, select
-from sqlalchemy.orm import Session
 
 from ..models import (
     StatementSummaryReport,

@@ -1,8 +1,6 @@
 // 与后端 src/document_comparison/models.py 的 pydantic 模型一一对应。
 // 后端字段命名若变更,需同步此处。
 
-export type DocType = 'word' | 'pdf'
-export type MatchType = 'number' | 'field' | 'normalized_exact' | 'semantic' | 'llm' | 'unmatched'
 export type DiffStatus = 'identical' | 'modified' | 'added' | 'deleted'
 export type RiskLevel = 'high' | 'medium' | 'low' | 'none'
 export type OverallRisk = 'high' | 'medium' | 'low' | 'changed' | 'clean' | 'needs_review'
@@ -121,6 +119,11 @@ export interface CompareOptions {
    * true 时恢复完整风险分级行为。
    */
   enable_risk_assessment?: boolean
+  /**
+   * LLM 直接比对:开启后跳过条款切分/对齐,把 Word 与 PDF 解析成纯文本后
+   * 直接交给 LLM 比对差异并标注。结果适配为标准报告;不做风险分级、无 PDF 高亮框。
+   */
+  enable_llm_direct_diff?: boolean
   /** OCR 引擎选择(由对比页每次提交时选择);不传则用默认 llm */
   ocr_backend?: 'llm' | 'paddleocr'
   /**

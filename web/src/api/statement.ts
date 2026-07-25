@@ -4,7 +4,6 @@
 import type {
   ProgressEvent,
   StatementOptions,
-  StatementSummaryReport,
   StatementTaskInfo,
   TaskStatus,
 } from './types'
@@ -34,9 +33,6 @@ export function getStatementTask(taskId: string): Promise<StatementTaskInfo> {
   return request(`/api/v1/statement/${encodeURIComponent(taskId)}`)
 }
 
-export function getStatementReport(taskId: string): Promise<StatementSummaryReport> {
-  return request(`/api/v1/statement/${encodeURIComponent(taskId)}/report`)
-}
 
 export interface StatementProgressHandlers {
   onEvent: (ev: ProgressEvent) => void

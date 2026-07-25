@@ -5,7 +5,6 @@ import type {
   RawCompareOptions,
   RawTaskInfo,
   TaskStatus,
-  TextDiffReport,
 } from './types'
 import { ApiError, openEventStream, request } from './client'
 
@@ -31,9 +30,6 @@ export function getRawTask(taskId: string): Promise<RawTaskInfo> {
   return request(`/api/v1/raw-compare/${encodeURIComponent(taskId)}`)
 }
 
-export function getRawReport(taskId: string): Promise<TextDiffReport> {
-  return request(`/api/v1/raw-compare/${encodeURIComponent(taskId)}/report`)
-}
 
 export interface RawProgressHandlers {
   onEvent: (ev: ProgressEvent) => void

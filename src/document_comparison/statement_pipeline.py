@@ -36,7 +36,6 @@ from .models import (
 from .ocr import get_ocr_engine
 from .parsing.pdf import get_page_metas, render_pages
 from .statement.amount_column import (
-    detect_amount_columns,
     merge_cross_page_tables,
     summarize_table,
 )

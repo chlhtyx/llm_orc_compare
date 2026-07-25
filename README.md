@@ -9,9 +9,11 @@
 - 支持 OpenAI 兼容的多模态模型，也可切换到 PaddleOCR-VL Chat Completions 服务；标准合同比对会用 `OCR:` 识别内容，并在缺少坐标时用 `Spotting:` 补充扫描 PDF 高亮位置。
 - 默认通过保守编号/字段锚点、父章节上下文和分段单调 DP 对齐条款，原生支持
   `1↔1`、`1↔2`、`2↔1`；可选纯文本 LLM 可直接对 DOCX 段落与 PDF OCR block
-  的字符区间联合分段和对齐，非法或不完整计划自动回退默认链路。
+  的字符区间联合分段和对齐。联合规划最多调用一次、最长等待 60 秒；非法、
+  超时或不完整计划自动回退确定性 Clause 对齐，不再发起第二轮 LLM。
 - 对金额、日期、主体、账号、责任等高风险要素进行 canonical 强校验，并可启用纯文本 LLM 辅助说明。
 - **合同比对默认仅列举差异**(字符级 / 表格单元格级),不做风险判别;在提交选项里传 `enable_risk_assessment=true` 可恢复完整风险分级 + 高风险要素校验 + LLM 辅助说明。
+- **LLM 直接比对**:`options.enable_llm_direct_diff=true`(或外部 API 默认配置 `external_enable_llm_direct_diff`)开启后,跳过条款切分/对齐/裁决,把 Word 与 PDF 各自解析成纯文本后直接交给 LLM 比对差异并标注;结果适配为标准报告,不做风险分级、不生成 PDF 高亮框(无坐标信息)。
 - 提供标准条款比对和纯文本快速比对两种模式。
 - **对帐单金额统计**:一次可上传多个对帐单 PDF(扫描件),OCR 识别表格后用确定性代码抽取并累加金额,聚合输出所有文件的总金额;自动核对「合计/小计」声明值;列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
 - 通过 SSE 实时展示任务进度、各阶段耗时，并支持任务完成 Webhook。
@@ -198,7 +200,6 @@ Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 | `GET` | `/api/v1/compare/{task_id}` | 查询任务状态和结果 |
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
-| `GET` | `/api/v1/compare/{task_id}/docx-preview` | 获取 Word 全文及差异标记 |
 | `POST` | `/api/v1/external/contractCompare` | 外部系统提交标准合同比对(`X-API-Key`);默认异步,`sync=true` 同步返回结果 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |

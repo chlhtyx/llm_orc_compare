@@ -22,6 +22,7 @@ const form = reactive({
   external_enable_llm_judge: false,
   external_enable_llm_alignment: false,
   external_enable_risk_assessment: false,
+  external_enable_llm_direct_diff: false,
   external_truncate_to_original_pages: false,
 })
 
@@ -43,6 +44,7 @@ function syncFromConfig(config: LlmConfig | null): void {
   form.external_enable_llm_judge = config.external_enable_llm_judge ?? false
   form.external_enable_llm_alignment = config.external_enable_llm_alignment ?? false
   form.external_enable_risk_assessment = config.external_enable_risk_assessment ?? false
+  form.external_enable_llm_direct_diff = config.external_enable_llm_direct_diff ?? false
   form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
   keyDirty.value = false
 }
@@ -68,6 +70,7 @@ async function onSave(): Promise<void> {
       form.external_enable_risk_assessment && form.external_enable_llm_judge,
     external_enable_llm_alignment: form.external_enable_llm_alignment,
     external_enable_risk_assessment: form.external_enable_risk_assessment,
+    external_enable_llm_direct_diff: form.external_enable_llm_direct_diff,
     external_truncate_to_original_pages: form.external_truncate_to_original_pages,
   })
   if (!ok) {
@@ -205,10 +208,21 @@ async function onReset(): Promise<void> {
           </label>
         </fieldset>
 
-        <div class="option-toggles">
+       <div class="option-toggles">
           <label class="toggle-row">
             <span>
-              <strong>LLM 联合分段对齐</strong>
+              <strong>LLM 直接比对</strong>
+              <small>开启后跳过条款切分/对齐，解析后直接把 Word 与 PDF 文本交给 LLM 比对差异并标注；不做风险分级、不生成 PDF 高亮框。</small>
+            </span>
+            <input
+              v-model="form.external_enable_llm_direct_diff"
+              type="checkbox"
+              role="switch"
+            />
+          </label>
+         <label class="toggle-row">
+           <span>
+             <strong>LLM 联合分段对齐</strong>
               <small>直接对齐 DOCX 段落与 PDF OCR 块；失败时回退规则，不会决定是否发生篡改。</small>
             </span>
             <input
@@ -239,7 +253,9 @@ async function onReset(): Promise<void> {
           <label class="toggle-row">
             <span>
               <strong>回收件页数截取</strong>
-              <small>回收 PDF 超过原始合同页数时，自动截取前 N 页再比对。</small>
+              <small>
+                自动按 Word 保存页数截掉合同后的图纸；请求可显式提供真实页数覆盖。
+              </small>
             </span>
             <input
               v-model="form.external_truncate_to_original_pages"

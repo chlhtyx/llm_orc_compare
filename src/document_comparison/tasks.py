@@ -217,13 +217,14 @@ class TaskManager:
         *, enable_llm_judge: bool = False, ocr_backend: str | None = None,
         enable_llm_alignment: bool = False,
         enable_risk_assessment: bool = False,
+        enable_llm_direct_diff: bool = False,
         truncate_to_original_pages: bool = False,
         original_page_count: int | None = None,
     ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start task_id=%s word=%s pdf=%s llm_alignment=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", task_id, word_path, pdf_path, enable_llm_alignment, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
+        logger.info("task start task_id=%s word=%s pdf=%s llm_direct=%s llm_alignment=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", task_id, word_path, pdf_path, enable_llm_direct_diff, enable_llm_alignment, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
         await self._db_thread(
             db_repo.update_task_status, task_id, "running"
         )
@@ -244,6 +245,7 @@ class TaskManager:
                         enable_llm_alignment=enable_llm_alignment,
                         ocr_backend=ocr_backend,
                         enable_risk_assessment=enable_risk_assessment,
+                        enable_llm_direct_diff=enable_llm_direct_diff,
                         truncate_to_original_pages=truncate_to_original_pages,
                         original_page_count=original_page_count,
                         truncated_pdf_output_path=compared_pdf_path(task_id),

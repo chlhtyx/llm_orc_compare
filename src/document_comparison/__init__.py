@@ -10,7 +10,7 @@
 - report        ⑥ 报告生成层
 - embed         语义向量(对齐兜底,接口 + mock)
 - pipeline      流水线编排
-- auth/webhook/tasks/storage/api  服务层(§7、§14)
+- webhook/tasks/storage/api  服务层(§7、§14)
 """
 
 __version__ = "0.1.0"

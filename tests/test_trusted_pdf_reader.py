@@ -114,6 +114,10 @@ class _FallbackOCR:
         ]]
 
 
+class _TruncatedFallbackOCR(_FallbackOCR):
+    last_truncated_pages = {0}
+
+
 def test_trusted_reader_sends_only_non_native_pages_to_fallback(tmp_path: Path):
     pdf_path = tmp_path / "mixed.pdf"
     _make_mixed_pdf(pdf_path)
@@ -129,6 +133,19 @@ def test_trusted_reader_sends_only_non_native_pages_to_fallback(tmp_path: Path):
     assert [item.source for item in engine.last_diagnostics] == ["native", "fallback"]
     assert all(item.reliable for item in engine.last_diagnostics)
     assert all(item.location_status == "complete" for item in engine.last_diagnostics)
+
+
+def test_trusted_reader_marks_truncated_fallback_page_unreliable(tmp_path: Path):
+    pdf_path = tmp_path / "mixed.pdf"
+    _make_mixed_pdf(pdf_path)
+    engine = TrustedPDFReader(_TruncatedFallbackOCR())
+
+    engine.recognize(pdf_path, get_page_metas(pdf_path))
+
+    diagnostic = engine.last_diagnostics[1]
+    assert diagnostic.page_index == 1
+    assert diagnostic.reliable is False
+    assert "达到输出上限" in diagnostic.reasons[-1]
 
 
 def test_fallback_diagnostic_tracks_location_without_changing_recognition_quality():

@@ -7,7 +7,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from ..models import DiffSegment, TableStructure
-from .elements import canonicalize_contract_text, reviewable_formatting_change
+from .elements import canonicalize_contract_text
 
 
 def char_diff(a: str, b: str) -> list[DiffSegment]:
@@ -27,13 +27,6 @@ def char_diff(a: str, b: str) -> list[DiffSegment]:
                 segs.append(DiffSegment(op="insert", text=b[j1:j2]))
     return segs
 
-
-def is_only_whitespace_or_punct(a: str, b: str) -> bool:
-    """两端是否仅有可安全消噪、或必须复核的空格/标点差异。"""
-    return (
-        canonicalize_contract_text(a) == canonicalize_contract_text(b)
-        or reviewable_formatting_change(a, b) is not None
-    )
 
 
 def table_diff(a: TableStructure, b: TableStructure) -> list[DiffSegment]:

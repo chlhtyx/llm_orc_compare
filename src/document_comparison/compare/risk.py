@@ -12,7 +12,7 @@ def max_risk(levels: list[RiskLevel]) -> RiskLevel:
     return max(levels, key=lambda lv: _RISK_ORDER[lv])
 
 
-def overall_risk_from_diffs(high_or_modify_present: bool, levels: list[RiskLevel]) -> str:
+def overall_risk_from_diffs(levels: list[RiskLevel]) -> str:
     """汇总为 overall_risk:无任何 diff → clean,否则取最高风险。"""
     if not levels:
         return "clean"

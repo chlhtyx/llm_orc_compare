@@ -18,3 +18,4 @@ htmlcov/
 *.docx
 !tests/fixtures/*
 .zcode/
+.DS_Store
