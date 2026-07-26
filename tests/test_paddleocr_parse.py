@@ -806,3 +806,221 @@ def test_engine_reads_paddleocr_config():
         == settings.paddleocr_official_access_token
     )
     assert eng.official_model == settings.paddleocr_official_model
+
+
+# —— paddlex_serving 通道:调用自建 PaddleX serving(/ocr 或 /layout-parsing)——
+
+
+def _paddlex_engine(**kwargs) -> PaddleOCREngine:
+    """构造 paddlex_serving 引擎,默认填入完整可用配置。"""
+    defaults = {
+        "api_mode": "paddlex_serving",
+        "paddlex_api_base": "http://192.168.100.102:8080",
+        "paddlex_endpoint": "/ocr",
+        "timeout": 123,
+    }
+    defaults.update(kwargs)
+    return PaddleOCREngine(**defaults)
+
+
+class _FakeOKResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _Fake500Response:
+    status_code = 500
+
+    def raise_for_status(self):
+        raise RuntimeError("HTTP 500")
+
+
+def test_engine_paddlex_serving_parses_layout_parsing_response(monkeypatch, tmp_path):
+    """endpoint=/layout-parsing 时复用 PP-StructureV3 版面解析逻辑。"""
+    captured: dict = {}
+
+    payload = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "markdown": {"text": "第一条 合同内容", "images": {}},
+                    "prunedResult": {
+                        "width": 1000,
+                        "height": 2000,
+                        "parsing_res_list": [
+                            {
+                                "block_label": "text",
+                                "block_content": "第一条 合同内容",
+                                "block_bbox": [100, 200, 900, 400],
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+    }
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return _FakeOKResponse(payload)
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", fake_post)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = _paddlex_engine(paddlex_endpoint="/layout-parsing")
+
+    pages = engine.recognize(pdf_path, [_meta()])
+
+    assert pages[0][0].content == "第一条 合同内容"
+    assert pages[0][0].label == "text"
+    assert pages[0][0].bbox  # 坐标已换算为 PDF pt
+    # URL = base + endpoint
+    assert captured["url"] == "http://192.168.100.102:8080/layout-parsing"
+    assert captured["timeout"] == 123.0
+    assert captured["json"]["fileType"] == 0  # PDF
+    assert captured["json"]["file"] == "JVBERi10ZXN0"  # base64("%PDF-test")
+
+
+def test_engine_paddlex_serving_parses_ocr_response(monkeypatch, tmp_path):
+    """endpoint=/ocr(通用 OCR 产线):rec_texts/dt_polys 行级结果 → 每行一个 text Block。"""
+    captured: dict = {}
+
+    # PaddleX 通用 OCR 响应:ocrResults 每页含 rec_texts + dt_polys(顶点列表)
+    payload = {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": {
+                        "width": 1654,
+                        "height": 2339,
+                        "rec_texts": ["甲方：示例公司", "乙方：另一方"],
+                        "dt_polys": [
+                            [[100, 200], [500, 200], [500, 250], [100, 250]],
+                            [[100, 300], [500, 300], [500, 350], [100, 350]],
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return _FakeOKResponse(payload)
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", fake_post)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = _paddlex_engine()  # 默认 endpoint=/ocr
+
+    pages = engine.recognize(pdf_path, [_meta()])
+
+    assert captured["url"] == "http://192.168.100.102:8080/ocr"
+    assert len(pages[0]) == 2
+    assert pages[0][0].content == "甲方：示例公司"
+    assert pages[0][0].label == "text"
+    assert pages[0][1].content == "乙方：另一方"
+    # dt_polys 外接矩形应换算为 PDF pt(非空)
+    assert len(pages[0][0].bbox) == 4
+    assert pages[0][0].bbox[1] < pages[0][1].bbox[1]  # 第二行 y 更大
+
+
+def test_engine_paddlex_serving_omits_auth_header_when_no_key(monkeypatch, tmp_path):
+    """未配置 api_key 时请求不带 Authorization(自建 serving 默认无鉴权)。"""
+    captured: dict = {}
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"headers": headers})
+        return _FakeOKResponse({"result": {"ocrResults": [{"prunedResult": {"rec_texts": [], "dt_polys": []}}]}})
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", fake_post)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = _paddlex_engine(paddlex_api_key="")
+
+    engine.recognize(pdf_path, [_meta()])
+
+    assert "Authorization" not in captured["headers"]
+    assert captured["headers"]["Content-Type"] == "application/json"
+
+
+def test_engine_paddlex_serving_adds_bearer_auth_when_key_set(monkeypatch, tmp_path):
+    """配置 api_key 后带 Authorization: Bearer xxx。"""
+    captured: dict = {}
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"headers": headers})
+        return _FakeOKResponse({"result": {"ocrResults": [{"prunedResult": {"rec_texts": [], "dt_polys": []}}]}})
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", fake_post)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = _paddlex_engine(paddlex_api_key="secret-key")
+
+    engine.recognize(pdf_path, [_meta()])
+
+    assert captured["headers"]["Authorization"] == "Bearer secret-key"
+
+
+def test_engine_paddlex_serving_custom_endpoint(monkeypatch, tmp_path):
+    """endpoint 配置生效:可填任意路径,自动补 / 前缀。"""
+    captured: dict = {}
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"url": url})
+        return _FakeOKResponse({"result": {"ocrResults": [{"prunedResult": {"rec_texts": [], "dt_polys": []}}]}})
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", fake_post)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    # 不带前导 / 也应自动补全
+    engine = _paddlex_engine(paddlex_endpoint="v2/models/ocr/infer")
+
+    engine.recognize(pdf_path, [_meta()])
+
+    assert captured["url"] == "http://192.168.100.102:8080/v2/models/ocr/infer"
+
+
+def test_engine_paddlex_serving_logs_failure_with_status_code(monkeypatch, tmp_path):
+    """HTTP 失败时记 log_model_failure(status_code=...) 并抛出。"""
+    failures: list[dict] = []
+
+    def fake_failure(logger_, kind, started_at, error, *, status_code=None):
+        failures.append({"kind": kind, "error": error, "status_code": status_code})
+
+    monkeypatch.setattr(paddleocr_http.requests, "post", lambda *a, **kw: _Fake500Response())
+    monkeypatch.setattr(paddleocr_http, "log_model_failure", fake_failure)
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = _paddlex_engine()
+
+    with pytest.raises(RuntimeError):
+        engine.recognize(pdf_path, [_meta()])
+
+    assert len(failures) == 1
+    assert failures[0]["kind"] == "paddleocr"
+    # _Fake500Response 没挂 .response,status_code 应为 None
+    assert failures[0]["status_code"] is None
+
+
+def test_engine_paddlex_serving_unrecognized_response_raises(monkeypatch, tmp_path):
+    """响应里既无 layoutParsingResults 也无 ocrResults 时抛 RuntimeError。"""
+    monkeypatch.setattr(
+        paddleocr_http.requests,
+        "post",
+        lambda *a, **kw: _FakeOKResponse({"result": {"unexpected": True}}),
+    )
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    engine = _paddlex_engine()
+
+    with pytest.raises(RuntimeError, match="缺少 layoutParsingResults 或 ocrResults"):
+        engine.recognize(pdf_path, [_meta()])

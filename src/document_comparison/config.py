@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -55,8 +56,9 @@ class Settings:
 
     # —— 远端多模态推理(paddleocr 引擎用:专用 OCR 模型)——
     # 与 llm_* 完全独立配置。api_mode=vllm 走 OpenAI 兼容
-    # /chat/completions;api_mode=official_sdk 走 PaddleOCR 官方 Python SDK。
-    # 两种方式各自保留配置,切换时不覆盖另一套凭据。
+    # /chat/completions;api_mode=official_sdk 走 PaddleOCR 官方 Python SDK;
+    # api_mode=paddlex_serving 走自建 PaddleX serving(`/ocr` 或 `/layout-parsing`)。
+    # 三种方式各自保留配置,切换时不覆盖另一套凭据。
     paddleocr_api_mode: str = "vllm"
     # vLLM / OpenAI 兼容方式(原有配置)
     paddleocr_api_base: str = ""
@@ -66,6 +68,11 @@ class Settings:
     paddleocr_official_api_base: str = ""
     paddleocr_official_access_token: str = ""
     paddleocr_official_model: str = "PaddleOCR-VL-1.6"
+    # 自建 PaddleX serving(`paddlex --serve`):endpoint 默认 /ocr(通用 OCR),
+    # 改成 /layout-parsing 则走 PP-StructureV3 版面解析产线。
+    paddleocr_paddlex_api_base: str = ""
+    paddleocr_paddlex_endpoint: str = "/ocr"
+    paddleocr_paddlex_api_key: str = ""
     paddleocr_timeout: float = 300.0
     paddleocr_max_concurrency: int = 4
     paddleocr_max_retries: int = 2
@@ -226,6 +233,9 @@ _LLM_CONFIG_FIELDS = (
     "paddleocr_official_api_base",
     "paddleocr_official_access_token",
     "paddleocr_official_model",
+    "paddleocr_paddlex_api_base",
+    "paddleocr_paddlex_endpoint",
+    "paddleocr_paddlex_api_key",
     "paddleocr_timeout",
     "paddleocr_max_concurrency",
     "paddleocr_max_retries",
@@ -267,6 +277,9 @@ _LLM_DEFAULTS: dict = {
     "paddleocr_official_api_base": "",
     "paddleocr_official_access_token": "",
     "paddleocr_official_model": "PaddleOCR-VL-1.6",
+    "paddleocr_paddlex_api_base": "",
+    "paddleocr_paddlex_endpoint": "/ocr",
+    "paddleocr_paddlex_api_key": "",
     "paddleocr_timeout": 300,
     "paddleocr_max_concurrency": 4,
     "paddleocr_max_retries": 2,
@@ -297,6 +310,12 @@ _LLM_DEFAULTS: dict = {
 def _legacy_llm_config_path() -> Path:
     """旧文件路径(仅供首次启动一次性导入使用,代码不再读写此文件)。"""
     return Path(_env("DC_STORAGE_DIR", "./.dc_data")) / "llm_config.json"
+
+# 本进程最近一次 apply_llm_overrides 完成时的 PG updated_at(naive UTC)。
+# 多 worker 部署下每个 worker 独立持有,供 ensure_llm_config_fresh() 比对:
+# 若 PG 的 updated_at 比本值新,说明别的 worker 改了配置,本 worker 需要重新 apply。
+# None 表示尚未 apply 过(首次启动前的初始状态)。
+_last_applied_at: datetime | None = None
 
 def load_llm_overrides() -> dict:
     """从 Postgres llm_config 表读取已持久化的 LLM 配置。
@@ -353,7 +372,7 @@ def apply_llm_overrides() -> None:
         settings.llm_max_concurrency = int(cfg["llm_max_concurrency"])
     if "llm_max_retries" in cfg:
         settings.llm_max_retries = int(cfg["llm_max_retries"])
-    if cfg.get("paddleocr_api_mode") in {"vllm", "official_sdk"}:
+    if cfg.get("paddleocr_api_mode") in {"vllm", "official_sdk", "paddlex_serving"}:
         settings.paddleocr_api_mode = str(cfg["paddleocr_api_mode"])
     if "paddleocr_api_base" in cfg:
         settings.paddleocr_api_base = cfg["paddleocr_api_base"]
@@ -369,6 +388,12 @@ def apply_llm_overrides() -> None:
         ]
     if "paddleocr_official_model" in cfg:
         settings.paddleocr_official_model = cfg["paddleocr_official_model"]
+    if "paddleocr_paddlex_api_base" in cfg:
+        settings.paddleocr_paddlex_api_base = cfg["paddleocr_paddlex_api_base"]
+    if "paddleocr_paddlex_endpoint" in cfg:
+        settings.paddleocr_paddlex_endpoint = cfg["paddleocr_paddlex_endpoint"]
+    if "paddleocr_paddlex_api_key" in cfg:
+        settings.paddleocr_paddlex_api_key = cfg["paddleocr_paddlex_api_key"]
     if "paddleocr_timeout" in cfg:
         settings.paddleocr_timeout = float(cfg["paddleocr_timeout"])
     if "paddleocr_max_concurrency" in cfg:
@@ -437,6 +462,48 @@ def apply_llm_overrides() -> None:
         settings.external_truncate_to_original_pages = bool(
             cfg["external_truncate_to_original_pages"]
         )
+    # 记录本次 apply 对应的 PG 版本,供多 worker 间的 ensure_llm_config_fresh 比对。
+    # 取 PG updated_at(而非本机 now)以避免多机时钟漂移误判;查询失败则回退本机时间。
+    global _last_applied_at
+    try:
+        from .db import repository as _repo
+        pg_ts = _repo.get_llm_config_updated_at()
+        if pg_ts is not None:
+            _last_applied_at = pg_ts
+        else:
+            _last_applied_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001 -- 版本记录失败不影响 apply 本身
+        _last_applied_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def ensure_llm_config_fresh() -> bool:
+    """多 worker 配置同步:若 PG 的 llm_config 比本进程内存新,重新 apply。
+
+    gunicorn 多 worker 下,PUT /api/v1/config/llm 的 save_llm_overrides 只更新
+    当前 worker 的 settings 单例,其它 worker 仍持启动时的旧值。本函数在 GET
+    配置接口与任务执行路径上调用,发现落后时拉取最新配置。
+
+    返回 True 表示触发了重新 apply,False 表示已是最新(或 PG 不可用,保守跳过)。
+    设计为廉价短查询 + 命中才 apply,异常一律吞掉只记日志,绝不阻塞调用方。
+    """
+    global _last_applied_at
+    try:
+        from .db import repository as _repo
+        pg_ts = _repo.get_llm_config_updated_at()
+    except Exception as exc:  # noqa: BLE001 -- DB 不可用时不影响主流程
+        logger.debug("ensure_llm_config_fresh: skip (PG read failed): %s", exc)
+        return False
+    if pg_ts is None:
+        return False  # PG 无记录,无可同步
+    if _last_applied_at is not None and pg_ts <= _last_applied_at:
+        return False  # 本进程已是最新
+    # PG 比本进程新:重新 apply 并更新版本戳
+    logger.info(
+        "ensure_llm_config_fresh: PG updated_at=%s newer than local=%s, re-applying",
+        pg_ts, _last_applied_at,
+    )
+    apply_llm_overrides()
+    return True
 
 
 def _maybe_import_legacy_llm_config_file() -> None:

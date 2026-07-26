@@ -13,13 +13,16 @@ const form = reactive({
   llm_timeout: 120,
   llm_max_concurrency: 4,
   // —— paddleocr 引擎(专用 OCR 模型)——
-  paddleocr_api_mode: 'vllm' as 'vllm' | 'official_sdk',
+  paddleocr_api_mode: 'vllm' as 'vllm' | 'official_sdk' | 'paddlex_serving',
   paddleocr_api_base: '',
   paddleocr_api_key: '',
   paddleocr_model: '',
   paddleocr_official_api_base: '',
   paddleocr_official_access_token: '',
   paddleocr_official_model: 'PaddleOCR-VL-1.6',
+  paddleocr_paddlex_api_base: '',
+  paddleocr_paddlex_endpoint: '/ocr',
+  paddleocr_paddlex_api_key: '',
   paddleocr_timeout: 300,
   paddleocr_max_concurrency: 4,
   // —— LLM 辅助说明服务 ——
@@ -40,6 +43,7 @@ const form = reactive({
 const keyDirty = ref(false)
 const paddleKeyDirty = ref(false)
 const paddleOfficialTokenDirty = ref(false)
+const paddlePaddlexKeyDirty = ref(false)
 const embedKeyDirty = ref(false)
 const judgeKeyDirty = ref(false)
 const saved = ref(false)
@@ -59,6 +63,9 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.paddleocr_official_api_base = c.paddleocr_official_api_base || ''
   form.paddleocr_official_access_token = c.paddleocr_official_access_token || ''
   form.paddleocr_official_model = c.paddleocr_official_model || 'PaddleOCR-VL-1.6'
+  form.paddleocr_paddlex_api_base = c.paddleocr_paddlex_api_base || ''
+  form.paddleocr_paddlex_endpoint = c.paddleocr_paddlex_endpoint || '/ocr'
+  form.paddleocr_paddlex_api_key = c.paddleocr_paddlex_api_key || ''
   form.paddleocr_timeout = c.paddleocr_timeout ?? 300
   form.paddleocr_max_concurrency = c.paddleocr_max_concurrency ?? 4
   form.judge_api_base = c.judge_api_base || ''
@@ -75,6 +82,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   keyDirty.value = false
   paddleKeyDirty.value = false
   paddleOfficialTokenDirty.value = false
+  paddlePaddlexKeyDirty.value = false
   embedKeyDirty.value = false
   judgeKeyDirty.value = false
 }
@@ -97,6 +105,10 @@ function onPaddleKeyInput(): void {
 
 function onPaddleOfficialTokenInput(): void {
   paddleOfficialTokenDirty.value = true
+}
+
+function onPaddlePaddlexKeyInput(): void {
+  paddlePaddlexKeyDirty.value = true
 }
 
 function onEmbedKeyInput(): void {
@@ -128,6 +140,11 @@ async function onSave(): Promise<void> {
     paddleocr_official_model: form.paddleocr_official_model.trim(),
     paddleocr_official_access_token: paddleOfficialTokenDirty.value
       ? form.paddleocr_official_access_token
+      : '********',
+    paddleocr_paddlex_api_base: form.paddleocr_paddlex_api_base.trim(),
+    paddleocr_paddlex_endpoint: form.paddleocr_paddlex_endpoint.trim() || '/ocr',
+    paddleocr_paddlex_api_key: paddlePaddlexKeyDirty.value
+      ? form.paddleocr_paddlex_api_key
       : '********',
     // —— 全局 ——
     pdf_render_dpi: Number(form.pdf_render_dpi),
@@ -228,7 +245,8 @@ async function onReset(): Promise<void> {
       <h2 class="page-title">paddleocr 引擎(专用 OCR 模型)</h2>
       <p class="muted page-desc">
         可使用原有 vLLM / OpenAI 兼容服务，也可使用 PaddleOCR 官方同步 API 或 Python SDK
-        调用 AI Studio 托管 API。官方 SDK 会直接返回分页 Markdown 和版面坐标；
+        调用 AI Studio 托管 API，或调用自建 PaddleX serving 服务。
+        官方 SDK 会直接返回分页 Markdown 和版面坐标；
         vLLM 模式保留现有 OCR + Spotting 调用。<b>配置完全独立</b>于 llm 引擎。
         在“合同比对 API”页选择「paddleocr」或其他流程指定该引擎时使用本配置。
       </p>
@@ -244,6 +262,10 @@ async function onReset(): Promise<void> {
             <label class="radio">
               <input v-model="form.paddleocr_api_mode" type="radio" value="official_sdk" />
               <span>PaddleOCR 官方 API / SDK</span>
+            </label>
+            <label class="radio">
+              <input v-model="form.paddleocr_api_mode" type="radio" value="paddlex_serving" />
+              <span>自建 PaddleX Serving</span>
             </label>
           </div>
         </div>
@@ -316,13 +338,55 @@ async function onReset(): Promise<void> {
           </span>
         </div>
 
+        <div v-if="form.paddleocr_api_mode === 'paddlex_serving'" class="field">
+          <label>API Base</label>
+          <input
+            v-model="form.paddleocr_paddlex_api_base"
+            class="input"
+            placeholder="http://192.168.100.102:8080"
+          />
+          <span class="hint">自建 PaddleX serving 根地址(必填,不含端点路径)</span>
+        </div>
+
+        <div v-if="form.paddleocr_api_mode === 'paddlex_serving'" class="field">
+          <label>端点路径</label>
+          <input
+            v-model="form.paddleocr_paddlex_endpoint"
+            class="input"
+            placeholder="/ocr"
+          />
+          <span class="hint">
+            /ocr = 通用 OCR 产线(只有文本行,无版面结构);
+            /layout-parsing = PP-StructureV3 版面解析产线(含段落/表格结构)
+          </span>
+        </div>
+
+        <div v-if="form.paddleocr_api_mode === 'paddlex_serving'" class="field span-2">
+          <label>API Key(可选)</label>
+          <input
+            v-model="form.paddleocr_paddlex_api_key"
+            class="input"
+            type="password"
+            :placeholder="store.config?.paddleocr_paddlex_api_key_set ? '已设置(输入新值覆盖)' : '自建服务通常留空'"
+            @input="onPaddlePaddlexKeyInput"
+          />
+          <span class="hint">
+            <template v-if="store.config?.paddleocr_paddlex_api_key_set">
+              当前: {{ store.config.paddleocr_paddlex_api_key || '****' }} · 留空不修改
+            </template>
+            <template v-else>自建 PaddleX serving 默认无鉴权,仅服务端开启鉴权时填写</template>
+          </span>
+        </div>
+
         <div class="field">
           <label>请求超时(秒)</label>
           <input v-model.number="form.paddleocr_timeout" class="input" type="number" min="10" max="3600" />
           <span class="hint">
             {{ form.paddleocr_api_mode === 'official_sdk'
               ? '同步 API 的请求超时；异步 SDK 总轮询不少于 900 秒'
-              : '单页识别的超时上限' }}
+              : form.paddleocr_api_mode === 'paddlex_serving'
+                ? '整本 PDF 一次提交的请求超时'
+                : '单页识别的超时上限' }}
           </span>
         </div>
 

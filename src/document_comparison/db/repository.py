@@ -344,6 +344,25 @@ def get_llm_config() -> dict[str, Any]:
         return dict(rec.config or {})
 
 
+def get_llm_config_updated_at():
+    """读取 llm_config 行的 updated_at 时间戳(多 worker 配置同步用)。
+
+    返回 None 表示无记录。供 config.ensure_llm_config_fresh() 比对版本,
+    让每个 worker 在 GET/引擎构造前发现 PG 配置比自己内存新时重新 apply。
+    """
+    with session_scope() as s:
+        rec = s.get(LlmConfigRecord, _LLM_CONFIG_ROW_ID)
+        if rec is None:
+            return None
+        ts = rec.updated_at
+        # 统一成 naive UTC datetime 便于跨 worker 比较(SQLAlchemy 可能给 aware/naive 混合)
+        if ts is None:
+            return None
+        if isinstance(ts, datetime) and ts.tzinfo is not None:
+            return ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return ts
+
+
 def save_llm_config(config: dict[str, Any]) -> None:
     """upsert 整份配置(覆盖 id=1 这一行的 config 字段)。
 

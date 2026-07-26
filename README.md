@@ -126,7 +126,7 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 
 | 配置组 | 用途 | 可选后端 |
 | --- | --- | --- |
-| OCR | 扫描页文字与版面识别 | `llm`；`paddleocr` 可切换 vLLM 兼容调用/官方 SDK |
+| OCR | 扫描页文字与版面识别 | `llm`；`paddleocr` 可切换 vLLM 兼容调用/官方 SDK/自建 PaddleX serving |
 | Embedding | 无编号条款的语义对齐 | `qwen`、`bge`、`mock` |
 | Judge | 对疑似修改条款做语义复核 | OpenAI 兼容的纯文本模型 |
 
@@ -137,6 +137,13 @@ PaddleOCR 的“官方 API / SDK”模式使用 AI Studio Access Token。填写�
 Base/凭据/模型配置分开保存，切换不会覆盖另一套。
 异步 SDK 文档解析任务的单次 HTTP 请求沿用 PaddleOCR 请求超时，总轮询时间
 不少于 900 秒；如服务排队时间更长，可在设置页将请求超时提高到 3600 秒。
+
+PaddleOCR 的“自建 PaddleX serving”模式(`paddlex_serving`)调用 `paddlex --serve`
+部署的服务(如 `http://192.168.100.102:8080`)，整本 PDF 一次提交。端点路径默认
+`/ocr`(通用 OCR 产线，返回文本行 + 检测框)，改成 `/layout-parsing` 则走
+PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可选——自建 serving
+默认无鉴权，仅服务端开启鉴权时填写 API Key；该模式不消耗 AI Studio 配额。三套
+配置(vllm / official_sdk / paddlex_serving)分开保存，切换不会覆盖另一套。
 
 “合同比对 API”页集中维护外部调用 API Key、服务公开地址、单文件上传上限、高亮
 图片 DPI 以及 OCR/LLM 比对选项；保存后立即生效，Key 只以脱敏值回显。该页也可

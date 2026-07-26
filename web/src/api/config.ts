@@ -12,7 +12,7 @@ export interface LlmConfig {
   llm_max_concurrency: number
   llm_max_retries: number
   // —— paddleocr 引擎(专用 OCR 模型,独立配置)——
-  paddleocr_api_mode: 'vllm' | 'official_sdk'
+  paddleocr_api_mode: 'vllm' | 'official_sdk' | 'paddlex_serving'
   paddleocr_api_base: string
   paddleocr_api_key: string // 脱敏
   paddleocr_api_key_set: boolean
@@ -21,6 +21,10 @@ export interface LlmConfig {
   paddleocr_official_access_token: string // 脱敏
   paddleocr_official_access_token_set: boolean
   paddleocr_official_model: string
+  paddleocr_paddlex_api_base: string
+  paddleocr_paddlex_endpoint: string
+  paddleocr_paddlex_api_key: string // 脱敏
+  paddleocr_paddlex_api_key_set: boolean
   paddleocr_timeout: number
   paddleocr_max_concurrency: number
   paddleocr_max_retries: number
@@ -69,13 +73,16 @@ export interface LlmConfigUpdate {
   llm_timeout?: number
   llm_max_concurrency?: number
   // —— paddleocr 引擎 ——
-  paddleocr_api_mode?: 'vllm' | 'official_sdk'
+  paddleocr_api_mode?: 'vllm' | 'official_sdk' | 'paddlex_serving'
   paddleocr_api_base?: string
   paddleocr_api_key?: string
   paddleocr_model?: string
   paddleocr_official_api_base?: string
   paddleocr_official_access_token?: string
   paddleocr_official_model?: string
+  paddleocr_paddlex_api_base?: string
+  paddleocr_paddlex_endpoint?: string
+  paddleocr_paddlex_api_key?: string
   paddleocr_timeout?: number
   paddleocr_max_concurrency?: number
   // —— LLM 辅助说明服务 ——

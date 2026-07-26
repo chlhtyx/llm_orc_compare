@@ -169,6 +169,9 @@ class PaddleOCREngine:
         official_api_base: str | None = None,
         official_access_token: str | None = None,
         official_model: str | None = None,
+        paddlex_api_base: str | None = None,
+        paddlex_endpoint: str | None = None,
+        paddlex_api_key: str | None = None,
         timeout: float | None = None,
         max_concurrency: int | None = None,
         max_retries: int | None = None,
@@ -176,10 +179,10 @@ class PaddleOCREngine:
     ) -> None:
         # paddleocr 后端使用独立配置,不复用 llm_*。
         self.api_mode = api_mode or settings.paddleocr_api_mode
-        if self.api_mode not in {"vllm", "official_sdk"}:
+        if self.api_mode not in {"vllm", "official_sdk", "paddlex_serving"}:
             raise ValueError(
                 f"未知 paddleocr_api_mode: {self.api_mode};"
-                "仅支持 vllm | official_sdk"
+                "仅支持 vllm | official_sdk | paddlex_serving"
             )
         self.api_base = api_base or settings.paddleocr_api_base
         self.api_key = api_key if api_key is not None else settings.paddleocr_api_key
@@ -198,6 +201,23 @@ class PaddleOCREngine:
             official_model
             if official_model is not None
             else settings.paddleocr_official_model
+        )
+        # 自建 PaddleX serving(paddlex --serve):整本 PDF 一次提交,适配
+        # /layout-parsing(PP-StructureV3,复用 official 解析)与 /ocr(纯 OCR)。
+        self.paddlex_api_base = (
+            paddlex_api_base
+            if paddlex_api_base is not None
+            else settings.paddleocr_paddlex_api_base
+        )
+        self.paddlex_endpoint = (
+            paddlex_endpoint
+            if paddlex_endpoint is not None
+            else settings.paddleocr_paddlex_endpoint
+        )
+        self.paddlex_api_key = (
+            paddlex_api_key
+            if paddlex_api_key is not None
+            else settings.paddleocr_paddlex_api_key
         )
         self.timeout = timeout if timeout is not None else settings.paddleocr_timeout
         self.max_concurrency = (
@@ -221,7 +241,7 @@ class PaddleOCREngine:
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
         self.last_truncated_pages = set()
-        if self.api_mode == "official_sdk":
+        if self.api_mode in ("official_sdk", "paddlex_serving"):
             return self._recognize_official_document(
                 pdf_path, page_metas, on_progress=on_progress
             )
@@ -273,7 +293,10 @@ class PaddleOCREngine:
         """通过官方 SDK 一次提交 PDF,按返回页映射为 Block。"""
         if on_progress:
             on_progress("ocr", 0.10)
-        result = self._official_parse_document(pdf_path)
+        if self.api_mode == "paddlex_serving":
+            result = self._paddlex_parse_document(pdf_path)
+        else:
+            result = self._official_parse_document(pdf_path)
         pages = list(getattr(result, "pages", []) or [])
         if len(pages) != len(page_metas):
             logger.warning(
@@ -569,6 +592,83 @@ class PaddleOCREngine:
         )
         return result
 
+    def _paddlex_parse_document(self, file_path: Path):
+        """调用自建 PaddleX serving(`/ocr` 或 `/layout-parsing`),整本 PDF 一次提交。
+
+        鉴权按需附加:配置了 ``paddlex_api_key`` 才发 ``Authorization: Bearer ...``
+        (PaddleX 自建 serving 默认无鉴权)。响应自动适配两种产线:
+        - PP-StructureV3(``/layout-parsing`` → ``layoutParsingResults``):复用
+          ``_layout_api_pages`` + ``_parse_official_page`` 的版面解析。
+        - 通用 OCR(``/ocr`` → ``ocrResults``):把 ``rec_texts``/``dt_polys`` 包装成
+          ``parsing_res_list`` 形状后,统一走 ``_parse_official_page``。
+        """
+        if not self.paddlex_api_base:
+            raise RuntimeError(
+                "paddlex_serving 模式未配置 API Base;"
+                "请在设置页填写 PaddleX 服务地址(如 http://192.168.100.102:8080)"
+            )
+        endpoint = self.paddlex_api_base.rstrip("/") + (
+            self.paddlex_endpoint
+            if self.paddlex_endpoint.startswith("/")
+            else "/" + self.paddlex_endpoint
+        )
+        file_bytes = file_path.read_bytes()
+        payload = {
+            "file": base64.b64encode(file_bytes).decode("ascii"),
+            "fileType": 0 if file_path.suffix.lower() == ".pdf" else 1,
+        }
+        safe_payload = {
+            "transport": "paddlex_serving",
+            "endpoint": endpoint,
+            "file": {
+                "name": file_path.name,
+                "size_bytes": len(file_bytes),
+                "file_type": payload["fileType"],
+            },
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.paddlex_api_key:
+            headers["Authorization"] = f"Bearer {self.paddlex_api_key}"
+        request_started = log_model_request(
+            logger, "paddleocr", endpoint, safe_payload, 1
+        )
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=float(self.timeout),
+            )
+            response.raise_for_status()
+            pages = _paddlex_pages(response.json(), endpoint)
+        except Exception as exc:  # noqa: BLE001 -- PaddleX 服务统一错误边界
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            log_model_failure(
+                logger,
+                "paddleocr",
+                request_started,
+                str(exc),
+                status_code=status_code,
+            )
+            raise
+
+        log_model_response(
+            logger,
+            "paddleocr",
+            response.status_code,
+            {
+                "transport": "paddlex_serving",
+                "endpoint": endpoint,
+                "pages": len(pages),
+                "markdown_chars": sum(
+                    len(str(getattr(page, "markdown_text", "") or ""))
+                    for page in pages
+                ),
+            },
+            request_started,
+        )
+        return SimpleNamespace(job_id="", pages=pages)
+
     def _chat(
         self,
         data_url: str,
@@ -775,6 +875,78 @@ def _layout_api_pages(response_data: Any) -> list[SimpleNamespace]:
             )
         )
     return pages
+
+
+def _paddlex_pages(response_data: Any, endpoint: str = "") -> list[SimpleNamespace]:
+    """把 PaddleX serving 响应适配为 SDK page 的最小公共接口。
+
+    自动识别两种产线返回结构:
+    - PP-StructureV3(``/layout-parsing`` → ``result.layoutParsingResults``):直接
+      复用 ``_layout_api_pages``,字段结构与之完全一致。
+    - 通用 OCR(``/ocr`` → ``result.ocrResults``):只有 ``rec_texts``/``dt_polys``/
+      ``rec_polys`` 等行级结果,这里把每页包装成 ``parsing_res_list`` 形状
+      (每行 → ``{block_label:"text", block_content, block_bbox}``),再统一交给
+      ``_parse_official_page`` 处理,使其与版面产线落到相同的 Block 形态。
+    """
+    if not isinstance(response_data, dict):
+        raise RuntimeError("PaddleX serving 返回格式错误:响应不是 JSON 对象")
+    result = response_data.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("PaddleX serving 返回格式错误:缺少 result")
+
+    # 分支 1:PP-StructureV3 版面解析产线(端点常为 /layout-parsing)
+    if isinstance(result.get("layoutParsingResults"), list):
+        return _layout_api_pages(response_data)
+
+    # 分支 2:通用 OCR 产线(端点常为 /ocr),只有行级结果
+    ocr_results = result.get("ocrResults")
+    if isinstance(ocr_results, list):
+        pages: list[SimpleNamespace] = []
+        for raw_page in ocr_results:
+            if not isinstance(raw_page, dict):
+                continue
+            pruned = raw_page.get("prunedResult")
+            if not isinstance(pruned, dict):
+                pruned = raw_page.get("pruned_result")
+            if not isinstance(pruned, dict):
+                pruned = {}
+            rec_texts = pruned.get("rec_texts")
+            rec_polys = (
+                pruned.get("rec_polys")
+                if isinstance(pruned.get("rec_polys"), list)
+                else pruned.get("dt_polys")
+            )
+            if not isinstance(rec_texts, list) or not isinstance(rec_polys, list):
+                # 该页无有效 OCR 结果,留空页占位(下游 _parse_official_page 兜底空列表)
+                pages.append(SimpleNamespace(markdown_text="", pruned_result={}))
+                continue
+            parsing_list: list[dict[str, Any]] = []
+            for i, text in enumerate(rec_texts):
+                bbox = rec_polys[i] if i < len(rec_polys) else None
+                parsing_list.append(
+                    {
+                        "block_label": "text",
+                        "block_content": str(text or ""),
+                        "block_bbox": bbox,
+                    }
+                )
+            pages.append(
+                SimpleNamespace(
+                    markdown_text="",
+                    pruned_result={
+                        "width": pruned.get("width"),
+                        "height": pruned.get("height"),
+                        "parsing_res_list": parsing_list,
+                    },
+                )
+            )
+        return pages
+
+    hint = f"(endpoint={endpoint})" if endpoint else ""
+    raise RuntimeError(
+        f"PaddleX serving 返回格式错误{hint}:"
+        "result 中缺少 layoutParsingResults 或 ocrResults"
+    )
 
 
 def _load_official_sdk():

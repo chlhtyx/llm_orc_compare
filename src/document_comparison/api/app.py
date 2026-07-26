@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from ..config import (
     _maybe_import_legacy_llm_config_file,
     apply_llm_overrides,
+    ensure_llm_config_fresh,
     load_llm_overrides,
     save_llm_overrides,
     settings,
@@ -335,6 +336,8 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/config/llm")
     async def get_llm_config():
         """读取当前生效的 LLM 配置(环境变量 + 持久化覆盖后的合并值)。"""
+        # 多 worker 同步:本 worker 可能未收到 PUT,内存 settings 落后于 PG。
+        ensure_llm_config_fresh()
         return {
             "llm_api_base": settings.llm_api_base,
             "llm_api_key": _mask_key(settings.llm_api_key),
@@ -356,6 +359,10 @@ def create_app() -> FastAPI:
                 settings.paddleocr_official_access_token
             ),
             "paddleocr_official_model": settings.paddleocr_official_model,
+            "paddleocr_paddlex_api_base": settings.paddleocr_paddlex_api_base,
+            "paddleocr_paddlex_endpoint": settings.paddleocr_paddlex_endpoint,
+            "paddleocr_paddlex_api_key": _mask_key(settings.paddleocr_paddlex_api_key),
+            "paddleocr_paddlex_api_key_set": bool(settings.paddleocr_paddlex_api_key),
             "paddleocr_timeout": settings.paddleocr_timeout,
             "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
             "paddleocr_max_retries": settings.paddleocr_max_retries,
@@ -412,6 +419,8 @@ def create_app() -> FastAPI:
             "paddleocr_api_mode", "paddleocr_api_base", "paddleocr_api_key", "paddleocr_model",
             "paddleocr_official_api_base", "paddleocr_official_access_token",
             "paddleocr_official_model",
+            "paddleocr_paddlex_api_base", "paddleocr_paddlex_endpoint",
+            "paddleocr_paddlex_api_key",
             "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
             "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
             "embed_backend", "embed_api_base", "embed_api_key",
@@ -445,9 +454,12 @@ def create_app() -> FastAPI:
             except (TypeError, ValueError):
                 raise HTTPException(400, "llm_max_retries 必须为整数")
         if "paddleocr_api_mode" in body:
-            if body["paddleocr_api_mode"] not in {"vllm", "official_sdk"}:
+            if body["paddleocr_api_mode"] not in {
+                "vllm", "official_sdk", "paddlex_serving",
+            }:
                 raise HTTPException(
-                    400, "paddleocr_api_mode 必须为 vllm 或 official_sdk"
+                    400,
+                    "paddleocr_api_mode 必须为 vllm / official_sdk / paddlex_serving",
                 )
         if body.get("paddleocr_official_model") not in {
             None,
@@ -548,6 +560,8 @@ def create_app() -> FastAPI:
             overrides.pop("paddleocr_api_key")
         if overrides.get("paddleocr_official_access_token") == "********":
             overrides.pop("paddleocr_official_access_token")
+        if overrides.get("paddleocr_paddlex_api_key") == "********":
+            overrides.pop("paddleocr_paddlex_api_key")
         if overrides.get("embed_api_key") == "********":
             overrides.pop("embed_api_key")
         if overrides.get("judge_api_key") == "********":
@@ -579,6 +593,10 @@ def create_app() -> FastAPI:
                     settings.paddleocr_official_access_token
                 ),
                 "paddleocr_official_model": settings.paddleocr_official_model,
+                "paddleocr_paddlex_api_base": settings.paddleocr_paddlex_api_base,
+                "paddleocr_paddlex_endpoint": settings.paddleocr_paddlex_endpoint,
+                "paddleocr_paddlex_api_key": _mask_key(settings.paddleocr_paddlex_api_key),
+                "paddleocr_paddlex_api_key_set": bool(settings.paddleocr_paddlex_api_key),
                 "paddleocr_timeout": settings.paddleocr_timeout,
                 "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
                 "paddleocr_max_retries": settings.paddleocr_max_retries,

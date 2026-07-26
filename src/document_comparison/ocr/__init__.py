@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from ..config import settings
+from ..config import ensure_llm_config_fresh, settings
 from .base import OCREngine
 from .llm import LLMOCREngine
 from .native import NativePDFEngine
@@ -26,6 +26,9 @@ def get_ocr_engine(
     标准合同比对使用；其它通道保持单次 OCR 调用。
     """
     backend = backend or settings.ocr_backend
+    # 多 worker 同步:确保本进程 settings 是最新(其它 worker 可能改过配置)。
+    # 廉价版本检查,落后才 apply;异常吞掉不影响引擎构造。
+    ensure_llm_config_fresh()
     if backend == "paddleocr":
         fallback: OCREngine = PaddleOCREngine(enable_spotting=enable_spotting)
     else:
@@ -42,6 +45,9 @@ def get_text_ocr_engine(backend: str | None = None):
     LLMOCREngine / PaddleOCREngine,供长图整体 OCR 调用。
     """
     backend = backend or settings.ocr_backend
+    # 多 worker 同步:确保本进程 settings 是最新(其它 worker 可能改过配置)。
+    # 廉价版本检查,落后才 apply;异常吞掉不影响引擎构造。
+    ensure_llm_config_fresh()
     if backend == "paddleocr":
         return PaddleOCREngine()
     return LLMOCREngine()
