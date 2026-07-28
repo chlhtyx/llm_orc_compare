@@ -30,8 +30,19 @@ export interface TaskListItem {
   callback_url: string | null
   callback_status: 'pending' | 'success' | 'failed' | null
   callback_http_status: number | null
+ callback_error: string | null
+ callback_at: string | null // ISO
+  /** 首次回调交付的业务 payload(重新推送时还原;无回调为 null)。 */
+  callback_payload: Record<string, unknown> | null
+}
+
+/** 重新推送回调的返回(后端 redeliver-callback 端点)。 */
+export interface RedeliverResult {
+  task_id: string
+  callback_url: string
+  callback_status: 'success' | 'failed'
+  callback_http_status: number | null
   callback_error: string | null
-  callback_at: string | null // ISO
 }
 
 /** 单任务里程碑事件(后端 repository.event_to_dict)。 */
@@ -149,4 +160,10 @@ export function reportRouteFor(item: Pick<TaskListItem, 'task_id' | 'kind'>): st
     default:
       return `/report/${item.task_id}`
   }
+}
+/** 对已完成任务的回调地址重新推送一次(补发漏投/失败回调)。 */
+export function redeliverCallback(taskId: string): Promise<RedeliverResult> {
+  return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/redeliver-callback`, {
+    method: 'POST',
+  })
 }

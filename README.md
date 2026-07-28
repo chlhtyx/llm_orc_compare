@@ -55,7 +55,7 @@ curl http://localhost:8000/health
 默认单进程(`DC_UVICORN_WORKERS=1`)、并发任务上限 4(`DC_MAX_CONCURRENT_TASKS=4`)。
 
 - **多 worker**:设 `DC_UVICORN_WORKERS=N` 启用 gunicorn 多 worker。任务提交 / 执行 / SSE / 查询可落在不同 worker,系统已通过 Postgres 共享任务状态(无 Redis 依赖)。
-- **全局并发上限**:由 `task_records.status` 计数强制,跨 worker 一致;超限返回 `429`。执行端另有进程内信号量作第二道保险。
+- **全局并发上限**:由 `task_records.status` 计数强制,跨 worker 一致;超限返回 `429`。执行端另有进程内信号量作第二道保险,获取槽位最长等待 `DC_TASK_ACQUIRE_TIMEOUT`(默认 30s),超时则任务置 `failed`,防止同步模式请求在槽位满时永久 hang。
 - **SSE 进度**:多 worker 下读 PG 里程碑事件,粒度为里程碑级(start / `*_done` / done,约 6-10 个节点/任务),非逐页细粒度。
 - **DB 连接数**:每个 worker 独立持有连接池(`DC_DB_POOL_SIZE` + `DC_DB_MAX_OVERFLOW`,默认 5+10=15)。N worker 下连接数上限 = N × 15,需确认 PG `max_connections`(默认 100)够用。
 

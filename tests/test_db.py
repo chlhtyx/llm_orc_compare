@@ -368,6 +368,23 @@ def test_update_callback_result_unknown_task_is_noop(db_isolated, caplog):
     assert any("not found" in r.message for r in caplog.records)
 
 
+def test_save_callback_payload_persists_and_serializes(db_isolated):
+    """save_callback_payload 落库业务 payload,to_dict 透出供重新推送还原。"""
+    db_repo.create_task("cbp1", "compare", callback_url="http://x/hook")
+    payload = {"event_type": "contract.compare.completed", "document_no": "B1"}
+    db_repo.save_callback_payload("cbp1", payload)
+    rec = db_repo.get_task("cbp1")
+    assert rec is not None
+    assert rec.callback_payload == payload
+    assert db_repo.to_dict(rec)["callback_payload"] == payload
+
+
+def test_save_callback_payload_unknown_task_is_noop(db_isolated, caplog):
+    """任务记录不存在时只记日志,不抛。"""
+    db_repo.save_callback_payload("nope", {"a": 1})
+    assert any("not found" in r.message for r in caplog.records)
+
+
 # —— LLM 配置 JSONB CRUD(单行表,id 固定为 1)——
 
 def test_llm_config_get_empty_when_fresh(db_isolated):

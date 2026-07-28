@@ -107,14 +107,20 @@ def external_client(db_isolated, monkeypatch, tmp_path):
 
 
 def test_external_auth_missing_wrong_and_unconfigured(external_client, monkeypatch):
+    # 配置了 Key:缺失/错误头 → 401
     assert external_client.get("/api/v1/external/contractCompare/missing").status_code == 401
     assert external_client.get(
         "/api/v1/external/contractCompare/missing", headers={"X-API-Key": "wrong"}
     ).status_code == 401
+    # 未配置 Key:鉴权跳过,放行到业务层(查不到 task → 404,而非 401/503)
     monkeypatch.setattr(settings, "external_api_key", "")
     assert external_client.get(
-        "/api/v1/external/contractCompare/missing", headers={"X-API-Key": "external-test-key"}
-    ).status_code == 503
+        "/api/v1/external/contractCompare/missing"
+    ).status_code == 404
+    assert external_client.get(
+        "/api/v1/external/contractCompare/missing",
+        headers={"X-API-Key": "anything"},
+    ).status_code == 404
 
 
 def test_external_submit_echoes_document_no_and_allows_duplicates(
@@ -333,6 +339,35 @@ def test_external_sync_returns_inline_result_without_callback_url(
     assert task is not None and task.callback_url is None
 
 
+def test_external_sync_sets_task_sync_mode_for_background_callback(
+    external_client, monkeypatch
+):
+    """sync=true 提交应把 task.sync_mode 置 True,使 run 内部 webhook 后台发送。
+
+    不直接测 _fire_or_schedule_callback(那在 test_tasks.py 覆盖);
+    此处只验证端点 → create(sync_mode=True) 的接线,防止回归。
+    """
+    from document_comparison.api.app import task_manager
+
+    async def _fake_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run", _fake_run)
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "BILL-SYNC-MODE", "sync": "true"},
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 200, response.json()
+    task = task_manager.get(response.json()["task_id"])
+    assert task is not None
+    assert task.sync_mode is True
+
+
 def test_external_async_still_requires_callback_url_when_sync_omitted(external_client):
     """sync 缺省(异步)时 callback_url 仍必填。"""
     response = external_client.post(
@@ -346,6 +381,59 @@ def test_external_async_still_requires_callback_url_when_sync_omitted(external_c
     )
     assert response.status_code == 400
     assert "callback_url" in response.json()["message"]
+
+
+def test_redeliver_callback_reposts_persisted_payload(external_client, monkeypatch):
+    """重新回调端点:从 task_records 读 callback_url + payload 重投并回写状态。"""
+    from fastapi.testclient import TestClient
+
+    from document_comparison.api.app import create_app
+    from document_comparison.db import repository as db_repo
+
+    task_id = "rd1" + "0" * 12  # 16 hex-ish
+    db_repo.create_task(
+        task_id, "compare",
+        source_name="s.docx", target_names=["t.pdf"],
+        document_no="BILL-RD", external_request=True,
+        callback_url="http://internal/hook",
+    )
+    db_repo.save_compare_report(task_id, _changed_report(page_count=1))
+    db_repo.update_task_status(task_id, "done")
+    db_repo.save_callback_payload(task_id, {"event_type": "contract.compare.completed", "document_no": "BILL-RD"})
+
+    delivered: dict = {}
+
+    async def _deliver(url, raw, event_id, **_kwargs):
+        delivered.update(url=url, body=__import__("json").loads(raw), event_id=event_id)
+        return {"success": True, "http_status": 200, "error": None}
+
+    import document_comparison.webhook as webhook_mod
+
+    monkeypatch.setattr(webhook_mod, "deliver", _deliver)
+    client = TestClient(create_app())
+    resp = client.post(f"/api/v1/tasks/{task_id}/redeliver-callback")
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["callback_status"] == "success"
+    assert body["callback_http_status"] == 200
+    # payload 还原:重投的事件体含首次交付的业务字段 + 新 event_id
+    assert delivered["body"]["event_type"] == "contract.compare.completed"
+    assert delivered["body"]["document_no"] == "BILL-RD"
+    assert delivered["event_id"] == delivered["body"]["event_id"]
+    # 回写落库
+    rec = db_repo.get_task(task_id)
+    assert rec is not None and rec.callback_status == "success"
+
+
+def test_redeliver_callback_rejects_task_without_callback_url(external_client):
+    """未配置回调地址的任务不能重新推送(400)。"""
+    from document_comparison.db import repository as db_repo
+
+    task_id = "rd2" + "0" * 12
+    db_repo.create_task(task_id, "compare", target_names=["t.pdf"])
+    db_repo.update_task_status(task_id, "done")
+    resp = external_client.post(f"/api/v1/tasks/{task_id}/redeliver-callback")
+    assert resp.status_code == 400
 
 
 def test_external_sync_failure_returns_failed_status(external_client, monkeypatch):
@@ -523,3 +611,11 @@ async def test_external_dependency_rejects_invalid_runtime_config(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await require_external_api_key("key")
     assert exc_info.value.status_code == 503
+
+
+async def test_external_dependency_skips_auth_when_key_unconfigured(monkeypatch):
+    # 未配置 Key:无论是否带 X-API-Key 都直接放行(返回 None,不抛)
+    monkeypatch.setattr(settings, "external_api_key", "")
+    monkeypatch.setattr(settings, "external_public_base_url", "https://dc.example.test")
+    assert await require_external_api_key(None) is None
+    assert await require_external_api_key("anything") is None

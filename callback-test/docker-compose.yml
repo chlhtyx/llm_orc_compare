@@ -1,0 +1,16 @@
+# 独立运行的 callback 验证服务。
+# 启动:  docker compose up -d --build
+# 看日志: docker logs -f callback-test
+#         tail -f ./logs/callbacks.log
+services:
+  callback-test:
+    build: .
+    image: callback-test:latest
+    container_name: callback-test
+    restart: unless-stopped
+    ports:
+      # 宿主机 9099 → 容器 9000,避开主服务端口
+      - "9099:9000"
+    volumes:
+      # 报文同时落盘到宿主目录,便于 grep / tail
+      - ./logs:/app/logs

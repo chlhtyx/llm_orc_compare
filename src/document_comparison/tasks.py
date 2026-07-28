@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 import time
@@ -89,6 +90,8 @@ class Task:
     callback_url: str | None = None
     document_no: str | None = None
     external_request: bool = False
+    sync_mode: bool = False  # 外部接口同步模式:webhook 后台发送,不阻塞 HTTP 响应
+    pending_callbacks: list = field(default_factory=list)  # sync 模式后台 webhook 任务
     start_time: float = field(default_factory=time.monotonic)
     active_timing_stage: str | None = None
     active_timing_started_at: float | None = None
@@ -144,10 +147,12 @@ class TaskManager:
         callback_url: str | None = None,
         document_no: str | None = None,
         external_request: bool = False,
+        sync_mode: bool = False,
     ) -> str:
         """创建任务:内存登记 + PG 写入 pending 记录。
 
         kind 必填(compare/raw/statement),决定后续报告写入哪一列。
+        sync_mode 标记外部接口同步提交:webhook 改后台发送,不阻塞 HTTP 响应。
         """
         task_id = uuid.uuid4().hex[:16]
         self._tasks[task_id] = Task(
@@ -156,6 +161,7 @@ class TaskManager:
             callback_url=callback_url,
             document_no=document_no,
             external_request=external_request,
+            sync_mode=sync_mode,
         )
         logger.info(
             "task created task_id=%s kind=%s callback=%s",
@@ -192,6 +198,27 @@ class TaskManager:
     async def _db_thread(self, fn, *args, **kwargs) -> None:
         """asyncio 友好版的 _safe_db:在线程池里执行,不阻塞。"""
         await asyncio.to_thread(self._safe_db, fn, *args, **kwargs)
+
+    @contextlib.asynccontextmanager
+    async def _acquire_sem(self):
+        """获取执行槽位,超时抛错,防止同步模式请求在槽位满时永久 hang。
+
+        `asyncio.Semaphore.acquire` 本身无超时;`asyncio.wait_for` 包一层,
+        超时抛 TimeoutError,被各 run* 的 except 捕获 → 置 failed + 回调。
+        注意:`wait_for` 超时会取消底层 acquire 协程,不会泄漏等待者。
+        """
+        try:
+            await asyncio.wait_for(
+                self._sem.acquire(), timeout=settings.task_acquire_timeout
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"等待执行槽位超时({settings.task_acquire_timeout}s)"
+            ) from exc
+        try:
+            yield
+        finally:
+            self._sem.release()
 
     def _record_milestone(self, task: Task, stage: str, progress: float | None = None) -> None:
         """里程碑事件入库(同步包装,只记异常不抛)。"""
@@ -230,7 +257,7 @@ class TaskManager:
         )
         self._record_milestone(task, "start", 0.0)
         try:
-            async with self._sem:
+            async with self._acquire_sem():
                 task.info.status = "running"
                 # pipeline 为同步阻塞(OCR/解析),放工作线程
                 # 进度回调从工作线程实时推送(stage, fraction)
@@ -286,9 +313,9 @@ class TaskManager:
                     "document_no": task.document_no,
                 }
                 payload.update(external)
-                await self._fire_callback(task_id, "done", payload)
+                await self._fire_or_schedule_callback(task_id, "done", payload)
             else:
-                await self._fire_callback(task_id, "done", {
+                await self._fire_or_schedule_callback(task_id, "done", {
                     "overall_risk": report.overall_risk,
                     "summary": report.summary,
                     "report_url": f"/api/v1/compare/{task_id}/report?format=json",
@@ -305,13 +332,13 @@ class TaskManager:
             )
             self._record_milestone(task, "failed", task.info.progress)
             if task.external_request:
-                await self._fire_callback(task_id, "failed", {
+                await self._fire_or_schedule_callback(task_id, "failed", {
                     "event_type": "contract.compare.failed",
                     "document_no": task.document_no,
                     "error": str(e),
                 })
             else:
-                await self._fire_callback(task_id, "failed", {"error": str(e)})
+                await self._fire_or_schedule_callback(task_id, "failed", {"error": str(e)})
         finally:
             task.done.set()
             task.finalize_elapsed()
@@ -340,7 +367,7 @@ class TaskManager:
         )
         self._record_milestone(task, "start", 0.0)
         try:
-            async with self._sem:
+            async with self._acquire_sem():
                 task.info.status = "running"
                 with llm_call_collector() as llm_calls:
                     report = await asyncio.to_thread(
@@ -413,7 +440,7 @@ class TaskManager:
         )
         self._record_milestone(task, "start", 0.0)
         try:
-            async with self._sem:
+            async with self._acquire_sem():
                 task.info.status = "running"
                 with llm_call_collector() as llm_calls:
                     report = await asyncio.to_thread(
@@ -485,6 +512,10 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if not task or not task.callback_url:
             return
+        # 先持久化业务 payload,供「重新推送」端点 100% 还原原始内容。
+        # envelope(event_id/task_id/status)由 build_event 现拼,不存。
+        with contextlib.suppress(Exception):
+            await self._db_thread(db_repo.save_callback_payload, task_id, payload)
         event, raw = webhook.build_event(task_id, status, payload)
         result = await webhook.deliver(
             task.callback_url,
@@ -500,6 +531,25 @@ class TaskManager:
             http_status=result["http_status"],
             error=result["error"],
         )
+
+    async def _fire_or_schedule_callback(
+        self, task_id: str, status: str, payload: dict
+    ) -> None:
+        """对外部接口任务:sync 模式后台发送 webhook,避免阻塞 HTTP 响应。
+
+        - sync_mode=True:把 _fire_callback 挂到事件循环后台执行,立即返回;
+          webhook 投递(最多 retry × timeout 秒)不再拖住 sync 响应。
+          后台任务引用保留在 task.pending_callbacks,便于测试观测。
+        - 其余(异步模式 / 内部接口):沿用同步 await,行为不变。
+        """
+        task = self._tasks.get(task_id)
+        if task is None or not task.callback_url:
+            return
+        if task.sync_mode:
+            coro = self._fire_callback(task_id, status, payload)
+            task.pending_callbacks.append(asyncio.create_task(coro))
+            return
+        await self._fire_callback(task_id, status, payload)
 
     async def event_stream(self, task_id: str):
         """SSE 事件生成器:从 PG task_events 增量推送里程碑,直到任务终态。

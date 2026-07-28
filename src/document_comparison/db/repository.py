@@ -132,6 +132,21 @@ def update_callback_result(
         rec.callback_at = datetime.now(timezone.utc)
 
 
+def save_callback_payload(task_id: str, payload: dict[str, Any]) -> None:
+    """持久化首次回调交付的业务 payload,供「重新推送」端点还原原始内容。
+
+    只存业务字段;envelope(event_id/task_id/status)由 webhook.build_event
+    在交付时现拼,因此每次重推都得到新的 event_id。payload 中若含不可序列化
+    对象,JSON 序列化会抛 ValueError,由调用方决定是否吞掉。
+    """
+    with session_scope() as s:
+        rec = s.get(TaskRecord, task_id)
+        if rec is None:
+            logger.warning("save_callback_payload: task_id=%s not found", task_id)
+            return
+        rec.callback_payload = payload
+
+
 def save_compare_report(task_id: str, report: TamperReport) -> None:
     """存标准条款比对报告 JSONB。"""
     _save_report(task_id, "report_compare", report.model_dump(mode="json"))
@@ -310,6 +325,7 @@ def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:
         "callback_http_status": rec.callback_http_status,
         "callback_error": rec.callback_error,
         "callback_at": rec.callback_at.isoformat() if rec.callback_at else None,
+        "callback_payload": rec.callback_payload,
     }
     if include_report:
         data["report_compare"] = rec.report_compare

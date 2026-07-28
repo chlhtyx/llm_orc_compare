@@ -48,6 +48,7 @@ from ..storage import (
     save_upload,
 )
 from ..report.builder import burn_pdf
+from .. import webhook
 from ..external_api import (
     build_external_result,
     external_config_enabled,
@@ -798,9 +799,10 @@ def create_app() -> FastAPI:
             source_name=source.filename or "",
             target_names=[target.filename or ""],
             ocr_backend=settings.external_ocr_backend,
-            callback_url=callback_url,
-            document_no=document_no,
-            external_request=True,
+           callback_url=callback_url,
+           document_no=document_no,
+           external_request=True,
+           sync_mode=sync,
         )
         # 审计中间件读取:提交成功关联 task_id + document_no
         request.state.audit_endpoint = "contractCompare.submit"
@@ -1336,6 +1338,46 @@ def create_app() -> FastAPI:
         return {
             "task_id": task_id,
             "items": [db_repo.event_to_dict(e) for e in events],
+        }
+
+    @app.post("/api/v1/tasks/{task_id}/redeliver-callback")
+    async def redeliver_callback(task_id: str):
+        """对已完成任务的回调地址重新推送一次(用于回调失败/漏投后补发)。
+
+        从 task_records 读取 callback_url 与首次交付时持久化的业务 payload,
+        用任务终态 status 作为 envelope,经 webhook.deliver 重投(指数退避重试),
+        然后回写 callback 交付结果。功能上线前的历史任务若无 payload,退化为
+        仅含 envelope 的最小事件。
+        """
+        rec = await asyncio.to_thread(db_repo.get_task, task_id)
+        if rec is None:
+            raise HTTPException(404, "task not found")
+        if not rec.callback_url:
+            raise HTTPException(400, "该任务未配置回调地址,无法重新推送")
+        if rec.status not in ("done", "failed"):
+            raise HTTPException(409, "任务尚未结束,暂不回调")
+        payload = rec.callback_payload or {}
+        event, raw = webhook.build_event(task_id, rec.status, payload)
+        result = await webhook.deliver(
+            rec.callback_url,
+            raw,
+            event["event_id"],
+            max_retries=settings.webhook_max_retries,
+            timeout=settings.webhook_timeout_seconds,
+        )
+        await asyncio.to_thread(
+            db_repo.update_callback_result,
+            task_id,
+            success=result["success"],
+            http_status=result["http_status"],
+            error=result["error"],
+        )
+        return {
+            "task_id": task_id,
+            "callback_url": rec.callback_url,
+            "callback_status": "success" if result["success"] else "failed",
+            "callback_http_status": result["http_status"],
+            "callback_error": result["error"],
         }
 
     @app.get("/api/v1/tasks/{task_id}/llm-calls")

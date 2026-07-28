@@ -1,0 +1,36 @@
+callback-test listening on 0.0.0.0:9000 (log file: /app/logs/callbacks.log)
+
+======================================================================
+[2026-07-27 14:21:23+0800] POST /callback
+from      : 192.168.155.1:42268
+X-Event-Id: 5b7c1234-test-event-id
+body (435 bytes):
+{
+  "change_status": "changed",
+  "document_no": "DOC-2026-001",
+  "event_id": "5b7c1234-test-event-id",
+  "event_type": "contract.compare.completed",
+  "highlight_images": [
+    "http://localhost:3012/api/v1/compare/task_abc/highlight/0.png"
+  ],
+  "result_text": "条款 3.2 金额被篡改",
+  "result_url": "http://localhost:3012/api/v1/compare/task_abc/report?format=pdf",
+  "status": "done",
+  "task_id": "task_abc"
+}
+======================================================================
+
+======================================================================
+[2026-07-27 14:21:23+0800] POST /callback
+from      : 192.168.155.1:42274
+X-Event-Id: fail-event-001
+body (154 bytes):
+{
+  "document_no": "DOC-2026-002",
+  "error": "timeout",
+  "event_id": "fail-event-001",
+  "event_type": "contract.compare.failed",
+  "status": "failed",
+  "task_id": "task_xyz"
+}
+======================================================================

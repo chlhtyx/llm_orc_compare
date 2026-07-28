@@ -16,23 +16,29 @@ from .report.builder import burn_pdf
 async def require_external_api_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
-    """只保护 `/api/v1/external/*` 的独立 API Key 校验。"""
-    expected = settings.external_api_key
+    """只保护 `/api/v1/external/*` 的独立 API Key 校验。
+
+    API Key 为**可选项**:配置了 `external_api_key` 时按 Key 鉴权(缺失或不匹配 → 401);
+    未配置(空)时跳过鉴权直接放行,便于内网/可信环境免鉴权接入。
+    """
     if not external_config_enabled():
         raise HTTPException(503, "外部 API 未配置")
-    if x_api_key is None or not hmac.compare_digest(x_api_key, expected):
+    expected = settings.external_api_key
+    if expected and (x_api_key is None or not hmac.compare_digest(x_api_key, expected)):
         raise HTTPException(401, "invalid external API key")
 
 
 def external_config_enabled() -> bool:
-    """运行时外部 API 配置是否完整且可用。"""
+    """运行时外部 API 配置是否完整且可用。
+
+    API Key 不在启用条件内——未配置 Key 时端点仍可用(跳过鉴权)。
+    """
     try:
         validate_public_base_url(settings.external_public_base_url)
     except ValueError:
         return False
     return bool(
-        settings.external_api_key
-        and settings.external_max_upload_mb > 0
+        settings.external_max_upload_mb > 0
         and settings.external_image_dpi > 0
     )
 

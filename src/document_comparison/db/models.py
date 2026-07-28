@@ -70,6 +70,12 @@ class TaskRecord(Base):
         DateTime(timezone=True), nullable=True, default=None
     )
 
+    # 首次回调交付的业务 payload(重新推送时 100% 还原原始内容)。
+    # 仅含业务字段;envelope(event_id/task_id/status)由 webhook.build_event 现拼。
+    callback_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+
     # 任务终结结果摘要(供列表页快速判定)
     overall_risk: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True, default=None)
     change_status: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)

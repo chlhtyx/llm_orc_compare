@@ -122,6 +122,12 @@ class Settings:
     max_concurrent_tasks: int = field(
         default_factory=lambda: int(_env("DC_MAX_CONCURRENT_TASKS", "4"))
     )
+    # 获取执行槽位(asyncio.Semaphore)的最长等待秒数;超时则任务直接置 failed。
+    # 防止同步模式(sync=true)请求在槽位被占满时永久 hang(gunicorn timeout=0 不兜底)。
+    # 0 表示不等待(拿不到立即失败);建议保留一定排队余量。
+    task_acquire_timeout: float = field(
+        default_factory=lambda: float(_env("DC_TASK_ACQUIRE_TIMEOUT", "30.0"))
+    )
 
     # —— Webhook ——
     webhook_max_retries: int = 3

@@ -267,3 +267,165 @@ async def test_event_stream_returns_when_task_not_found(monkeypatch):
 async def _noop_coro():
     """给 monkeypatch asyncio.sleep 用的空 awaitable。"""
     return None
+
+
+async def test_semaphore_acquire_timeout_marks_task_failed(monkeypatch):
+    """信号量获取超时应置 task=failed 并设 task.done,而非永久 hang。
+
+    复现同步模式卡死场景:槽位被占满后,新任务 acquire 应在
+    settings.task_acquire_timeout 秒后超时,被 run 的 except 捕获。
+    """
+    import asyncio
+
+    from document_comparison import tasks as tasks_module
+    from document_comparison.config import settings
+    from document_comparison.tasks import TaskManager
+
+    # 超时设短,加速测试;绝不为 0(0 会立即失败,无法验证等待语义)。
+    monkeypatch.setattr(settings, "task_acquire_timeout", 0.1)
+    # run_pipeline 不应被调用(超时在进入流水线前触发)。
+    pipeline_called = []
+
+    def _pipeline(*_a, **_kw):
+        pipeline_called.append(True)
+        raise AssertionError("run_pipeline should not be reached on timeout")
+
+    monkeypatch.setattr(tasks_module, "run_pipeline", _pipeline)
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_compare_report", "save_llm_calls_batch",
+        "update_callback_result",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    manager = TaskManager()
+    # 把信号量替换成容量 0 且预占满的:acquire 永远拿不到,必走超时分支。
+    manager._sem = asyncio.Semaphore(0)
+
+    task_id = manager.create(
+        "compare",
+        callback_url="http://internal/hook",
+        document_no="BILL-TIMEOUT",
+        external_request=True,
+    )
+
+    await manager.run(task_id, "source.docx", "target.pdf")
+
+    task = manager.get(task_id)
+    assert task is not None
+    assert task.info.status == "failed"
+    assert "等待执行槽位超时" in (task.info.error or "")
+    assert task.done.is_set()
+    assert pipeline_called == []  # 流水线未执行
+
+
+async def test_sync_mode_schedules_callback_without_blocking(monkeypatch):
+    """sync_mode=True 时 webhook 应后台发送,_fire_callback 不阻塞 run 返回。
+
+    验证:run 返回时 task.pending_callbacks 非空,且后台任务最终完成。
+    """
+    import asyncio
+
+    from document_comparison import tasks as tasks_module
+    from document_comparison.models import TamperReport
+    from document_comparison.tasks import TaskManager
+
+    report = TamperReport(
+        source="source.docx",
+        target="target.pdf",
+        overall_risk="clean",
+        change_status="clean",
+        summary={"status_counts": {}},
+    )
+    monkeypatch.setattr(tasks_module, "run_pipeline", lambda *_a, **_kw: report)
+    monkeypatch.setattr(tasks_module, "render_external_highlight_images", lambda *_a: [])
+    monkeypatch.setattr(
+        tasks_module, "build_external_result",
+        lambda *_a: {"change_status": "clean"},
+    )
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_compare_report", "save_llm_calls_batch",
+        "update_callback_result",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    deliver_started = []
+
+    async def _slow_deliver(*_a, **_kw):
+        # 模拟慢 webhook:进入即标记,然后让出控制权(让 run 先返回)。
+        deliver_started.append(True)
+        await asyncio.sleep(0.05)
+        return {"success": True, "http_status": 200, "error": None}
+
+    monkeypatch.setattr(tasks_module.webhook, "deliver", _slow_deliver)
+
+    manager = TaskManager()
+    task_id = manager.create(
+        "compare",
+        callback_url="http://internal/hook",
+        document_no="BILL-SYNC",
+        external_request=True,
+        sync_mode=True,  # 关键:同步模式
+    )
+
+    await manager.run(task_id, "source.docx", "target.pdf")
+
+    task = manager.get(task_id)
+    assert task is not None
+    assert task.info.status == "done"
+    # run 返回时,后台 callback 任务应已挂起(pending_callbacks 非空)。
+    assert len(task.pending_callbacks) == 1
+    # 等待后台任务完成,确认 webhook 确实被调用。
+    await asyncio.gather(*task.pending_callbacks)
+    assert deliver_started == [True]
+
+
+async def test_async_mode_still_awaits_callback_inline(monkeypatch):
+    """非 sync_mode(异步模式)时 webhook 仍同步 await,行为不变。"""
+    from document_comparison import tasks as tasks_module
+    from document_comparison.models import TamperReport
+    from document_comparison.tasks import TaskManager
+
+    report = TamperReport(
+        source="source.docx", target="target.pdf",
+        overall_risk="clean", change_status="clean",
+        summary={"status_counts": {}},
+    )
+    monkeypatch.setattr(tasks_module, "run_pipeline", lambda *_a, **_kw: report)
+    monkeypatch.setattr(tasks_module, "render_external_highlight_images", lambda *_a: [])
+    monkeypatch.setattr(
+        tasks_module, "build_external_result",
+        lambda *_a: {"change_status": "clean"},
+    )
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_compare_report", "save_llm_calls_batch",
+        "update_callback_result",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    delivered = []
+
+    async def _deliver(*_a, **_kw):
+        delivered.append(True)
+        return {"success": True, "http_status": 200, "error": None}
+
+    monkeypatch.setattr(tasks_module.webhook, "deliver", _deliver)
+
+    manager = TaskManager()
+    task_id = manager.create(
+        "compare",
+        callback_url="http://internal/hook",
+        document_no="BILL-ASYNC",
+        external_request=True,
+        sync_mode=False,  # 异步模式
+    )
+
+    await manager.run(task_id, "source.docx", "target.pdf")
+
+    task = manager.get(task_id)
+    assert task is not None
+    # 异步模式:run 返回前 webhook 已同步发完,无后台任务。
+    assert task.pending_callbacks == []
+    assert delivered == [True]

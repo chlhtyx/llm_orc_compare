@@ -8,6 +8,7 @@ import {
   getTaskLlmCalls,
   listTasks,
   reportRouteFor,
+  redeliverCallback,
   type ExternalCallItem,
   type LlmCallItem,
   type TaskEventItem,
@@ -23,6 +24,10 @@ const total = ref(0)
 const loading = ref(false)
 const loadError = ref<string | null>(null)
 
+// 重新推送回调:per-task 进行中状态 + 最近一次结果反馈
+const redelivering = ref<Record<string, boolean>>({})
+const redeliverMsg = ref<Record<string, string>>({})
+
 const kindFilter = ref<TaskKind | ''>('')
 const statusFilter = ref<TaskStatus | ''>('')
 const searchQuery = ref('')
@@ -31,7 +36,7 @@ const page = ref(0) // 0 基
 
 // 展开行:同一个任务下切换「时间线 / 模型调用 / 外部调用」面板
 const selectedTaskId = ref<string | null>(null)
-const detailTab = ref<'events' | 'llm-calls' | 'external-calls'>('events')
+const detailTab = ref<'events' | 'llm-calls' | 'external-calls' | 'callback'>('events')
 const selectedEvents = ref<TaskEventItem[]>([])
 const selectedLlmCalls = ref<LlmCallItem[]>([])
 const selectedExternalCalls = ref<ExternalCallItem[]>([])
@@ -249,6 +254,39 @@ function collapseDetail(): void {
   expandedCalls.value = {}
 }
 
+/** 对已完成且配置了回调地址的任务重新推送一次回调。 */
+async function redeliver(item: TaskListItem): Promise<void> {
+  if (redelivering.value[item.task_id]) return
+  redelivering.value = { ...redelivering.value, [item.task_id]: true }
+  redeliverMsg.value = { ...redeliverMsg.value, [item.task_id]: '' }
+  try {
+    const r = await redeliverCallback(item.task_id)
+    item.callback_status = r.callback_status
+    item.callback_http_status = r.callback_http_status
+    item.callback_error = r.callback_error
+    item.callback_at = new Date().toISOString()
+    redeliverMsg.value = {
+      ...redeliverMsg.value,
+      [item.task_id]: r.callback_status === 'success' ? '推送成功' : `推送失败:${r.callback_error ?? '未知错误'}`,
+    }
+  } catch (e) {
+    redeliverMsg.value = {
+      ...redeliverMsg.value,
+      [item.task_id]: e instanceof ApiError ? e.message : `推送失败:${(e as Error).message}`,
+    }
+  } finally {
+    redelivering.value = { ...redelivering.value, [item.task_id]: false }
+    setTimeout(() => {
+      redeliverMsg.value = { ...redeliverMsg.value, [item.task_id]: '' }
+    }, 4000)
+  }
+}
+
+/** 是否允许重新推送:任务已结束且有回调地址。 */
+function canRedeliver(item: TaskListItem): boolean {
+  return !!item.callback_url && (item.status === 'done' || item.status === 'failed')
+}
+
 function toggleCall(id: number): void {
   expandedCalls.value = { ...expandedCalls.value, [id]: !expandedCalls.value[id] }
 }
@@ -419,7 +457,8 @@ onMounted(refresh)
                     {{ riskText(item.overall_risk) }}
                   </span>
                 </td>
-                <td :title="item.callback_status ? callbackTitle(item) : '—'">
+               <td :title="item.callback_status ? callbackTitle(item) : '—'">
+                 <div class="cb-cell">
                   <span
                     v-if="item.callback_status"
                     :class="['cb-tag', `cb-${item.callback_status}`]"
@@ -427,19 +466,33 @@ onMounted(refresh)
                     {{ callbackText[item.callback_status] }}
                   </span>
                   <span v-else>—</span>
-                </td>
-                <td>{{ formatElapsed(item.elapsed) }}</td>
-                <td class="col-actions" @click.stop>
-                  <button class="chip" type="button" @click="viewReport(item)">查看报告</button>
-                  <button
-                    v-if="detailAvailable(item)"
-                    class="chip"
-                    type="button"
-                    @click="toggleRow(item)"
-                  >
-                    {{ selectedTaskId === item.task_id ? '收起' : '详情' }}
-                  </button>
-                </td>
+                  <div v-if="item.callback_url" class="cb-url mono small" :title="item.callback_url">
+                    {{ item.callback_url }}
+                  </div>
+                 </div>
+               </td>
+               <td>{{ formatElapsed(item.elapsed) }}</td>
+               <td class="col-actions" @click.stop>
+                 <button class="chip" type="button" @click="viewReport(item)">查看报告</button>
+                 <button
+                   v-if="canRedeliver(item)"
+                   class="chip chip-cb"
+                   type="button"
+                   :disabled="redelivering[item.task_id]"
+                   :title="redeliverMsg[item.task_id] || '向回调地址重新推送一次结果'"
+                   @click="redeliver(item)"
+                 >
+                   {{ redelivering[item.task_id] ? '推送中…' : '重新回调' }}
+                 </button>
+                 <button
+                   v-if="detailAvailable(item)"
+                   class="chip"
+                   type="button"
+                   @click="toggleRow(item)"
+                 >
+                   {{ selectedTaskId === item.task_id ? '收起' : '详情' }}
+                 </button>
+               </td>
               </tr>
               <tr v-if="selectedTaskId === item.task_id" class="event-row">
                 <td colspan="9">
@@ -455,16 +508,22 @@ onMounted(refresh)
                         type="button"
                         @click="showLlmCalls(item.task_id)"
                       >模型调用</button>
-                      <button
-                        v-if="item.external_request"
-                        :class="['tab', { 'tab-active': detailTab === 'external-calls' }]"
-                        type="button"
-                        @click="showExternalCalls(item.task_id)"
-                      >外部调用</button>
-                    </div>
-                    <div v-if="eventsLoading" class="muted detail-loading">
-                      {{ detailTab === 'events' ? '加载时间线…' : detailTab === 'llm-calls' ? '加载模型调用…' : '加载外部调用…' }}
-                    </div>
+                     <button
+                       v-if="item.external_request"
+                       :class="['tab', { 'tab-active': detailTab === 'external-calls' }]"
+                       type="button"
+                       @click="showExternalCalls(item.task_id)"
+                     >外部调用</button>
+                     <button
+                       v-if="item.callback_url"
+                       :class="['tab', { 'tab-active': detailTab === 'callback' }]"
+                       type="button"
+                       @click="detailTab = 'callback'"
+                     >回调</button>
+                   </div>
+                   <div v-if="eventsLoading" class="muted detail-loading">
+                     {{ detailTab === 'events' ? '加载时间线…' : detailTab === 'llm-calls' ? '加载模型调用…' : '加载外部调用…' }}
+                   </div>
                     <template v-else-if="detailTab === 'events'">
                       <ol v-if="selectedEvents.length" class="event-list">
                         <li v-for="ev in selectedEvents" :key="ev.id">
@@ -549,7 +608,56 @@ onMounted(refresh)
                             <span class="mono">{{ call.request_id }}</span>
                           </div>
                         </li>
-                      </ul>
+                     </ul>
+                    </template>
+                    <template v-else-if="detailTab === 'callback'">
+                      <div class="cb-detail">
+                        <div class="cb-detail-row small">
+                          <span class="muted">回调地址</span>
+                          <span class="mono cb-detail-url" :title="item.callback_url ?? ''">
+                            {{ item.callback_url || '—' }}
+                          </span>
+                        </div>
+                        <div class="cb-detail-row small">
+                          <span class="muted">交付状态</span>
+                          <span
+                            v-if="item.callback_status"
+                            :class="['cb-tag', `cb-${item.callback_status}`]"
+                          >
+                            {{ callbackText[item.callback_status] }}
+                          </span>
+                          <span v-else>—</span>
+                          <span v-if="item.callback_http_status != null" class="mono muted">
+                            HTTP {{ item.callback_http_status }}
+                          </span>
+                          <span v-if="item.callback_at" class="mono muted">
+                            {{ formatTime(item.callback_at) }}
+                          </span>
+                        </div>
+                        <div v-if="item.callback_error" class="cb-detail-row small">
+                          <span class="muted">失败原因</span>
+                          <span class="err">{{ item.callback_error }}</span>
+                        </div>
+                        <div v-if="redeliverMsg[item.task_id]" class="cb-detail-row small">
+                          <span class="muted">重推反馈</span>
+                          <span>{{ redeliverMsg[item.task_id] }}</span>
+                        </div>
+                        <div class="cb-detail-actions">
+                          <button
+                            class="chip chip-cb"
+                            type="button"
+                            :disabled="redelivering[item.task_id]"
+                            @click="redeliver(item)"
+                          >
+                            {{ redelivering[item.task_id] ? '推送中…' : '重新回调推送' }}
+                          </button>
+                        </div>
+                        <div v-if="item.callback_payload" class="llm-block">
+                          <div class="llm-block-title muted small">回调 payload(首次交付业务内容,重推时原样发送)</div>
+                          <pre class="llm-json">{{ jsonPreview(item.callback_payload) }}</pre>
+                        </div>
+                        <p v-else class="muted small">无已保存的回调 payload(可能创建于本功能上线前,重推时仅发送最小事件信封)。</p>
+                      </div>
                     </template>
                     <p v-if="item.error" class="err small">错误: {{ item.error }}</p>
                   </div>
@@ -756,6 +864,27 @@ table.task-table {
 .cb-success { background: var(--risk-low-bg); color: var(--risk-low); }
 .cb-failed { background: var(--risk-high-bg); color: var(--risk-high); }
 .cb-pending { background: var(--surface-2); color: var(--text-muted); }
+/* 回调地址 + 重新推送按钮 */
+.cb-cell { display: flex; flex-direction: column; gap: 2px; }
+.cb-url {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.chip-cb { border-color: var(--accent, var(--risk-medium)); }
+/* 回调详情面板 */
+.cb-detail { display: flex; flex-direction: column; gap: 8px; }
+.cb-detail-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cb-detail-row > .muted:first-child { min-width: 64px; }
+.cb-detail-url {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cb-detail-actions { display: flex; gap: 8px; }
 
 .risk-tag { color: var(--text-muted); }
 .risk-tag.risk-high { color: var(--risk-high); font-weight: 600; }
