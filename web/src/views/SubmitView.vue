@@ -87,6 +87,20 @@ async function onReset(): Promise<void> {
   saveError.value = configStore.error
   saved.value = false
 }
+
+// 已设置 Key 时输入框恒为空(syncFromConfig 不回填脱敏值),用户无法通过 @input
+// 触发 keyDirty,清空路径走不通。onClearKey 显式标记为待清除,保存时发空串。
+const keyPendingClear = computed(
+  () =>
+    keyDirty.value &&
+    form.external_api_key === '' &&
+    !!configStore.config?.external_api_key_set,
+)
+
+function onClearKey(): void {
+  form.external_api_key = ''
+  keyDirty.value = true
+}
 </script>
 
 <template>
@@ -135,6 +149,13 @@ async function onReset(): Promise<void> {
           <span class="hint">
             <template v-if="configStore.config?.external_api_key_set">
               当前值：{{ configStore.config.external_api_key || '****' }}；不修改此输入框即可保留原 Key。
+              <button
+                v-if="!keyPendingClear"
+                type="button"
+                class="link-btn danger"
+                @click="onClearKey"
+              >清除当前 Key</button>
+              <span v-else class="pending-clear">将清除当前 Key（不鉴权直接放行）</span>
             </template>
             <template v-else>外部系统通过 <code>X-API-Key</code> 请求头鉴权。</template>
           </span>
@@ -457,6 +478,26 @@ async function onReset(): Promise<void> {
 }
 .hint code {
   font-family: var(--mono);
+}
+.hint .link-btn {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.hint .link-btn.danger {
+  color: var(--risk-high);
+}
+.hint .pending-clear {
+  margin-left: 6px;
+  color: var(--risk-high);
+  font-size: 12px;
 }
 .options-panel {
   display: grid;
