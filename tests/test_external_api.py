@@ -619,3 +619,187 @@ async def test_external_dependency_skips_auth_when_key_unconfigured(monkeypatch)
     monkeypatch.setattr(settings, "external_public_base_url", "https://dc.example.test")
     assert await require_external_api_key(None) is None
     assert await require_external_api_key("anything") is None
+
+
+# ---------- source/target 兼容文件与 URL(source_url / target_url)----------
+
+
+def _patch_download(monkeypatch, *, source_name="source.docx", target_name="target.pdf"):
+    """让 app.download_to_upload 返回临时文件 + 推断文件名,避免真实网络。
+
+    注意:`document_comparison.api.app` 这个名字会被 `api/__init__.py` 里的
+    `from .app import app` 同名 FastAPI 实例遮蔽,所以必须从 sys.modules 取真正的模块对象,
+    再 patch 其上的 `download_to_upload`(端点按模块级名字引用)。
+    """
+    import sys
+
+    app_module = sys.modules["document_comparison.api.app"]
+    calls: dict = {"count": 0, "urls": []}
+
+    async def _fake(url, *, max_bytes, role):
+        calls["count"] += 1
+        calls["urls"].append(url)
+        settings.ensure_dirs()
+        name = source_name if role == "source" else target_name
+        temp = settings.uploads_dir / f".test-pending-{role}-{name}"
+        if role == "source":
+            temp.write_bytes(_docx_bytes().getvalue())
+        else:
+            temp.write_bytes(_pdf_bytes().getvalue())
+        return temp, name
+
+    monkeypatch.setattr(app_module, "download_to_upload", _fake)
+    return calls
+
+
+def test_external_submit_accepts_source_and_target_urls(external_client, monkeypatch):
+    from document_comparison.api.app import task_manager
+
+    captured: list[dict] = []
+
+    async def _capture_run(*args, **kwargs):
+        captured.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(task_manager, "run", _capture_run)
+    calls = _patch_download(monkeypatch)
+
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-1",
+            "source_url": "http://files.example.test/source.docx",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+    )
+    assert response.status_code == 202, response.json()
+    assert calls["count"] == 2
+    # task_manager.run 接到的是 finalize 后的最终本地路径(非临时文件)
+    word_path = captured[0]["args"][1]
+    pdf_path = captured[0]["args"][2]
+    assert word_path.endswith("source.docx")
+    assert pdf_path.endswith("target.pdf")
+
+
+def test_external_submit_rejects_source_and_source_url_both(external_client):
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-2",
+            "source_url": "http://files.example.test/source.docx",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 400
+    assert "二选一" in response.json()["message"]
+
+
+def test_external_submit_rejects_missing_source_and_source_url(external_client):
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-3",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+    )
+    assert response.status_code == 400
+    assert "source" in response.json()["message"]
+
+
+def test_external_submit_mixed_file_source_and_url_target(external_client, monkeypatch):
+    from document_comparison.api.app import task_manager
+
+    captured: list[dict] = []
+
+    async def _capture_run(*args, **kwargs):
+        captured.append({"args": args})
+
+    monkeypatch.setattr(task_manager, "run", _capture_run)
+    _patch_download(monkeypatch)  # 只 target 走下载
+
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-4",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+        },
+    )
+    assert response.status_code == 202, response.json()
+    # source 走 save_upload(原命名),target 走 finalize(下载推断名)
+    assert captured[0]["args"][1].endswith("source.docx")
+    assert captured[0]["args"][2].endswith("target.pdf")
+
+
+def test_external_url_suffix_mismatch_rejected(external_client, monkeypatch):
+    _patch_download(monkeypatch, source_name="source.txt")
+
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-5",
+            "source_url": "http://files.example.test/source.txt",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+    )
+    assert response.status_code == 400
+    assert ".docx" in response.json()["message"]
+
+
+def test_external_url_download_failure_returns_400(external_client, monkeypatch):
+    import sys
+
+    from document_comparison.api.app import task_manager
+
+    app_module = sys.modules["document_comparison.api.app"]
+
+    async def _boom(url, *, max_bytes, role):
+        raise ValueError(f"下载 {role} 失败:HTTP 502 (files.example.test)")
+
+    monkeypatch.setattr(app_module, "download_to_upload", _boom)
+
+    before = len(task_manager._tasks)
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-6",
+            "source_url": "http://files.example.test/source.docx",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+    )
+    assert response.status_code == 400
+    assert "下载" in response.json()["message"]
+    # 失败时不应创建任务
+    assert len(task_manager._tasks) == before
+
+
+def test_external_url_rejects_invalid_scheme(external_client):
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "BILL-URL-7",
+            "source_url": "ftp://files.example.test/source.docx",
+            "target_url": "http://files.example.test/target.pdf",
+            "callback_url": "http://internal/callback",
+        },
+    )
+    assert response.status_code == 400
+    assert "HTTP/HTTPS" in response.json()["message"]

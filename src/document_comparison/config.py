@@ -179,6 +179,14 @@ class Settings:
             "DC_EXTERNAL_TRUNCATE_TO_ORIGINAL_PAGES", "0"
         ).lower() in ("1", "true", "yes")
     )
+    # 外部接口以 URL(source_url/target_url)方式提交时,后端下载该 URL 落盘后比对。
+    # 大小上限复用 external_max_upload_mb,不另设;此处只配下载行为。
+    download_timeout_seconds: float = field(
+        default_factory=lambda: float(_env("DC_DOWNLOAD_TIMEOUT_SECONDS", "60"))
+    )
+    download_max_redirects: int = field(
+        default_factory=lambda: int(_env("DC_DOWNLOAD_MAX_REDIRECTS", "5"))
+    )
 
     # —— Postgres(SQLAlchemy 引擎;硬依赖,未配置时启动失败)——
     # 连接串示例:postgresql+psycopg://dc:dcpass@localhost:5432/doc_compare

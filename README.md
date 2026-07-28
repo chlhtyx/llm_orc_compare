@@ -175,6 +175,8 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 | `DC_EXTERNAL_ENABLE_LLM_ALIGNMENT` | `0` | 是否默认启用 LLM 原始块联合分段对齐；失败自动回退 Clause 对齐 |
 | `DC_EXTERNAL_ENABLE_LLM_JUDGE` | `0` | 是否默认启用 LLM 辅助说明；仅在风险评估开启时生效 |
 | `DC_EXTERNAL_ENABLE_RISK_ASSESSMENT` | `0` | 是否为外部 API 开启风险分级；默认仍仅判定内容变化 |
+| `DC_DOWNLOAD_TIMEOUT_SECONDS` | `60` | 外部接口以 URL(`source_url`/`target_url`)提交时,后端下载该 URL 的总超时(秒) |
+| `DC_DOWNLOAD_MAX_REDIRECTS` | `5` | URL 下载的最大重定向跳数 |
 
 ## 目录结构
 
@@ -234,8 +236,10 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `source` | 是 | 原始合同 `.docx` |
-| `target` | 是 | 回收件 `.pdf` |
+| `source` | 与 `source_url` 二选一 | 原始合同 `.docx`(文件) |
+| `source_url` | 与 `source` 二选一 | 原始合同 URL(`http`/`https` `.docx`);服务端下载后比对,大小限制同 `source` |
+| `target` | 与 `target_url` 二选一 | 回收件 `.pdf`(文件) |
+| `target_url` | 与 `target` 二选一 | 回收件 URL(`http`/`https` `.pdf`);服务端下载后比对,大小限制同 `target` |
 | `document_no` | 是 | 外部单据号(≤255 字符) |
 | `callback_url` | 异步必填,同步可选 | HTTP/HTTPS 完成回调地址 |
 | `sync` | 否 | `true` 同步模式;缺省=`false` 异步模式 |
@@ -254,6 +258,8 @@ curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
   -F 'document_no=DOC-2026-0001' \
   -F 'callback_url=https://business.example.com/callbacks/contract-compare'
 ```
+
+> 每个角色(`source`/`target`)也可改用链接提交:把 `-F 'source=@./...'` 换成 `-F 'source_url=https://.../original-contract.docx'`,`target` 同理换 `-F 'target_url=...'`。文件与链接二选一,服务端下载后比对,后缀(`.docx`/`.pdf`)与大小限制不变。
 
 提交响应(HTTP 202,仅 `task_id` + 状态):
 

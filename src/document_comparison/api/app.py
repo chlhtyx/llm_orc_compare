@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -45,7 +46,9 @@ from ..models import (
 )
 from ..parsing.pdf import count_pages_from_bytes
 from ..storage import (
+    download_to_upload,
     effective_target_path,
+    finalize_temp_file,
     save_upload,
 )
 from ..report.builder import burn_pdf
@@ -70,6 +73,23 @@ def _upload_size(upload: UploadFile) -> int:
     size = upload.file.tell()
     upload.file.seek(current)
     return size
+
+
+def _persist_role(
+    task_id: str,
+    role: str,
+    upload: UploadFile | None,
+    temp_path: Path | None,
+    filename: str,
+) -> Path:
+    """落定单个角色的最终文件:UploadFile → save_upload;URL 临时文件 → finalize_temp_file。
+
+    外部接口 source/target 允许"文件"或"URL"二选一,二者分派由 `upload` 是否为 None 决定。
+    """
+    if upload is not None and upload.filename:
+        return save_upload(upload, task_id, role)
+    assert temp_path is not None, "URL 模式下 temp_path 必须已下载"
+    return finalize_temp_file(temp_path, task_id, role, filename)
 
 
 
@@ -731,8 +751,14 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/external/contractCompare", status_code=202)
     async def external_compare(
         request: Request,
-        source: UploadFile = File(..., description="原始合同 Word(.docx)"),
-        target: UploadFile = File(..., description="回收件 PDF(.pdf)"),
+        source: UploadFile | None = File(default=None, description="原始合同 Word(.docx)"),
+        target: UploadFile | None = File(default=None, description="回收件 PDF(.pdf)"),
+        source_url: str | None = Form(
+            default=None, description="原始合同 URL(http/https .docx);与 source 二选一"
+        ),
+        target_url: str | None = Form(
+            default=None, description="回收件 URL(http/https .pdf);与 target 二选一"
+        ),
         document_no: str = Form(...),
         original_page_count: int | None = Form(
             default=None,
@@ -746,11 +772,23 @@ def create_app() -> FastAPI:
 
         默认异步(`sync=false`):返回 task_id,结果经回调或查询端点获取。
         `sync=true`:同步阻塞至比对完成,响应体内直接返回完整结果。
+
+        source/source_url 二选一、target/target_url 二选一;URL 模式下后端下载落盘后复用同一 pipeline。
         """
-        if not (source.filename or "").lower().endswith(".docx"):
-            raise HTTPException(400, "source 必须为 .docx")
-        if not (target.filename or "").lower().endswith(".pdf"):
-            raise HTTPException(400, "target 必须为 .pdf")
+        # source:文件与 URL 二选一(都传/都不传 → 400)
+        source_url = (source_url or "").strip() or None
+        has_source_file = source is not None and bool(source.filename)
+        if has_source_file and source_url:
+            raise HTTPException(400, "source 与 source_url 只能二选一")
+        if not has_source_file and not source_url:
+            raise HTTPException(400, "必须提供 source 文件或 source_url")
+        # target:同上
+        target_url = (target_url or "").strip() or None
+        has_target_file = target is not None and bool(target.filename)
+        if has_target_file and target_url:
+            raise HTTPException(400, "target 与 target_url 只能二选一")
+        if not has_target_file and not target_url:
+            raise HTTPException(400, "必须提供 target 文件或 target_url")
 
         document_no = document_no.strip()
         if not document_no:
@@ -772,73 +810,128 @@ def create_app() -> FastAPI:
         max_bytes = settings.external_max_upload_mb * 1024 * 1024
         if max_bytes <= 0:
             raise HTTPException(503, "外部 API 上传大小配置无效")
-        for field_name, upload in (("source", source), ("target", target)):
-            if _upload_size(upload) > max_bytes:
-                raise HTTPException(
-                    413,
-                    f"{field_name} 超过 {settings.external_max_upload_mb} MiB 上限",
-                )
-
-        # 与内部接口保持一致：超页数任务在入队前拒绝。
-        if settings.max_pdf_pages > 0:
+        # URL 预校验(scheme/userinfo),提前给出明确错误,避免发起无效连接。
+        for role, url in (("source", source_url), ("target", target_url)):
+            if url is None:
+                continue
             try:
-                pdf_bytes = target.file.read()
-            finally:
-                target.file.seek(0)
+                validate_callback_url(url)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+
+        # URL 模式:下载到临时文件;失败 → 400,临时文件已在内部清理。
+        # 下载与后续校验共用一个 try/finally,失败时 finally 清理未消费的临时文件。
+        temp_source: Path | None = None
+        source_filename = source.filename or "" if has_source_file else ""
+        temp_target: Path | None = None
+        target_filename = target.filename or "" if has_target_file else ""
+        try:
             try:
-                page_count = count_pages_from_bytes(pdf_bytes)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(400, f"无法解析 PDF: {exc}")
-            if page_count > settings.max_pdf_pages:
-                raise HTTPException(
-                    400,
-                    f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
-                )
+                if source_url is not None:
+                    temp_source, source_filename = await download_to_upload(
+                        source_url, max_bytes=max_bytes, role="source"
+                    )
+                if target_url is not None:
+                    temp_target, target_filename = await download_to_upload(
+                        target_url, max_bytes=max_bytes, role="target"
+                    )
+            except ValueError as exc:
+                # 下载失败(scheme/连接/状态码/超限/超时):转 400,错误信息已不含完整 URL。
+                raise HTTPException(400, str(exc)) from exc
 
-        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-        # 进程内信号量 + 任务排队消化。
-        running = await asyncio.to_thread(db_repo.count_active_tasks)
-        if running >= settings.max_concurrent_tasks:
-            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+            # 文件名后缀校验(文件名来源:UploadFile 或下载推断)
+            if not source_filename.lower().endswith(".docx"):
+                raise HTTPException(400, "source 必须为 .docx")
+            if not target_filename.lower().endswith(".pdf"):
+                raise HTTPException(400, "target 必须为 .pdf")
 
-        task_id = task_manager.create(
-            "compare",
-            source_name=source.filename or "",
-            target_names=[target.filename or ""],
-            ocr_backend=settings.external_ocr_backend,
-           callback_url=callback_url,
-           document_no=document_no,
-           external_request=True,
-           sync_mode=sync,
-        )
-        # 审计中间件读取:提交成功关联 task_id + document_no
-        request.state.audit_endpoint = "contractCompare.submit"
-        request.state.audit_task_id = task_id
-        request.state.audit_document_no = document_no
-        word_path = save_upload(source, task_id, "source")
-        pdf_path = save_upload(target, task_id, "target")
-        run_coro = task_manager.run(
-            task_id,
-            str(word_path),
-            str(pdf_path),
-            enable_llm_judge=settings.external_enable_llm_judge,
-            enable_llm_alignment=settings.external_enable_llm_alignment,
-            ocr_backend=settings.external_ocr_backend,
-            enable_risk_assessment=settings.external_enable_risk_assessment,
-            enable_llm_direct_diff=settings.external_enable_llm_direct_diff,
-            truncate_to_original_pages=settings.external_truncate_to_original_pages,
-            original_page_count=original_page_count,
-        )
-        if sync:
-            # 同步模式:阻塞至比对完成,直接在响应体内返回完整结果。
-            # run 内部已兜底异常(失败只置 status=failed + error,不向调用方抛)。
-            await run_coro
-            return JSONResponse(
-                status_code=200,
-                content=await _external_task_response(task_id),
+            # 大小校验:UploadFile 用 _upload_size(临时文件已在下载时流式限制,此处不再查)
+            for field_name, upload in (("source", source), ("target", target)):
+                if upload is None or not upload.filename:
+                    continue
+                if _upload_size(upload) > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"{field_name} 超过 {settings.external_max_upload_mb} MiB 上限",
+                    )
+
+            # 与内部接口保持一致：超页数任务在入队前拒绝。
+            if settings.max_pdf_pages > 0:
+                if has_target_file:
+                    try:
+                        pdf_bytes = target.file.read()
+                    finally:
+                        target.file.seek(0)
+                else:
+                    assert temp_target is not None
+                    pdf_bytes = temp_target.read_bytes()
+                try:
+                    page_count = count_pages_from_bytes(pdf_bytes)
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(400, f"无法解析 PDF: {exc}")
+                if page_count > settings.max_pdf_pages:
+                    raise HTTPException(
+                        400,
+                        f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                    )
+
+            # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
+            # 进程内信号量 + 任务排队消化。
+            running = await asyncio.to_thread(db_repo.count_active_tasks)
+            if running >= settings.max_concurrent_tasks:
+                raise HTTPException(429, "并发任务已达上限,请稍后重试")
+
+            task_id = task_manager.create(
+                "compare",
+                source_name=source_filename,
+                target_names=[target_filename],
+                ocr_backend=settings.external_ocr_backend,
+               callback_url=callback_url,
+               document_no=document_no,
+               external_request=True,
+               sync_mode=sync,
             )
-        asyncio.create_task(run_coro)
-        return {"task_id": task_id, "document_no": document_no, "status": "pending"}
+            # 审计中间件读取:提交成功关联 task_id + document_no
+            request.state.audit_endpoint = "contractCompare.submit"
+            request.state.audit_task_id = task_id
+            request.state.audit_document_no = document_no
+            word_path = _persist_role(
+                task_id, "source", source, temp_source, source_filename
+            )
+            pdf_path = _persist_role(
+                task_id, "target", target, temp_target, target_filename
+            )
+            # 已落定,rename 后的最终路径接管;临时文件引用清空,finally 不再清理。
+            temp_source = None
+            temp_target = None
+            run_coro = task_manager.run(
+                task_id,
+                str(word_path),
+                str(pdf_path),
+                enable_llm_judge=settings.external_enable_llm_judge,
+                enable_llm_alignment=settings.external_enable_llm_alignment,
+                ocr_backend=settings.external_ocr_backend,
+                enable_risk_assessment=settings.external_enable_risk_assessment,
+                enable_llm_direct_diff=settings.external_enable_llm_direct_diff,
+                truncate_to_original_pages=settings.external_truncate_to_original_pages,
+                original_page_count=original_page_count,
+            )
+            if sync:
+                # 同步模式:阻塞至比对完成,直接在响应体内返回完整结果。
+                # run 内部已兜底异常(失败只置 status=failed + error,不向调用方抛)。
+                await run_coro
+                return JSONResponse(
+                    status_code=200,
+                    content=await _external_task_response(task_id),
+                )
+            asyncio.create_task(run_coro)
+            return {"task_id": task_id, "document_no": document_no, "status": "pending"}
+        finally:
+            # 仅清理未被 finalize 接管的临时文件(下载后校验/并发失败时)。
+            if temp_source is not None:
+                temp_source.unlink(missing_ok=True)
+            if temp_target is not None:
+                temp_target.unlink(missing_ok=True)
 
     @app.get("/api/v1/external/contractCompare/{task_id}")
     async def get_external_result(

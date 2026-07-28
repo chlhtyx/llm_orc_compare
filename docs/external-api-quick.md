@@ -20,12 +20,16 @@ Base  {external_public_base_url}/api/v1/external
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `source` | file | ✅ | 原始合同,**后缀 `.docx`** |
-| `target` | file | ✅ | 回收件,**后缀 `.pdf`** |
+| `source` | file | 与 `source_url` 二选一 | 原始合同文件,**后缀 `.docx`** |
+| `source_url` | string | 与 `source` 二选一 | 原始合同 URL(`http`/`https` `.docx`);服务端下载后比对,大小/后缀限制同 `source` |
+| `target` | file | 与 `target_url` 二选一 | 回收件文件,**后缀 `.pdf`** |
+| `target_url` | string | 与 `target` 二选一 | 回收件 URL(`http`/`https` `.pdf`);服务端下载后比对,大小/后缀限制同 `target` |
 | `document_no` | string | ✅ | 单据号,非空,≤ 255 字符 |
 | `sync` | bool | ❌ | 默认 `false`。`true`=同步,`false`=异步 |
 | `callback_url` | string | 异步必填 | http(s) 回调地址,禁止带账号密码 |
 | `original_page_count` | int | ❌ | ≥ 1;仅服务端开启「页数截取」时生效 |
+
+> 每个角色文件与链接**二选一**;同时传或都不传 → 400。URL 模式下文件名取 `Content-Disposition: filename=` 或 URL 末段,**后缀仍必须** `.docx`/`.pdf`,下载失败(非 2xx / 超时 / 超限)→ 400。
 
 **同步模式** `sync=true`:HTTP 一直阻塞到完成,响应体直接返回完整结果(状态码恒为 200,成败看 body 的 `status`)。客户端超时建议 ≥ 5 分钟。
 
@@ -51,6 +55,12 @@ curl -X POST {BASE}/contractCompare \
 curl -X POST {BASE}/contractCompare \
   -H "X-API-Key: KEY" \
   -F "source=@原.docx" -F "target=@回.pdf" \
+  -F "document_no=HT-001" -F "sync=true"
+
+# 链接提交(每角色文件与 URL 二选一)
+curl -X POST {BASE}/contractCompare \
+  -H "X-API-Key: KEY" \
+  -F "source_url=https://files/原.docx" -F "target_url=https://files/回.pdf" \
   -F "document_no=HT-001" -F "sync=true"
 ```
 

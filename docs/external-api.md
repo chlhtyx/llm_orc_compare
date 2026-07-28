@@ -97,12 +97,16 @@ X-API-Key: <KEY>
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `source` | file | ✅ | — | 原始合同,**文件名必须以 `.docx` 结尾**(大小写不敏感)。仅按后缀判定,不看 MIME。 |
-| `target` | file | ✅ | — | 回收件,**文件名必须以 `.pdf` 结尾**。必须可被正常解析,否则 400。 |
+| `source` | file | 与 `source_url` 二选一 | — | 原始合同文件,**文件名必须以 `.docx` 结尾**(大小写不敏感)。仅按后缀判定,不看 MIME。 |
+| `source_url` | string | 与 `source` 二选一 | — | 原始合同 URL(`http`/`https`)。服务端下载后比对,文件名取 `Content-Disposition` 或 URL 末段,**后缀仍必须 `.docx`**。大小限制同 `source`。 |
+| `target` | file | 与 `target_url` 二选一 | — | 回收件文件,**文件名必须以 `.pdf` 结尾**。必须可被正常解析,否则 400。 |
+| `target_url` | string | 与 `target` 二选一 | — | 回收件 URL(`http`/`https`)。服务端下载后比对,文件名取 `Content-Disposition` 或 URL 末段,**后缀仍必须 `.pdf`**。大小限制同 `target`。 |
 | `document_no` | string | ✅ | — | 单据号 / 合同编号。会去除首尾空白后校验:不能为空、长度 ≤ 255 字符。用于结果回显与审计关联。 |
 | `sync` | bool | ❌ | `false` | 调用模式开关。`true`=同步(见[三](#三同步调用模式-synctrue));`false`=异步(见[四](#四异步调用模式-syncfalse))。 |
 | `callback_url` | string | ⚠️ 条件必填 | `null` | **异步模式必填**,同步模式可选。回调地址,校验规则见下。 |
-| `original_page_count` | int | ❌ | `null` | 原始合同的真实页数,**仅当服务端开启了「回收件页数截取」时才生效**。用于在 PDF 末尾有多余图纸页时,显式指定截取到第几页。提供时必须 ≥ 1。 |
+| `original_page_count` | int | ❌ | `null` | 原始合同的真实页数,**仅当服务端开启了「回收件页数截取」时才生效**。用于在 PDF 末尾有多多余图纸页时,显式指定截取到第几页。提供时必须 ≥ 1。 |
+
+> **文件与链接二选一**:每个角色(`source`/`target`)在文件与 `_url` 字段之间**只能传一个**;同时传或都不传 → **400**(`source 与 source_url 只能二选一` / `必须提供 source 文件或 source_url`)。两种模式下游比对完全一致。
 
 #### `callback_url` 校验规则
 
@@ -111,16 +115,25 @@ X-API-Key: <KEY>
 - 校验失败 → **400**:`callback_url 必须是有效的 HTTP/HTTPS 地址` 或 `callback_url 不允许包含用户名或密码`。
 - 异步模式(`sync=false`)下未提供 → **400**:`异步模式必须提供 callback_url`。
 
+> `source_url` / `target_url` 沿用同样的 scheme / userinfo 校验(scheme 仅 `http`/`https`、禁止带账号密码)。
+
 #### 文件大小与页数限制
 
 - 单文件上限由服务端的 `external_max_upload_mb` 控制(默认 50 MiB,可由管理员调整),**分别**限制 `source` 和 `target`。超限 → **413**:`{source|target} 超过 {N} MiB 上限`。
-- 若服务端开启了 PDF 页数上限(`max_pdf_pages > 0`),提交时会先解析 PDF 页数,超页 → **400**:`暂不支持:PDF 共 {N} 页,超过上限 {M} 页`。
+- URL 模式下,服务端**流式下载并累计字节**,超过同一上限立即中断 → **400**:`{source|target} 超过 {N} MiB 下载上限`(下载大小口径与文件上传一致,不另设)。
+- 若服务端开启了 PDF 页数上限(`max_pdf_pages > 0`),提交时会先解析 PDF 页数(文件模式读 `target.file`,URL 模式读下载产物),超页 → **400**:`暂不支持:PDF 共 {N} 页,超过上限 {M} 页`。
+
+#### URL 下载行为(仅 `*_url` 字段)
+
+- 超时 `DC_DOWNLOAD_TIMEOUT_SECONDS`(默认 60s)、最大重定向 `DC_DOWNLOAD_MAX_REDIRECTS`(默认 5)。
+- 下载失败(非 2xx、超时、连接错误、超限)→ **400**,错误信息**只带状态码和主机名**,不回显完整 URL(避免泄露可能存在的 token)。
+- 文件名推断:`Content-Disposition: filename*=` → `filename=` → URL path 末段 → 角色名兜底;扩展名从文件名取,无则 `.bin`。
 
 ### 提交流程
 
-1. 校验文件类型 / 字段 / 大小 / 页数。
+1. 校验角色二选一 / 文件类型 / 字段 / 大小 / 页数(URL 模式先下载再校验后缀与页数)。
 2. 校验全局并发(见下)。
-3. 创建任务(生成 `task_id`),保存上传文件,启动比对。
+3. 创建任务(生成 `task_id`),保存上传文件或落定下载产物,启动比对。
 4. 根据 `sync` 走同步等待分支,或立即返回受理响应。
 
 #### 并发限制
@@ -212,6 +225,12 @@ curl -i -X POST https://compare.example.com/api/v1/external/contractCompare \
   -F "sync=false" \
   -F "callback_url=https://your-system.example.com/hooks/compare"
 ```
+
+> 也可改用链接提交(每角色文件与 URL 二选一),把 `source`/`target` 换成 `source_url`/`target_url`:
+> ```bash
+> -F "source_url=https://files.example.com/path/original.docx" \
+> -F "target_url=https://files.example.com/path/recovered.pdf"
+> ```
 
 ### 受理响应
 
@@ -458,6 +477,10 @@ X-API-Key: <KEY>
 | **400** | `callback_url` 非法 | `callback_url 必须是有效的 HTTP/HTTPS 地址` / `callback_url 不允许包含用户名或密码` |
 | **400** | PDF 无法解析 | `无法解析 PDF: {详情}` |
 | **400** | PDF 页数超上限 | `暂不支持:PDF 共 {N} 页,超过上限 {M} 页` |
+| **400** | `source`/`source_url` 或 `target`/`target_url` 同时传 / 都不传 | `source 与 source_url 只能二选一` / `必须提供 source 文件或 source_url` |
+| **400** | `source_url`/`target_url` scheme 非法或带账号密码 | `source_url/target_url 必须是有效的 HTTP/HTTPS 地址` / `...不允许包含用户名或密码` |
+| **400** | URL 下载失败(非 2xx / 超时 / 连接失败) | `下载 {source\|target} 失败:HTTP {code} ({host})` / `下载 {role} 超时 ({host})` |
+| **400** | URL 下载体积超限 | `{source\|target} 超过 {N} MiB 下载上限` |
 | **401** | `X-API-Key` 缺失或不匹配(服务端已配置 Key 时) | `invalid external API key` |
 | **404** | `task_id` 不存在 / 非本接口创建 | `task not found` |
 | **404** | 图片页码越界 / 未生成 | `image not found` |

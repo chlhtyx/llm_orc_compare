@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
+import httpx
 from fastapi import UploadFile
 
 from .config import settings
@@ -31,6 +34,115 @@ def save_upload(upload: UploadFile, task_id: str, role: str, index: int | None =
     with path.open("wb") as f:
         f.write(upload.file.read())
     return path
+
+
+async def download_to_upload(
+    url: str, *, max_bytes: int, role: str
+) -> tuple[Path, str]:
+    """从 URL 流式下载到本地临时文件,供 URL 提交模式(source_url/target_url)使用。
+
+    返回 (临时 Path, 推断文件名)。调用方负责后续 `finalize_temp_file` 落定或清理临时文件。
+
+    - scheme 仅 http/https;拒绝 userinfo(与 callback_url 一致)。
+    - 流式累计字节数,**超 `max_bytes` 立即中断并删除半成品**(与文件上传大小口径一致,
+      复用 `external_max_upload_mb`)。
+    - 非 2xx 响应 → ValueError,错误信息只带状态码 + hostname,**不回显完整 URL**(URL 可能含 token)。
+    - 文件名优先 Content-Disposition: filename= → URL path 末段 → role 兜底。
+    """
+    candidate = url.strip()
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("source_url/target_url 必须是有效的 HTTP/HTTPS 地址")
+    if parsed.username or parsed.password:
+        raise ValueError("source_url/target_url 不允许包含用户名或密码")
+
+    settings.ensure_dirs()
+    suffix = _suffix_from_url_path(parsed.path)
+    temp_path = settings.uploads_dir / f".pending-{role}-{uuid.uuid4().hex}{suffix}"
+
+    written = 0
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.download_timeout_seconds,
+            follow_redirects=True,
+            max_redirects=settings.download_max_redirects,
+        ) as client:
+            async with client.stream("GET", candidate) as response:
+                if response.status_code >= 400:
+                    raise ValueError(
+                        f"下载 {role} 失败:HTTP {response.status_code} ({parsed.hostname})"
+                    )
+                filename = _filename_from_response(
+                    response.headers.get("content-disposition"), parsed.path
+                ) or f"{role}{suffix or '.bin'}"
+                with temp_path.open("wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise ValueError(
+                                f"{role} 超过 {max_bytes // (1024 * 1024)} MiB 下载上限"
+                            )
+                        f.write(chunk)
+        if written == 0:
+            raise ValueError(f"下载 {role} 失败:响应体为空 ({parsed.hostname})")
+    except httpx.TimeoutException as exc:
+        _safe_unlink(temp_path)
+        raise ValueError(f"下载 {role} 超时 ({parsed.hostname})") from exc
+    except httpx.HTTPError as exc:
+        _safe_unlink(temp_path)
+        raise ValueError(f"下载 {role} 失败:无法连接 ({parsed.hostname})") from exc
+    except Exception:
+        _safe_unlink(temp_path)
+        raise
+    return temp_path, filename
+
+
+def finalize_temp_file(temp_path: Path, task_id: str, role: str, filename: str) -> Path:
+    """把 `download_to_upload` 的临时产物 rename 到与 `save_upload` 一致的最终命名。
+
+    `save_upload` 的命名是 `{task_id}-{role}{suffix}`,这里保持一致(index=None 单文件分支)。
+    同文件系统 rename 原子安全;幂等性由 task_id 唯一性保证。
+    """
+    suffix = Path(filename).suffix or ".bin"
+    final_path = settings.uploads_dir / f"{task_id}-{role}{suffix}"
+    temp_path.replace(final_path)
+    return final_path
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("failed to clean up temp file %s", path)
+
+
+def _suffix_from_url_path(path: str) -> str:
+    """从 URL path 推断扩展名(含点),无则返回空串。"""
+    last = path.rsplit("/", 1)[-1]
+    if "." in last:
+        return "." + last.rsplit(".", 1)[-1].lower()
+    return ""
+
+
+def _filename_from_response(content_disposition: str | None, url_path: str) -> str | None:
+    """优先取 Content-Disposition 的 filename*,其次 filename,再回退 URL path 末段。"""
+    if content_disposition:
+        lower = content_disposition.lower()
+        if "filename*=" in lower:
+            raw = content_disposition.split("filename*=", 1)[1].split(";", 1)[0].strip()
+            # RFC 5987: charset'lang'value
+            if "'" in raw:
+                raw = raw.split("'", 2)[-1]
+            name = unquote(raw.strip().strip('"'))
+            if name:
+                return name
+        if "filename=" in lower:
+            raw = content_disposition.split("filename=", 1)[1].split(";", 1)[0].strip()
+            name = unquote(raw.strip().strip('"'))
+            if name:
+                return name
+    last = unquote(url_path.rsplit("/", 1)[-1])
+    return last or None
 
 
 def upload_path(task_id: str, role: str) -> Path | None:
