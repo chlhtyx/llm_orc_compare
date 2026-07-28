@@ -15,6 +15,8 @@ import logging
 import re
 from typing import Any
 
+from ..observability import log_value_summary
+
 logger = logging.getLogger(__name__)
 
 # LLM 返回的角色白名单(对齐 AMOUNT_COLUMN_KEYWORDS 的角色)
@@ -71,6 +73,10 @@ def llm_detect_amount_columns(
             },
         ],
         "temperature": 0,
+        # enable_thinking=False:关闭 Qwen3 系列默认输出的 <think> 思考链 token
+        # (金额列定位是确定性判断,这些 token 不进结果但严重拖慢生成)。Qwen3 原生
+        # 支持该参数;非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
+        "enable_thinking": False,
     }
 
     try:
@@ -98,7 +104,10 @@ def _parse_column_response(content: str, headers: list[str]) -> dict[int, str] |
             return None
         data = json.loads(match.group(0))
     except json.JSONDecodeError:
-        logger.warning("llm column detect response not json: %r", content[:200])
+        logger.warning(
+            "llm column detect response not json: response_summary=%s",
+            log_value_summary(content),
+        )
         return None
 
     columns = data.get("columns") if isinstance(data, dict) else None

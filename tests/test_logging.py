@@ -8,6 +8,7 @@ import pytest
 
 from document_comparison.config import settings
 from document_comparison.logging_config import setup_logging
+from document_comparison.observability import log_context
 
 
 @pytest.fixture
@@ -56,6 +57,17 @@ def test_log_actually_written(isolated_logging):
         h.flush()
     content = (settings.storage_dir / "logs" / "app.log").read_text(encoding="utf-8")
     assert "a-unique-marker-9f3a" in content
+
+
+def test_log_includes_context_ids(isolated_logging):
+    """Formatter 从 ContextVar 读取关联 ID，普通日志则显式标记为 -。"""
+    log = logging.getLogger("test.logging.context")
+    with log_context(task_id="task-test", request_id="req-test"):
+        log.info("context-marker")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    content = (settings.storage_dir / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "task=task-test req=req-test | context-marker" in content
 
 
 def test_noisy_loggers_silenced(isolated_logging):

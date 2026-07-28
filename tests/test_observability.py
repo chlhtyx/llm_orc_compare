@@ -8,10 +8,13 @@ import pytest
 from document_comparison.observability import (
     LlmCallRecord,
     _MAX_RESPONSE_CHARS,
+    _model_log_summary,
     llm_call_collector,
+    log_context,
     log_model_failure,
     log_model_request,
     log_model_response,
+    log_value_summary,
 )
 
 
@@ -131,6 +134,30 @@ def test_image_base64_scrubbed(quiet_logger):
     assert img["base64_chars"] == 5000
     assert len(img["sha256"]) == 64
     assert "AAAA" not in str(recs[0].payload), "原始 base64 不应出现在 payload"
+
+
+def test_model_log_summary_does_not_include_contract_text():
+    """文件日志只保留可关联摘要，合同正文仍仅存在受控的调用审计记录中。"""
+    secret_clause = "甲方应于2026年8月1日前支付987654元"
+    summary = _model_log_summary({"model": "vision", "messages": [secret_clause]})
+    assert summary["model"] == "vision"
+    assert summary["chars"] > 0
+    assert len(summary["sha256"]) == 64
+    assert secret_clause not in str(summary)
+    assert log_value_summary(secret_clause) == _model_log_summary(secret_clause)
+
+
+def test_log_context_is_scoped_and_restored():
+    """嵌套上下文可以附加 request_id，并在退出时恢复。"""
+    from document_comparison.observability import get_log_context
+
+    assert get_log_context() == {}
+    with log_context(task_id="task-a"):
+        assert get_log_context() == {"task_id": "task-a"}
+        with log_context(request_id="req-b"):
+            assert get_log_context() == {"task_id": "task-a", "request_id": "req-b"}
+        assert get_log_context() == {"task_id": "task-a"}
+    assert get_log_context() == {}
 
 
 # —— response 截断 ——

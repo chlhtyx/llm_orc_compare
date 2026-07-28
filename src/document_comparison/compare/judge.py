@@ -21,7 +21,12 @@ import httpx
 
 from ..config import settings
 from ..models import DiffSegment, RiskLevel
-from ..observability import log_model_failure, log_model_request, log_model_response
+from ..observability import (
+    log_model_failure,
+    log_model_request,
+    log_model_response,
+    log_value_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +75,7 @@ def _extract_json(text: str) -> Any:
             return json.loads(m.group(0))
         except json.JSONDecodeError:
             pass
-    logger.warning("llm judge json parse failed; raw=%s", text[:200])
+    logger.warning("llm judge json parse failed; response_summary=%s", log_value_summary(text))
     return {}
 
 
@@ -108,6 +113,10 @@ def llm_judge_diff(
         ],
         "temperature": 0,
         "response_format": {"type": "json_object"},
+        # enable_thinking=False:关闭 Qwen3 系列默认输出的 <think> 思考链 token
+        # (风险复核是确定性判断,这些 token 不进结果但严重拖慢生成)。Qwen3 原生
+        # 支持该参数;非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
+        "enable_thinking": False,
     }
     headers = {"Authorization": f"Bearer {settings.judge_api_key}"}
     timeout = httpx.Timeout(settings.judge_timeout, connect=10.0)

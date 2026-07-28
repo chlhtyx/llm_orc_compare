@@ -134,8 +134,8 @@ class Settings:
     webhook_timeout_seconds: float = 10.0
 
     # —— 外部合同比对 API ——
-    # 两项均配置后 `/api/v1/external/*` 才可用；缺失时端点返回 503，
-    # 不影响内部页面和既有 API。
+    # `external_public_base_url` 配置后 `/api/v1/external/*` 即可用；缺失/非法时端点返回 503，
+    # 不影响内部页面和既有 API。API Key 为可选项:留空=不鉴权,配置后按 Key 校验。
     external_api_key: str = field(
         default_factory=lambda: _env("DC_EXTERNAL_API_KEY", "")
     )

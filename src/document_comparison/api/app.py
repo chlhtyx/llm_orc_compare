@@ -34,6 +34,7 @@ from ..config import (
 from .. import db as db_pkg
 from ..db import repository as db_repo
 from ..logging_config import setup_logging
+from ..observability import log_context
 from ..models import (
     CompareOptions,
     RawCompareOptions,
@@ -277,25 +278,31 @@ def create_app() -> FastAPI:
             return await call_next(request)
 
         request.state.request_id = uuid.uuid4().hex[:12]
-        start = time.perf_counter()
-        status_code = 500
-        try:
-            response = await call_next(request)
-            status_code = response.status_code
-            response.headers["X-Request-Id"] = request.state.request_id
-            return response
-        except Exception:
-            # Starlette 兜底会转成 500;这里记审计后重新抛出交全局 handler
+        with log_context(request_id=request.state.request_id):
+            start = time.perf_counter()
             status_code = 500
-            raise
-        finally:
-            elapsed_ms = int((time.perf_counter() - start) * 1000)
-            # 异步落库,不阻塞响应返回;异常已在 _persist_external_call 内吞并
-            asyncio.create_task(_persist_external_call(
-                request=request,
-                status_code=status_code,
-                elapsed_ms=elapsed_ms,
-            ))
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+                response.headers["X-Request-Id"] = request.state.request_id
+                return response
+            except Exception:
+                # Starlette 兜底会转成 500;这里记审计后重新抛出交全局 handler
+                status_code = 500
+                raise
+            finally:
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
+                logger.info(
+                    "external request completed endpoint=%s method=%s status=%s elapsed_ms=%s",
+                    getattr(request.state, "audit_endpoint", None) or "unknown",
+                    request.method, status_code, elapsed_ms,
+                )
+                # 异步落库,不阻塞响应返回;异常已在 _persist_external_call 内吞并
+                asyncio.create_task(_persist_external_call(
+                    request=request,
+                    status_code=status_code,
+                    elapsed_ms=elapsed_ms,
+                ))
 
     @app.exception_handler(HTTPException)
     async def _http_exc_handler(request, exc: HTTPException):

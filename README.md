@@ -151,6 +151,11 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 
 服务端基础配置仍通过环境变量提供：
 
+日志同时写入控制台和 `${DC_STORAGE_DIR}/logs/app.log`。每条日志都带 `task` 和
+`req` 关联标识，可按任务或外部接口请求串联排障；模型请求/响应在文件日志中仅记录
+模型、状态、耗时、长度和 SHA-256 摘要，不记录合同原文。需要查看受控调用明细时，使用
+任务的 LLM 调用记录接口。
+
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DC_HOST` | `0.0.0.0` | 后端监听地址 |
@@ -162,7 +167,7 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(对应 `dc` 用户) |
 | `DC_DB_AUTO_MIGRATE` | `1` | 启动时自动跑 `alembic upgrade head`(默认开);设为 `0` 改由 CI/运维手动控制 |
 | `DC_DB_AUTO_CREATE` | 空 | 设为 `1` 时跳过 alembic 直接 `CREATE TABLE IF NOT EXISTS`(仅测试用) |
-| `DC_EXTERNAL_API_KEY` | 空 | 外部 API Key 的首次启动/灾备默认值；管理端设置可持久化覆盖 |
+| `DC_EXTERNAL_API_KEY` | 空 | 外部 API Key(**可选**);留空=不鉴权,配置后 `/api/v1/external/*` 按 `X-API-Key` 校验。管理端设置可持久化覆盖 |
 | `DC_EXTERNAL_PUBLIC_BASE_URL` | 空 | 服务公开地址的首次启动/灾备默认值；管理端设置可覆盖 |
 | `DC_EXTERNAL_MAX_UPLOAD_MB` | `50` | 外部接口单文件上限默认值；管理端设置可覆盖 |
 | `DC_EXTERNAL_IMAGE_DPI` | `144` | 外部高亮 PNG DPI 默认值；管理端设置可覆盖 |
@@ -235,7 +240,7 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 | `callback_url` | 异步必填,同步可选 | HTTP/HTTPS 完成回调地址 |
 | `sync` | 否 | `true` 同步模式;缺省=`false` 异步模式 |
 
-所有请求都必须带 `X-API-Key` 头。
+所有请求**默认**需带 `X-API-Key` 头;若服务端未配置 `DC_EXTERNAL_API_KEY`(管理端「LLM 配置 → 外部 API」留空),则跳过鉴权直接放行,适用于内网/可信环境。
 
 #### 异步模式(默认,`sync` 缺省或 `false`)
 

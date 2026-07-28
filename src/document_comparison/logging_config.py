@@ -17,14 +17,25 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from .config import settings
+from .observability import get_log_context
 
-_FMT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+_FMT = "%(asctime)s | %(levelname)-7s | %(name)s | task=%(task_id)s req=%(request_id)s | %(message)s"
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 # 噪音较大的第三方库统一压到 WARNING
 _NOISY_LOGGERS = ("httpx", "httpcore", "urllib3", "pymupdf", "fitz", "openai")
 
 _configured = False
+
+
+class _ContextFilter(logging.Filter):
+    """为每条日志补齐 task/request 标识，未关联时显式显示为 ``-``。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        context = get_log_context()
+        record.task_id = context.get("task_id", "-")
+        record.request_id = context.get("request_id", "-")
+        return True
 
 
 def setup_logging(force: bool = False) -> None:
@@ -50,6 +61,7 @@ def setup_logging(force: bool = False) -> None:
     console = logging.StreamHandler(stream=sys.stderr)
     console.setFormatter(formatter)
     console.setLevel(level)
+    console.addFilter(_ContextFilter())
     root.addHandler(console)
 
     # —— 滚动文件(storage_dir/logs/app.log)——
@@ -65,6 +77,7 @@ def setup_logging(force: bool = False) -> None:
         )
         file_handler.setFormatter(formatter)
         file_handler.setLevel(level)
+        file_handler.addFilter(_ContextFilter())
         root.addHandler(file_handler)
     except OSError as exc:
         # 此时日志系统尚未完全就绪,直接 stderr 提示

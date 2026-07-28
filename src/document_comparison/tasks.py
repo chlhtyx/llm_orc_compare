@@ -15,6 +15,7 @@ import logging
 import uuid
 import time
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 
 from .config import settings
@@ -23,7 +24,7 @@ from .models import TaskInfo, TamperReport, TextDiffReport, StatementSummaryRepo
 from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
 from .statement_pipeline import run_statement_pipeline
-from .observability import llm_call_collector
+from .observability import llm_call_collector, log_context
 from .external_api import build_external_result, render_external_highlight_images
 from .storage import compared_pdf_path, effective_target_path
 from . import webhook
@@ -76,6 +77,16 @@ def _is_milestone(stage: str) -> bool:
     if stage.startswith(_MILESTONE_STAGE_PREFIX) and stage.endswith("_done"):
         return True
     return False
+
+
+def _with_task_log_context(fn):
+    """让一个任务执行期间的所有日志自动带 task_id。"""
+    @wraps(fn)
+    async def wrapped(self, task_id: str, *args, **kwargs):
+        task = self._tasks.get(task_id)
+        with log_context(task_id=task_id, task_kind=task.kind if task else None):
+            return await fn(self, task_id, *args, **kwargs)
+    return wrapped
 
 
 @dataclass
@@ -163,10 +174,11 @@ class TaskManager:
             external_request=external_request,
             sync_mode=sync_mode,
         )
-        logger.info(
-            "task created task_id=%s kind=%s callback=%s",
-            task_id, kind, "yes" if callback_url else "no",
-        )
+        with log_context(task_id=task_id, task_kind=kind):
+            logger.info(
+                "task created kind=%s callback=%s",
+                kind, "yes" if callback_url else "no",
+            )
         # PG 写库失败不抛(任务本身仍可在内存运行,只是历史记录缺失)
         self._safe_db(
             db_repo.create_task,
@@ -237,8 +249,19 @@ class TaskManager:
         if not records:
             return
         await self._db_thread(db_repo.save_llm_calls_batch, task_id, list(records))
-        logger.info("task %s collected %d llm call record(s)", task_id, len(records))
+        failures = sum(
+            record.error is not None
+            or record.status_code is None
+            or record.status_code >= 400
+            for record in records
+        )
+        kinds = sorted({record.kind for record in records})
+        logger.info(
+            "task model calls persisted count=%s failures=%s kinds=%s",
+            len(records), failures, kinds,
+        )
 
+    @_with_task_log_context
     async def run(
         self, task_id: str, word_path: str, pdf_path: str,
         *, enable_llm_judge: bool = False, ocr_backend: str | None = None,
@@ -251,7 +274,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start task_id=%s word=%s pdf=%s llm_direct=%s llm_alignment=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", task_id, word_path, pdf_path, enable_llm_direct_diff, enable_llm_alignment, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
+        logger.info("task start input=word+pdf llm_direct=%s llm_alignment=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", enable_llm_direct_diff, enable_llm_alignment, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
         await self._db_thread(
             db_repo.update_task_status, task_id, "running"
         )
@@ -302,9 +325,9 @@ class TaskManager:
             )
             self._record_milestone(task, "done", 1.0)
             logger.info(
-                "task done task_id=%s risk=%s diffs=%s unmatched=%s",
-                task_id, report.overall_risk,
-                len(report.diffs), len(report.unmatched_clauses),
+                "task done risk=%s diffs=%s unmatched=%s stage_timings=%s",
+                report.overall_risk, len(report.diffs), len(report.unmatched_clauses),
+                task.info.stage_timings,
             )
             if task.external_request and task.document_no:
                 external = build_external_result(task_id, task.document_no, report)
@@ -324,7 +347,7 @@ class TaskManager:
             task.info.status = "failed"
             task.info.error = str(e)
             task.push_event("failed", task.info.progress)
-            logger.exception("task failed task_id=%s", task_id)
+            logger.exception("task failed")
             await self._db_thread(
                 db_repo.update_task_status, task_id, "failed",
                 error=str(e),
@@ -349,10 +372,11 @@ class TaskManager:
                 finished=True,
             )
             logger.info(
-                "task finished task_id=%s status=%s elapsed=%ss",
-                task_id, task.info.status, task.info.elapsed,
+                "task finished status=%s elapsed=%ss stage_timings=%s",
+                task.info.status, task.info.elapsed, task.info.stage_timings,
             )
 
+    @_with_task_log_context
     async def run_raw(
         self, task_id: str, word_path: str, pdf_path: str,
         *, char_level: bool = True, ocr_backend: str | None = None,
@@ -361,7 +385,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start(raw) task_id=%s word=%s pdf=%s ocr_backend=%s", task_id, word_path, pdf_path, ocr_backend)
+        logger.info("task start(raw) input=word+pdf ocr_backend=%s", ocr_backend)
         await self._db_thread(
             db_repo.update_task_status, task_id, "running"
         )
@@ -389,8 +413,8 @@ class TaskManager:
             )
             self._record_milestone(task, "done", 1.0)
             logger.info(
-                "task done(raw) task_id=%s hunks=%s similarity=%s",
-                task_id, len(report.hunks), report.stats.get("similarity"),
+                "task done(raw) hunks=%s similarity=%s stage_timings=%s",
+                len(report.hunks), report.stats.get("similarity"), task.info.stage_timings,
             )
             await self._fire_callback(task_id, "done", {
                 "stats": report.stats,
@@ -400,7 +424,7 @@ class TaskManager:
             task.info.status = "failed"
             task.info.error = str(e)
             task.push_event("failed", task.info.progress)
-            logger.exception("task failed(raw) task_id=%s", task_id)
+            logger.exception("task failed(raw)")
             await self._db_thread(
                 db_repo.update_task_status, task_id, "failed",
                 error=str(e),
@@ -417,10 +441,11 @@ class TaskManager:
                 finished=True,
             )
             logger.info(
-                "task finished(raw) task_id=%s status=%s elapsed=%ss",
-                task_id, task.info.status, task.info.elapsed,
+                "task finished(raw) status=%s elapsed=%ss stage_timings=%s",
+                task.info.status, task.info.elapsed, task.info.stage_timings,
             )
 
+    @_with_task_log_context
     async def run_statement(
         self, task_id: str, pdf_paths: list[str], file_names: list[str],
         *, ocr_backend: str | None = None,
@@ -432,8 +457,8 @@ class TaskManager:
         if task is None:
             return
         logger.info(
-            "task start(statement) task_id=%s files=%s ocr_backend=%s",
-            task_id, len(pdf_paths), ocr_backend,
+            "task start(statement) files=%s ocr_backend=%s",
+            len(pdf_paths), ocr_backend,
         )
         await self._db_thread(
             db_repo.update_task_status, task_id, "running"
@@ -464,8 +489,8 @@ class TaskManager:
             )
             self._record_milestone(task, "done", 1.0)
             logger.info(
-                "task done(statement) task_id=%s grand_total=%s verdict=%s",
-                task_id, report.grand_total, report.verdict,
+                "task done(statement) grand_total=%s verdict=%s stage_timings=%s",
+                report.grand_total, report.verdict, task.info.stage_timings,
             )
             await self._fire_callback(task_id, "done", {
                 "grand_total": report.grand_total,
@@ -476,7 +501,7 @@ class TaskManager:
             task.info.status = "failed"
             task.info.error = str(e)
             task.push_event("failed", task.info.progress)
-            logger.exception("task failed(statement) task_id=%s", task_id)
+            logger.exception("task failed(statement)")
             await self._db_thread(
                 db_repo.update_task_status, task_id, "failed",
                 error=str(e),
@@ -493,8 +518,8 @@ class TaskManager:
                 finished=True,
             )
             logger.info(
-                "task finished(statement) task_id=%s status=%s elapsed=%ss",
-                task_id, task.info.status, task.info.elapsed,
+                "task finished(statement) status=%s elapsed=%ss stage_timings=%s",
+                task.info.status, task.info.elapsed, task.info.stage_timings,
             )
 
     def _make_progress_cb(self, task: Task):

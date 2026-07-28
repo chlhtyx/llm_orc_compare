@@ -36,7 +36,12 @@ from ..models import (
     TextDiffReport,
     TruncationRecord,
 )
-from ..observability import log_model_failure, log_model_request, log_model_response
+from ..observability import (
+    log_model_failure,
+    log_model_request,
+    log_model_response,
+    log_value_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +131,7 @@ def llm_text_diff(
     content = _post_judge_chat(system_prompt, user_content)
     parsed = _extract_json(content)
     if not isinstance(parsed, dict):
-        raise ValueError(f"LLM 比对返回非 JSON 对象: {content[:200]}")
+        raise ValueError(f"LLM 比对返回非 JSON 对象: {log_value_summary(content)}")
 
     hunks = _build_hunks(parsed.get("hunks"), char_level=char_level)
     similarity = _coerce_similarity(parsed.get("similarity"))
@@ -353,7 +358,7 @@ def _extract_json(text: str) -> Any:
             return json.loads(m.group(0))
         except json.JSONDecodeError:
             pass
-    logger.warning("llm diff json parse failed; raw=%s", text[:200])
+    logger.warning("llm diff json parse failed; response_summary=%s", log_value_summary(text))
     return text
 
 

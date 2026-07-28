@@ -7,7 +7,7 @@ services:
     # 应用通过 postgres:5432(容器内端口 + 服务名)连接。
     # 如需从宿主机直连 DB(调试),取消注释下面 ports,端口用 25432 避免与本机 PG 冲突。
     ports:
-      - "25432:5432"
+      - "15433:5432"
     environment:
       POSTGRES_DB: doc_compare
       POSTGRES_USER: dc

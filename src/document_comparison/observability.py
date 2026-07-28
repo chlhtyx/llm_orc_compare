@@ -59,6 +59,36 @@ current_llm_collector: contextvars.ContextVar[list[LlmCallRecord] | None] = (
     contextvars.ContextVar("current_llm_collector", default=_default_collector())
 )
 
+
+# —— 日志关联上下文:由 HTTP 中间件和 TaskManager 注入,由 handler 统一渲染 ——
+
+current_log_context: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "current_log_context", default={}
+)
+
+
+@contextmanager
+def log_context(**fields: str | None) -> Iterator[None]:
+    """在当前执行链附加安全的日志关联字段。
+
+    ``ContextVar`` 会随 ``asyncio.create_task`` 和 ``asyncio.to_thread`` 传播；OCR
+    的受控子线程已经通过 ``ctx.run`` 传播 context，因此同一任务的阶段、模型和
+    回调日志都会带上相同的 task/request 标识。None 不覆盖父上下文。
+    """
+    current = current_log_context.get()
+    merged = dict(current)
+    merged.update({key: value for key, value in fields.items() if value is not None})
+    token = current_log_context.set(merged)
+    try:
+        yield
+    finally:
+        current_log_context.reset(token)
+
+
+def get_log_context() -> dict[str, str]:
+    """供 logging handler 读取当前关联上下文，返回副本避免被意外修改。"""
+    return dict(current_log_context.get())
+
 # 对话型 LLM kind 白名单;embedding 不收集(文本→向量,量太大)。
 _COLLECTED_KINDS = frozenset(
     {
@@ -139,6 +169,40 @@ def _truncate(value: Any, max_chars: int) -> Any:
     return serialized[:max_chars] + "…(truncated)"
 
 
+def _model_log_summary(value: Any) -> dict[str, Any]:
+    """生成可排障、但不含合同原文的模型请求/响应日志摘要。"""
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    summary: dict[str, Any] = {
+        "type": type(value).__name__,
+        "chars": len(serialized),
+        "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
+    if not isinstance(value, dict):
+        return summary
+
+    summary["keys"] = sorted(str(key) for key in value)[:12]
+    # 这些字段均为模型调用控制面信息，不包含提示词、识别文本或合同内容。
+    for key in ("model", "max_tokens", "temperature", "page", "page_index"):
+        if key in value:
+            summary[key] = value[key]
+    finish_reason = value.get("finish_reason")
+    choices = value.get("choices")
+    if not finish_reason and isinstance(choices, list):
+        finish_reason = [
+            item.get("finish_reason")
+            for item in choices
+            if isinstance(item, dict) and item.get("finish_reason") is not None
+        ]
+    if finish_reason:
+        summary["finish_reason"] = finish_reason
+    return summary
+
+
+def log_value_summary(value: Any) -> dict[str, Any]:
+    """返回适合日志的内容摘要，供模型响应解析失败分支复用。"""
+    return _model_log_summary(value)
+
+
 def log_model_request(
     logger: logging.Logger, kind: str, url: str, payload: dict[str, Any], attempt: int
 ) -> float:
@@ -149,11 +213,11 @@ def log_model_request(
     """
     safe_payload = _safe_model_value(payload)
     logger.info(
-        "model request kind=%s attempt=%s url=%s payload=%s",
+        "model request kind=%s attempt=%s url=%s summary=%s",
         kind,
         attempt,
         url,
-        json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(_model_log_summary(safe_payload), ensure_ascii=False, separators=(",", ":")),
     )
     collector = current_llm_collector.get()
     if collector is not None and kind in _COLLECTED_KINDS:
@@ -179,11 +243,11 @@ def log_model_response(
     elapsed = time.perf_counter() - started_at
     safe_value = _safe_model_value(value)
     logger.info(
-        "model response kind=%s status=%s elapsed=%.3fs value=%s",
+        "model response kind=%s status=%s elapsed=%.3fs summary=%s",
         kind,
         status_code,
         elapsed,
-        json.dumps(safe_value, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(_model_log_summary(safe_value), ensure_ascii=False, separators=(",", ":")),
     )
     _finalize_record(kind, status_code=status_code, elapsed_s=elapsed,
                      response=_truncate(safe_value, _MAX_RESPONSE_CHARS), error=None)
