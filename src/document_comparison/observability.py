@@ -106,6 +106,7 @@ _COLLECTED_KINDS = frozenset(
         "alignment",
         "llm-diff",
         "statement-column",
+        "statement-amount",
     }
 )
 

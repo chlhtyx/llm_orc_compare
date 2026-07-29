@@ -362,15 +362,181 @@ def test_llm_fallback_failure_marks_needs_review(monkeypatch, tmp_path):
     import document_comparison.statement_pipeline as sp
     monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
 
-    # mock LLM 返回 None(失败)
+    # mock 列指认返回 None(失败)
     import document_comparison.statement.llm_column_detect as lcd
     monkeypatch.setattr(
         lcd, "llm_detect_amount_columns", lambda png, headers, **kwargs: None
+    )
+    # mock 第三级 LLM 金额抽取也失败(空 list)→ 三级全空
+    import document_comparison.statement.llm_amount_extract as lae
+    monkeypatch.setattr(
+        lae, "llm_extract_amounts", lambda *a, **k: None,
     )
 
     report = run_statement_pipeline([pdf_path], ["a.pdf"])
     assert report.verdict == "needs_review"
     assert report.column_detection_summary.get("none", 0) >= 1
+
+
+# —— 第三级:LLM 金额抽取(发票纯数字场景)——
+
+def test_invoice_amount_extraction_cascade(monkeypatch, tmp_path):
+    """正则抽空(纯数字无单位)+ 列指认也抽空 → 第三级 LLM 金额抽取成功,代码累加。
+
+    模拟发票:表头乱码("日期","Money")、金额是纯数字("1680.00"/"640.00")无单位,
+    正则与列指认都无法定位 → 进入第三级,LLM 抽取 + grounding 校验后代码求和。
+    """
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
+    # content 字段提供 grounding 文本(两个金额都在其中)
+    block = Block(
+        block_id="p0-t0", page_index=0, label="table",
+        content="日期 | Money\n2024 | 1680.00\n2025 | 640.00",
+        table=TableStructure(
+            headers=["日期", "Money"],
+            rows=[["2024", "1680.00"], ["2025", "640.00"]],
+        ),
+    )
+    reader = _make_mock_reader([[block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+
+    import document_comparison.statement_pipeline as sp
+    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+
+    # 列指认失败(表头无金额关键词)
+    import document_comparison.statement.llm_column_detect as lcd
+    monkeypatch.setattr(
+        lcd, "llm_detect_amount_columns", lambda png, headers, **kwargs: None
+    )
+    # 第三级 LLM 金额抽取成功(模拟 grounding 通过的 items)
+    from document_comparison.models import StatementAmountItem
+    import document_comparison.statement.llm_amount_extract as lae
+
+    def fake_extract(png, headers, rows, grounding, **kw):
+        # 只在 grounding 含这些值时返回(模拟 grounding 校验已通过)
+        assert "1680.00" in grounding
+        assert "640.00" in grounding
+        return [
+            StatementAmountItem(value=1680.0, canonical="CNY:1680", column="金额(llm)"),
+            StatementAmountItem(value=640.0, canonical="CNY:640", column="金额(llm)"),
+        ]
+    monkeypatch.setattr(lae, "llm_extract_amounts", fake_extract)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert report.grand_total == 2320.0  # 1680 + 640
+    assert report.verdict != "changed"
+    assert report.column_detection_summary.get("llm") == 1
+    assert report.files[0].total_amount == 2320.0
+
+
+def test_invoice_realistic_header_amount_plain_digits(monkeypatch, tmp_path):
+    """真实发票场景的回归:表头 OCR 出了"金额"列(启发式列定位成功),但单元格是
+    纯数字无单位("1680.00"),正则抽不出 → 必须越过"列定位成功"继续触发第三级。
+
+    这是 _has_amounts 判定修复的核心:旧逻辑用 if column_source 判断会在此
+    直接 return(grand_total 永远 0),必须改用 column_sums/declared_totals 判定。
+    """
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
+    block = Block(
+        block_id="p0-t0", page_index=0, label="table",
+        content="货物名称 | 金额\nA | 1680.00\nB | 640.00",
+        table=TableStructure(
+            headers=["货物名称", "金额"],  # 表头命中启发式 amount
+            rows=[["A", "1680.00"], ["B", "640.00"]],  # 但纯数字无单位
+        ),
+    )
+    reader = _make_mock_reader([[block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+
+    import document_comparison.statement_pipeline as sp
+    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+
+    # 第三级 LLM 金额抽取必须被调用;断言被调用且金额正确
+    from document_comparison.models import StatementAmountItem
+    import document_comparison.statement.llm_amount_extract as lae
+    extract_called = {"count": 0}
+
+    def fake_extract(png, headers, rows, grounding, **kw):
+        extract_called["count"] += 1
+        return [
+            StatementAmountItem(value=1680.0, canonical="CNY:1680", column="金额"),
+            StatementAmountItem(value=640.0, canonical="CNY:640", column="金额"),
+        ]
+    monkeypatch.setattr(lae, "llm_extract_amounts", fake_extract)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    # 关键:第三级被触发了(若用旧 column_source 判断,count 会是 0)
+    assert extract_called["count"] == 1
+    assert report.grand_total == 2320.0
+
+
+def test_invoice_amount_extraction_all_fail(monkeypatch, tmp_path):
+    """正则 + 列指认 + 第三级 LLM 金额抽取全失败 → needs_review。"""
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
+    block = _make_table_block(
+        headers=["日期", "Money"],
+        rows=[["2024", "1680.00"]],
+        page_index=0,
+    )
+    reader = _make_mock_reader([[block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+
+    import document_comparison.statement_pipeline as sp
+    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+
+    import document_comparison.statement.llm_column_detect as lcd
+    monkeypatch.setattr(
+        lcd, "llm_detect_amount_columns", lambda png, headers, **kwargs: None
+    )
+    import document_comparison.statement.llm_amount_extract as lae
+    monkeypatch.setattr(lae, "llm_extract_amounts", lambda *a, **k: None)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert report.grand_total == 0.0
+    assert report.verdict == "needs_review"
+    assert report.column_detection_summary.get("none", 0) >= 1
+
+
+def test_whole_page_fallback_when_no_table_block(monkeypatch, tmp_path):
+    """OCR 没把发票解析成结构化表格(label="text" 而非 table),但文本里含金额
+    → 整页文本兜底:把整页 OCR 文本喂给 LLM 抽取金额。
+
+    图片型发票的典型场景:OCR 输出纯文本块,无 TableStructure。
+    """
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
+    # OCR 只产出一个 text block(没有 table 结构),content 里含金额
+    text_block = Block(
+        block_id="p0-b0", page_index=0, label="text",
+        content="发票\n货物名称 金额\nA 1680.00\nB 640.00\n价税合计 2320.00",
+    )
+    reader = _make_mock_reader([[text_block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+
+    import document_comparison.statement_pipeline as sp
+    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+
+    # 整页兜底调用 llm_extract_amounts(此时 merged_tables 为空,不经过 _summarize_one_table)
+    from document_comparison.models import StatementAmountItem
+    import document_comparison.statement.llm_amount_extract as lae
+    extract_called = {"count": 0}
+
+    def fake_extract(png, headers, rows, grounding, **kw):
+        extract_called["count"] += 1
+        # grounding 是整页文本,金额都在其中
+        assert "1680.00" in grounding
+        return [
+            StatementAmountItem(value=1680.0, canonical="CNY:1680", column="金额(llm)"),
+            StatementAmountItem(value=640.0, canonical="CNY:640", column="金额(llm)"),
+        ]
+    monkeypatch.setattr(lae, "llm_extract_amounts", fake_extract)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert extract_called["count"] == 1  # 整页兜底被触发
+    assert report.grand_total == 2320.0
+    assert report.column_detection_summary.get("llm") == 1
 
 
 # —— 进度回调 ——

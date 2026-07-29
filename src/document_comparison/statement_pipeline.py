@@ -5,11 +5,13 @@
     ① get_ocr_engine → TrustedPDFReader(原生优先 + 视觉 OCR 逐页降级)
     ② 抽取所有 label="table" 且 table is not None 的 Block
     ③ merge_cross_page_tables 合并跨页续表
-    ④ 对每张表 summarize_table:
-       - 启发式 detect_amount_columns 命中 → 代码求和
-       - 启发式失败 + enable_llm_column_detection → 渲染该页 PNG 调
-         llm_detect_amount_columns 兜底指认列,再代码求和
-       - LLM 也失败 → column_source="none",标 needs_review
+    ④ 对每张表三级级联抽取金额:
+       a. 启发式 detect_amount_columns 命中 → 代码求和(对帐单场景,免费确定)
+       b. 启发式失败 + enable_llm_column_detection → llm_detect_amount_columns
+          兜底指认列,再代码求和
+       c. 列指认仍抽空(典型:发票纯数字无单位 + 表头乱码)→ llm_extract_amounts
+          直接抽取数据行金额,逐值 grounding 校验(OCR 文本逐字溯源)通过后由
+          代码累加;失败/无金额 → column_source="none",标 needs_review
   多文件聚合 → grand_total / grand_totals_by_column / verdict / reasons
 
 与现有 raw_pipeline 的关键区别:
@@ -28,6 +30,7 @@ from typing import Callable
 from .config import Settings, settings
 from .models import (
     Block,
+    StatementAmountItem,
     StatementFileSummary,
     StatementSummaryReport,
     StatementTableSummary,
@@ -131,10 +134,21 @@ def _process_one_pdf(
                 if _is_table_block(block):
                     tables_with_page.append((block.table, block.page_index))
 
+        # 顶层诊断:OCR 产出了什么、有没有 table block。定位"识别不到金额"时,这是
+        # 判断卡在哪一层(OCR 没出表 / 出了表但抽空 / LLM 兜底失败)的第一手信息。
+        page_block_summary = {
+            i: [(b.label, bool(b.table), len(b.content)) for b in blocks]
+            for i, blocks in enumerate(pages_blocks)
+        }
+        logger.info(
+            "statement ocr output file=%s pages=%s table_blocks=%s blocks_per_page=%s",
+            file_name, len(pages_blocks), len(tables_with_page), page_block_summary,
+        )
+
         # 合并跨页续表
         merged_tables = merge_cross_page_tables(tables_with_page)
 
-        # 预渲染各页 PNG(LLM 兜底列指认用;按需才渲染,避免无谓开销)
+        # 预渲染各页 PNG(LLM 兜底列指认/金额抽取用;按需才渲染,避免无谓开销)
         page_pngs: dict[int, bytes] = {}
         if enable_llm_column_detection:
             try:
@@ -142,6 +156,13 @@ def _process_one_pdf(
                 page_pngs = {i: png for i, png in enumerate(png_list)}
             except Exception as exc:  # noqa: BLE001
                 logger.warning("render_pages failed for llm fallback: %s", exc)
+
+        # 各页 OCR 纯文本(所有 block.content 拼接),作为 LLM 金额抽取的 grounding
+        # 逐字溯源依据:LLM 返回的每个金额必须能在其中找到,否则丢弃。
+        page_groundings: dict[int, str] = {
+            i: "\n".join(b.content for b in blocks if b.content)
+            for i, blocks in enumerate(pages_blocks)
+        }
 
         table_summaries: list[StatementTableSummary] = []
         recognition_needs_review = any(not d.reliable for d in diagnostics)
@@ -156,8 +177,35 @@ def _process_one_pdf(
                 user_keywords=amount_column_keywords,
                 enable_llm_column_detection=enable_llm_column_detection,
                 page_pngs=page_pngs,
+                page_groundings=page_groundings,
             )
             table_summaries.append(summary)
+
+        # 整页文本兜底:OCR 未把内容解析成结构化表格(常见于图片型发票/收据),但 OCR
+        # 文本里可能含金额。此时把每页 OCR 文本作为一张"隐式表"喂给 LLM 金额抽取,
+        # 避免因"没出 table block"直接判 needs_review 而漏掉所有金额。
+        if (
+            enable_llm_column_detection
+            and not merged_tables
+            and any(page_groundings.values())
+        ):
+            logger.info(
+                "statement whole-page fallback file=%s (no table block, try LLM on page text)",
+                file_name,
+            )
+            for page_index, page_text in page_groundings.items():
+                if not page_text or not page_text.strip():
+                    continue
+                whole_summary = _extract_whole_page_amounts(
+                    page_text,
+                    png=page_pngs.get(page_index, b""),
+                    file_index=file_index,
+                    file_name=file_name,
+                    page_index=page_index,
+                    table_index=len(table_summaries),
+                )
+                if whole_summary is not None:
+                    table_summaries.append(whole_summary)
 
         # 单 PDF 合计
         file_total = Decimal("0")
@@ -186,6 +234,37 @@ def _process_one_pdf(
         )
 
 
+def _has_amounts(summary: StatementTableSummary) -> bool:
+    """判断 summary 是否真正抽到了金额(而非仅完成列定位)。
+
+    发票场景的关键:表头"金额"列能被启发式定位(column_source 非空),但单元格是
+    纯数字无单位,正则抽不出 → column_sums/declared_totals 都空。此时不能认为
+    "已处理完成",必须继续走 LLM 兜底。
+    """
+    return bool(summary.column_sums or summary.declared_totals)
+
+
+def _log_summary_stage(stage: str, summary: StatementTableSummary) -> None:
+    """记录各级抽取的诊断信息,便于分析"识别不到金额"的根因。
+
+    日志含:列定位方式(column_source)、实抽金额(column_sums)、声明合计(declared_totals)、
+    明细数。不记录单元格原文(避免敏感金额明细入日志)。
+    """
+    logger.info(
+        "statement extract stage=%s file=%s table=%s page=%s "
+        "column_source=%s column_sums=%s declared_totals=%s items=%s headers=%s",
+        stage,
+        summary.file_name,
+        summary.table_index,
+        summary.page_index,
+        summary.column_source,
+        summary.column_sums,
+        summary.declared_totals,
+        len(summary.items),
+        summary.headers,
+    )
+
+
 def _summarize_one_table(
     table: TableStructure,
     *,
@@ -196,8 +275,15 @@ def _summarize_one_table(
     user_keywords: list[str] | None,
     enable_llm_column_detection: bool,
     page_pngs: dict[int, bytes],
+    page_groundings: dict[int, str],
 ) -> StatementTableSummary:
-    """对单张表做启发式列定位 → (失败时)LLM 兜底 → 代码求和。"""
+    """对单张表做三级级联金额抽取,代码求和。
+
+    1. 启发式 detect_amount_columns(对帐单:带元/万元/¥/中文大写)
+    2. LLM 列指认 → 代码按列求和(表头非标但单元格金额仍带单位)
+    3. LLM 金额抽取 + grounding 校验 → 代码累加(发票:纯数字无单位 + 表头乱码)
+    三级全部抽空 → column_source="none",标 needs_review。
+    """
     # 第 1 步:启发式
     summary = summarize_table(
         table,
@@ -207,12 +293,14 @@ def _summarize_one_table(
         page_index=page_index,
         user_keywords=user_keywords,
     )
+    # 启发式判定:看是否真正抽到了金额(而非仅列定位成功)。发票场景表头"金额"列
+    # 能定位,但单元格是纯数字无单位,正则抽不出 → column_sums 空,必须继续兜底。
+    _log_summary_stage("heuristic", summary)
 
-    # 启发式命中(有 column_sums 或 declared_totals)→ 直接用,不调 LLM
-    if summary.column_source:
+    if _has_amounts(summary):
         return summary
 
-    # 第 2 步:启发式失败,尝试 LLM 兜底
+    # 第 2 步:启发式未抽到金额,尝试 LLM 列指认
     if not enable_llm_column_detection:
         # 未启用兜底:重写 column_source 标记失败列(用全部 headers 标 none)
         summary.column_source = {
@@ -249,22 +337,150 @@ def _summarize_one_table(
         logger.warning("llm column detect error table=%s page=%s: %s", table_index, page_index, exc)
         llm_result = None
 
-    if not llm_result:
-        # LLM 也失败/无金额列 → 标 none
-        summary.column_source = {h: "none" for h in table.headers if h and h.strip()}
-        return summary
+    if llm_result:
+        # 列指认成功 → 用 LLM 给的列定位再代码求和
+        col_summary = summarize_table(
+            table,
+            file_index=file_index,
+            file_name=file_name,
+            table_index=table_index,
+            page_index=page_index,
+            user_keywords=None,
+            column_roles_override=dict(llm_result),
+            column_source_override={idx: "llm" for idx in llm_result},
+        )
+        _log_summary_stage("llm-column", col_summary)
+        # 列指认定位到了列,但单元格仍是纯数字无单位时仍抽不到钱 → 继续走第 3 步
+        if _has_amounts(col_summary):
+            return col_summary
+        summary = col_summary
 
-    # LLM 指认成功 → 用 LLM 给的列定位再代码求和
-    summary = summarize_table(
+    # 第 3 步:列指认仍未抽到金额(典型:发票纯数字无单位 + 表头乱码)→ LLM 直接抽取
+    # 数据行金额,逐值 grounding 校验通过后由代码累加。
+    amount_items = _llm_extract_amount_items(
         table,
+        png=png,
+        page_groundings=page_groundings.get(page_index, ""),
         file_index=file_index,
         file_name=file_name,
         table_index=table_index,
         page_index=page_index,
-        user_keywords=None,
-        column_roles_override=dict(llm_result),
-        column_source_override={idx: "llm" for idx in llm_result},
     )
+    if amount_items:
+        # 把通过 grounding 校验的金额写入 column_sums(代码累加,不破坏聚合路径);
+        # column_source 标 "llm" 表明本表金额由 LLM 兜底抽取得到。
+        col_name = amount_items[0].column or "金额(llm)"
+        total = Decimal("0")
+        for it in amount_items:
+            total += Decimal(str(it.value))
+        summary.column_sums = {col_name: float(total)}
+        summary.items = amount_items
+        summary.column_source = {col_name: "llm"}
+        _log_summary_stage("llm-amount", summary)
+        return summary
+
+    # 三级全部抽空 → 标 none(needs_review)
+    summary.column_source = {h: "none" for h in table.headers if h and h.strip()}
+    _log_summary_stage("exhausted", summary)
+    return summary
+
+
+def _llm_extract_amount_items(
+    table: TableStructure,
+    *,
+    png: bytes,
+    page_groundings: str,
+    file_index: int,
+    file_name: str,
+    table_index: int,
+    page_index: int,
+) -> list[StatementAmountItem]:
+    """第 3 级:LLM 直接抽取数据行金额(仅返回通过 grounding 校验的项)。
+
+    失败/异常返回空 list(由调用方标 needs_review)。求和仍由调用方用 Decimal 完成。
+    """
+    # 延迟导入(LLM 引擎实例化需要 api_base 配置)
+    from .statement.llm_amount_extract import llm_extract_amounts
+
+    try:
+        logger.info(
+            "statement amount fallback file_index=%s table_index=%s page_index=%s header_count=%s row_count=%s",
+            file_index, table_index, page_index, len(table.headers), len(table.rows),
+        )
+        return llm_extract_amounts(
+            png,
+            list(table.headers),
+            list(table.rows),
+            page_groundings,
+            file_index=file_index,
+            file_name=file_name,
+            table_index=table_index,
+            page_index=page_index,
+        ) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("llm amount extract error table=%s page=%s: %s", table_index, page_index, exc)
+        return []
+
+
+def _extract_whole_page_amounts(
+    page_text: str,
+    *,
+    png: bytes,
+    file_index: int,
+    file_name: str,
+    page_index: int,
+    table_index: int,
+) -> StatementTableSummary | None:
+    """整页文本兜底:OCR 未产出结构化表格时,把整页 OCR 文本作为"隐式表"喂给
+    LLM 金额抽取(图片型发票/收据的典型场景)。
+
+    grounding 即 page_text 本身,LLM 返回的每个金额必须能在其中逐字溯源。
+    成功返回带 column_sums 的 summary;无金额/失败返回 None。
+    """
+    from .statement.llm_amount_extract import llm_extract_amounts
+
+    # 把整页文本按行拆成"隐式表":headers 占位,rows 每行一段文本,
+    # 让 LLM 在全文范围内抽金额(而非限定在某张结构化表里)。
+    rows = [[line] for line in page_text.splitlines() if line.strip()]
+    if not rows:
+        return None
+    try:
+        items = llm_extract_amounts(
+            png,
+            ["全文"],
+            rows,
+            page_text,
+            file_index=file_index,
+            file_name=file_name,
+            table_index=table_index,
+            page_index=page_index,
+        ) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("whole-page amount extract error file=%s page=%s: %s", file_name, page_index, exc)
+        return None
+
+    if not items:
+        logger.info(
+            "whole-page amount extract no amounts file=%s page=%s",
+            file_name, page_index,
+        )
+        return None
+
+    col_name = items[0].column or "金额(llm)"
+    total = Decimal("0")
+    for it in items:
+        total += Decimal(str(it.value))
+    summary = StatementTableSummary(
+        file_index=file_index,
+        file_name=file_name,
+        table_index=table_index,
+        page_index=page_index,
+        headers=["全文"],
+        column_sums={col_name: float(total)},
+        items=items,
+        column_source={col_name: "llm"},
+    )
+    _log_summary_stage("whole-page", summary)
     return summary
 
 

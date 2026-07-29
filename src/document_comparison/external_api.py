@@ -48,9 +48,9 @@ def validate_callback_url(value: str) -> str:
     candidate = value.strip()
     parsed = urlsplit(candidate)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("callback_url 必须是有效的 HTTP/HTTPS 地址")
+        raise ValueError("url 必须是有效的 HTTP/HTTPS 地址")
     if parsed.username or parsed.password:
-        raise ValueError("callback_url 不允许包含用户名或密码")
+        raise ValueError("url 不允许包含用户名或密码")
     return candidate
 
 
