@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any
 
-from ..observability import log_value_summary
+from ..observability import log_value_summary, model_call_context
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,8 @@ _USER_PROMPT_TEMPLATE = (
 def llm_detect_amount_columns(
     png_bytes: bytes,
     headers: list[str],
+    *,
+    trace_context: dict[str, Any] | None = None,
 ) -> dict[int, str] | None:
     """启发式列定位失败时,让多模态 LLM 指认金额列。
 
@@ -58,10 +60,13 @@ def llm_detect_amount_columns(
     # 延迟导入,避免 statement 包在 OCR 引擎未配置时仍可被单元测试 import
     from ..ocr.llm import LLMOCREngine, _to_data_url  # type: ignore
 
+    engine = LLMOCREngine()
     headers_block = "\n".join(f"  [{i}] {h}" for i, h in enumerate(headers))
     data_url = _to_data_url(png_bytes)
 
     payload: dict[str, Any] = {
+        # 以前此兜底请求漏记 model，导致任务级调用明细无法据此复现配置。
+        "model": engine.model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {
@@ -79,14 +84,32 @@ def llm_detect_amount_columns(
         "enable_thinking": False,
     }
 
+    trace = {
+        "operation": "statement_amount_column_detection",
+        "headers": list(headers),
+        "header_count": len(headers),
+        "image_bytes": len(png_bytes),
+    }
+    if trace_context:
+        trace.update(trace_context)
+
     try:
-        engine = LLMOCREngine()
-        content = engine._post_chat(payload, kind="statement-column")
+        # trace 仅写入 task_llm_calls.payload._trace，不会被发送给模型服务。
+        with model_call_context(statement_column=trace):
+            content = engine._post_chat(payload, kind="statement-column")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("llm column detect failed: %s", exc)
+        logger.warning(
+            "llm column detect failed file_index=%s table_index=%s page_index=%s: %s",
+            trace.get("file_index"), trace.get("table_index"), trace.get("page_index"), exc,
+        )
         return None
 
-    return _parse_column_response(content, headers)
+    result = _parse_column_response(content, headers)
+    logger.info(
+        "llm column detect result file_index=%s table_index=%s page_index=%s columns=%s",
+        trace.get("file_index"), trace.get("table_index"), trace.get("page_index"), result,
+    )
+    return result
 
 
 def _parse_column_response(content: str, headers: list[str]) -> dict[int, str] | None:

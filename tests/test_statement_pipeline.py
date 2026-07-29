@@ -334,7 +334,9 @@ def test_llm_fallback_picks_up_columns(monkeypatch, tmp_path):
 
     # mock llm_detect_amount_columns 指认 index=1 为 amount 列
     import document_comparison.statement.llm_column_detect as lcd
-    monkeypatch.setattr(lcd, "llm_detect_amount_columns", lambda png, headers: {1: "amount"})
+    monkeypatch.setattr(
+        lcd, "llm_detect_amount_columns", lambda png, headers, **kwargs: {1: "amount"}
+    )
 
     report = run_statement_pipeline(
         [pdf_path], ["a.pdf"],
@@ -362,7 +364,9 @@ def test_llm_fallback_failure_marks_needs_review(monkeypatch, tmp_path):
 
     # mock LLM 返回 None(失败)
     import document_comparison.statement.llm_column_detect as lcd
-    monkeypatch.setattr(lcd, "llm_detect_amount_columns", lambda png, headers: None)
+    monkeypatch.setattr(
+        lcd, "llm_detect_amount_columns", lambda png, headers, **kwargs: None
+    )
 
     report = run_statement_pipeline([pdf_path], ["a.pdf"])
     assert report.verdict == "needs_review"

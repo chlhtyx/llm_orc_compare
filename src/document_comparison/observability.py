@@ -60,6 +60,13 @@ current_llm_collector: contextvars.ContextVar[list[LlmCallRecord] | None] = (
 )
 
 
+# 单次模型调用的业务上下文。它只会写入任务级模型调用明细，不会作为 HTTP
+# payload 发送给模型服务，也不会把原文写入常规 app.log。
+current_model_call_context: contextvars.ContextVar[dict[str, Any]] = (
+    contextvars.ContextVar("current_model_call_context", default={})
+)
+
+
 # —— 日志关联上下文:由 HTTP 中间件和 TaskManager 注入,由 handler 统一渲染 ——
 
 current_log_context: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
@@ -127,6 +134,23 @@ def llm_call_collector() -> Iterator[list[LlmCallRecord]]:
         yield collector
     finally:
         current_llm_collector.reset(token)
+
+
+@contextmanager
+def model_call_context(**fields: Any) -> Iterator[None]:
+    """为当前模型调用附加仅供审计明细使用的上下文。
+
+    适用于文件/页面/表格索引等不属于 OpenAI 请求体、但排查调用结果时不可缺少的
+    业务定位信息。调用方仍应避免放入证件号、金额明细等不必要的原文内容。
+    """
+    current = current_model_call_context.get()
+    merged = dict(current)
+    merged.update({key: value for key, value in fields.items() if value is not None})
+    token = current_model_call_context.set(merged)
+    try:
+        yield
+    finally:
+        current_model_call_context.reset(token)
 
 
 def _safe_model_value(value: Any) -> Any:
@@ -221,8 +245,15 @@ def log_model_request(
     )
     collector = current_llm_collector.get()
     if collector is not None and kind in _COLLECTED_KINDS:
+        # URL 和业务定位信息不是发给模型的参数，但与脱敏请求体一起持久化，便于
+        # 按一次具体调用复现问题。常规文件日志仍只写上面的安全摘要。
+        record_payload = dict(safe_payload)
+        record_payload["_request"] = {"url": url}
+        trace_context = current_model_call_context.get()
+        if trace_context:
+            record_payload["_trace"] = _safe_model_value(trace_context)
         collector.append(
-            LlmCallRecord(kind=kind, attempt=attempt, payload=safe_payload)
+            LlmCallRecord(kind=kind, attempt=attempt, payload=record_payload)
         )
     return time.perf_counter()
 
@@ -260,6 +291,7 @@ def log_model_failure(
     error: str,
     *,
     status_code: int | None = None,
+    response: Any = None,
 ) -> None:
     """记录模型调用失败(TransportError / 4xx / 重试耗尽),补全最近一条收集器记录。
 
@@ -267,15 +299,18 @@ def log_model_failure(
     error 字符串截断到 _MAX_ERROR_CHARS(对齐 ORM 列宽)。
     """
     elapsed = time.perf_counter() - started_at
+    safe_response = _safe_model_value(response)
     logger.warning(
-        "model failure kind=%s status=%s elapsed=%.3fs error=%s",
+        "model failure kind=%s status=%s elapsed=%.3fs error=%s response_summary=%s",
         kind,
         status_code,
         elapsed,
         error[:_MAX_ERROR_CHARS],
+        json.dumps(_model_log_summary(safe_response), ensure_ascii=False, separators=(",", ":")),
     )
     _finalize_record(kind, status_code=status_code, elapsed_s=elapsed,
-                     response=None, error=error[:_MAX_ERROR_CHARS])
+                     response=_truncate(safe_response, _MAX_RESPONSE_CHARS),
+                     error=error[:_MAX_ERROR_CHARS])
 
 
 def _finalize_record(

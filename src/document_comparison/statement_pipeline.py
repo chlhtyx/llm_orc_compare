@@ -232,7 +232,19 @@ def _summarize_one_table(
     from .statement.llm_column_detect import llm_detect_amount_columns
 
     try:
-        llm_result = llm_detect_amount_columns(png, list(table.headers))
+        logger.info(
+            "statement column fallback file_index=%s table_index=%s page_index=%s header_count=%s",
+            file_index, table_index, page_index, len(table.headers),
+        )
+        llm_result = llm_detect_amount_columns(
+            png,
+            list(table.headers),
+            trace_context={
+                "file_index": file_index,
+                "table_index": table_index,
+                "page_index": page_index,
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("llm column detect error table=%s page=%s: %s", table_index, page_index, exc)
         llm_result = None

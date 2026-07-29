@@ -114,6 +114,11 @@ export function getLlmConfig(): Promise<LlmConfig> {
   return request('/api/v1/config/llm')
 }
 
+/** 应用版本号(单一真相源:后端 document_comparison.__version__)。 */
+export function getAppVersion(): Promise<{ version: string }> {
+  return request('/api/v1/version')
+}
+
 export function updateLlmConfig(body: LlmConfigUpdate): Promise<{ status: string; config: LlmConfig }> {
   return request('/api/v1/config/llm', { method: 'PUT', body: JSON.stringify(body) })
 }

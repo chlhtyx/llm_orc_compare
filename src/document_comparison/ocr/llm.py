@@ -300,6 +300,7 @@ class LLMOCREngine:
                             logger, kind, request_started,
                             f"transient HTTP {resp.status_code}",
                             status_code=resp.status_code,
+                            response=resp.text,
                         )
                         logger.warning(
                             "%s transient http status=%s attempt=%s/%s",
@@ -312,6 +313,7 @@ class LLMOCREngine:
                             log_model_failure(
                                 logger, kind, request_started, str(exc),
                                 status_code=resp.status_code,
+                                response=resp.text,
                             )
                             raise
                         data = resp.json()

@@ -31,6 +31,26 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+def test_version_endpoint(client):
+    """GET /api/v1/version 始终返回一个非空版本字符串(真相源:settings.version)。"""
+    r = client.get("/api/v1/version")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["version"], str)
+    assert body["version"]
+
+
+def test_version_endpoint_follows_dc_version(client, monkeypatch):
+    """DC_VERSION 是真正的单一真相源:改 settings.version 端点立即跟随。
+
+    镜像 tag(${DC_VERSION})与前端显示应同源,改一处即同步。
+    """
+    monkeypatch.setattr(settings, "version", "9.9.9")
+    r = client.get("/api/v1/version")
+    assert r.status_code == 200
+    assert r.json()["version"] == "9.9.9"
+
+
 def test_compare_rejects_non_docx_source(client):
     import io
 

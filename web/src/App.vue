@@ -1,8 +1,20 @@
 <script setup lang="ts">
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { getAppVersion } from '@/api/config'
 
 const route = useRoute()
+
+// 版本号来自后端 __version__,接口失败时静默不显示(装饰信息,不阻塞主页面)。
+const version = ref<string>('')
+onMounted(async () => {
+  try {
+    const data = await getAppVersion()
+    if (data?.version) version.value = data.version
+  } catch {
+    /* 忽略:版本号缺失不影响功能 */
+  }
+})
 const activeName = computed(() => {
   const name = String(route.name ?? '')
   if (name === 'report' || name === 'raw-report' || name === 'statement-report') return name
@@ -52,7 +64,19 @@ const reportHref = computed(() => {
       <RouterView />
     </main>
     <footer class="app-foot">
-      <span>Document Comparison · LLM OCR</span>
+      <span class="app-foot-left">Document Comparison · LLM OCR</span>
+      <span v-if="version" class="app-version">v{{ version }}</span>
     </footer>
   </div>
 </template>
+
+<style scoped>
+.app-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.app-version {
+  font-size: 12px;
+}
+</style>

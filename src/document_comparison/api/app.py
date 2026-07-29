@@ -274,7 +274,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
        title="文档比对 API",
         description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",
-       version="0.1.0",
+       version=settings.version,
     )
 
     app.add_middleware(
@@ -360,6 +360,11 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/api/v1/version")
+    async def version():
+        """返回应用版本号(单一真相源:.env 的 DC_VERSION;回退到 package __version__)。"""
+        return {"version": settings.version}
 
     @app.get("/api/v1/config/llm")
     async def get_llm_config():

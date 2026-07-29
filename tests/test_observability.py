@@ -14,6 +14,7 @@ from document_comparison.observability import (
     log_model_failure,
     log_model_request,
     log_model_response,
+    model_call_context,
     log_value_summary,
 )
 
@@ -41,8 +42,26 @@ def test_collector_appends_on_request(quiet_logger):
         assert recs[0].kind == "ocr"
         assert recs[0].attempt == 1
         assert recs[0].status_code is None
-        assert recs[0].payload == {"model": "m"}
+        assert recs[0].payload["model"] == "m"
+        assert recs[0].payload["_request"] == {"url": "http://x/v1"}
         assert t > 0
+
+
+def test_collector_keeps_request_url_and_model_trace_context(quiet_logger):
+    """任务调用明细应带 URL 和业务定位信息，但不改变实际 HTTP payload。"""
+    with llm_call_collector() as recs:
+        with model_call_context(statement_column={"file_index": 0, "table_index": 2}):
+            started = log_model_request(
+                quiet_logger, "statement-column", "http://x/v1/chat/completions",
+                {"model": "vision-model"}, 1,
+            )
+        log_model_response(quiet_logger, "statement-column", 200, {"ok": True}, started)
+
+    assert recs[0].payload["_request"] == {"url": "http://x/v1/chat/completions"}
+    assert recs[0].payload["_trace"] == {
+        "statement_column": {"file_index": 0, "table_index": 2}
+    }
+    assert recs[0].payload["model"] == "vision-model"
 
 
 def test_response_finalizes_record(quiet_logger):
@@ -80,7 +99,18 @@ def test_failure_with_status_code(quiet_logger):
             status_code=503,
         )
     assert recs[0].status_code == 503
-    assert recs[0].error == "HTTP 503"
+
+
+def test_failure_keeps_provider_response_for_task_audit(quiet_logger):
+    """HTTP 失败也保留受限响应体，方便定位供应商的参数校验错误。"""
+    with llm_call_collector() as recs:
+        t = log_model_request(quiet_logger, "statement-column", "http://x/v1", {"model": "m"}, 1)
+        log_model_failure(
+            quiet_logger, "statement-column", t, "HTTP 400", status_code=400,
+            response={"error": {"message": "model is required"}},
+        )
+    assert recs[0].error == "HTTP 400"
+    assert recs[0].response == {"error": {"message": "model is required"}}
 
 
 # —— embedding 排除 ——

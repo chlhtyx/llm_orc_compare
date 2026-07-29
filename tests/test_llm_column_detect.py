@@ -19,6 +19,25 @@ def test_parse_valid_json(monkeypatch):
     assert result == {1: "amount", 2: "paid"}
 
 
+def test_request_includes_model_parameter(monkeypatch):
+    """对帐单列定位请求必须显式带模型名，便于复现并兼容严格服务端。"""
+    captured: dict = {}
+
+    def fake_post(self, payload, kind):
+        captured["payload"] = payload
+        captured["kind"] = kind
+        return '{"columns": [{"index": 0, "role": "amount"}]}'
+
+    monkeypatch.setattr(
+        "document_comparison.ocr.llm.LLMOCREngine._post_chat", fake_post,
+    )
+    result = lcd.llm_detect_amount_columns(b"fake-png", ["金额"])
+
+    assert result == {0: "amount"}
+    assert captured["kind"] == "statement-column"
+    assert "model" in captured["payload"]
+
+
 def test_parse_json_with_code_fence(monkeypatch):
     """LLM 返回带 ```json 包裹的 JSON → 仍能解析。"""
     fake_content = '```json\n{"columns": [{"index": 0, "role": "amount"}]}\n```'

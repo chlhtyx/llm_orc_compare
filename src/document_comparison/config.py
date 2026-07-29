@@ -12,16 +12,42 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# 启动时把 .env 加载到 os.environ(本地裸跑 uvicorn/pytest 时尤其需要;
+# docker-compose 已通过 environment 块注入,load_dotenv 对已设变量不覆盖)。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # pragma: no cover - dotenv 缺失时降级为纯环境变量读取
+    logger = logging.getLogger(__name__)
+    logger.warning("python-dotenv 不可用,跳过 .env 加载(仅依赖进程环境变量)")
+else:
+    logger = logging.getLogger(__name__)
 
 def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
+
+
+def _import_package_version() -> str:
+    """读取 package __version__ 作为 fallback(局部 import 避免循环引用)。"""
+    try:
+        from . import __version__  # type: ignore[attr-defined]
+        return __version__
+    except Exception:
+        return "0.0.0"
+
 
 @dataclass
 class Settings:
     # —— 服务 ——
     host: str = field(default_factory=lambda: _env("DC_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(_env("DC_PORT", "8000")))
+
+    # —— 应用版本号(单一真相源 = .env 的 DC_VERSION;与镜像 tag 同源)——
+    # 未配置时回退到 package __version__(__init__.py),避免本地/单测无 .env 时为空。
+    version: str = field(
+        default_factory=lambda: _env("DC_VERSION", "") or _import_package_version()
+    )
 
     # —— 存储 ——
     storage_dir: Path = field(
