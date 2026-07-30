@@ -216,8 +216,11 @@ onBeforeUnmount(() => {
 
     <section v-if="info?.status === 'done' && info.verdict" class="test-result" :class="resultClass">
       <div class="result-heading">
-        <strong>管线测试完成</strong>
-        <span>{{ verdictLabel }}</span>
+        <div class="result-status">
+          <strong>管线测试完成</strong>
+          <span>{{ verdictLabel }}</span>
+        </div>
+        <RouterLink :to="`/statement/report/${info.task_id}`" class="report-link">查看完整报告</RouterLink>
       </div>
       <div class="summary-grid">
         <div><small>总金额</small><strong>{{ info.grand_total ?? 0 }}</strong></div>
@@ -264,7 +267,7 @@ onBeforeUnmount(() => {
 .result-clean { border-left-color: var(--risk-clean); }
 .result-changed { border-left-color: var(--risk-high); }
 .result-needs_review { border-left-color: var(--risk-medium); }
-.result-heading span { color: var(--text-muted); font-size: 12px; }
+.result-status { display: flex; align-items: center; gap: 10px; }.result-status span { color: var(--text-muted); font-size: 12px; }.report-link { color: var(--primary); font-size: 13px; font-weight: 600; text-decoration: none; }.report-link:hover { text-decoration: underline; }
 .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
 .summary-grid > div { padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .summary-grid small, .summary-grid strong { display: block; }
