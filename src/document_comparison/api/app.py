@@ -36,6 +36,7 @@ from .. import db as db_pkg
 from ..db import repository as db_repo
 from ..logging_config import setup_logging
 from ..observability import log_context
+from ..http_security import apply_security_headers, scan_probe_reason
 from ..models import (
     CompareOptions,
     RawCompareOptions,
@@ -74,6 +75,26 @@ def _upload_size(upload: UploadFile) -> int:
     size = upload.file.tell()
     upload.file.seek(current)
     return size
+
+
+def _normalize_target_urls(values: list[str]) -> list[str]:
+    """兼容 multipart 的重复 URL 字段与单个 JSON URL 数组字段。"""
+    normalized: list[str] = []
+    for raw_value in values:
+        candidate = (raw_value or "").strip()
+        if not candidate:
+            continue
+        if candidate.startswith("["):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError as exc:
+                raise ValueError("target_urls JSON 数组解析失败") from exc
+            if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+                raise ValueError("target_urls 必须是字符串数组或重复 URL 字段")
+            normalized.extend(item.strip() for item in parsed if item.strip())
+        else:
+            normalized.append(candidate)
+    return normalized
 
 
 def _persist_role(
@@ -370,6 +391,37 @@ def create_app() -> FastAPI:
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                 ))
+
+    @app.middleware("http")
+    async def _scan_protection_middleware(request, call_next):
+        """在路由前拒绝常见漏洞扫描请求，并为所有响应补充安全头。
+
+        不记录原始探测路径或来源地址，避免攻击载荷和不必要的个人数据进入日志。
+        中间件置于外部接口审计层之外，因此被拦截的请求也不会被当作业务调用落库。
+        """
+        raw_path = request.scope.get("raw_path", b"")
+        if isinstance(raw_path, bytes):
+            raw_path_text = raw_path.decode("latin-1", errors="replace")
+        else:
+            raw_path_text = str(raw_path)
+        reason = (
+            scan_probe_reason(method=request.method, raw_path=raw_path_text)
+            if settings.scan_protection_enabled
+            else None
+        )
+        if reason:
+            logger.warning(
+                "blocked suspicious request method=%s category=%s", request.method, reason
+            )
+            response = JSONResponse(
+                status_code=404, content={"code": 404, "message": "not found"}
+            )
+        else:
+            response = await call_next(request)
+
+        if settings.security_headers_enabled:
+            apply_security_headers(response.headers)
+        return response
 
     @app.exception_handler(HTTPException)
     async def _http_exc_handler(request, exc: HTTPException):
@@ -1051,7 +1103,10 @@ def create_app() -> FastAPI:
         支持多 PDF:target(文件)与 target_urls(URL)可混合提交,合计至少一个。
         """
         # 规范化 URL 列表(去空白、去空串)
-        target_urls = [u.strip() for u in target_urls if u and u.strip()]
+        try:
+            target_urls = _normalize_target_urls(target_urls)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         has_file = bool(target) and any(t.filename for t in target)
         if not has_file and not target_urls:
             raise HTTPException(400, "必须提供至少一个 target 文件或 target_url")
@@ -1521,7 +1576,10 @@ def create_app() -> FastAPI:
         """
         if not external_config_enabled():
             raise HTTPException(400, "请先保存完整的外部系统 API 配置")
-        target_urls = [url.strip() for url in target_urls if url and url.strip()]
+        try:
+            target_urls = _normalize_target_urls(target_urls)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         has_file = bool(target) and any(item.filename for item in target)
         if not has_file and not target_urls:
             raise HTTPException(400, "必须提供至少一个 target 文件或 target_url")

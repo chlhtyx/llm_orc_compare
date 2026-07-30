@@ -26,7 +26,7 @@
 
 - **Base URL**:`{external_public_base_url}/api/v1/external/amountStat`,例如 `https://dc.example.com/api/v1/external/amountStat`。
 - **鉴权**:请求头 `X-API-Key: {external_api_key}`。服务端用常数时间比较校验;未配置 Key 时跳过鉴权(内网/可信环境)。缺失或不匹配 → `401 invalid external API key`。
-- **请求格式**:`multipart/form-data`。文件走 `target` 字段(可重复多次),URL 走 `target_urls` 字段(可重复多次),两者可混合。
+- **请求格式**:`multipart/form-data`。文件走 `target` 字段(可重复多次),URL 走 `target_urls` 字段；可提交一个 JSON 字符串数组，也兼容同名字段重复多次，两者可混合。
 - **统一错误响应体**:所有非 2xx 返回统一结构:
   ```json
   { "code": 400, "message": "第 1 个文件必须是 .pdf", "request_id": "a1b2c3d4e5f6" }
@@ -45,12 +45,12 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `target` | File(可多个) | 与 `target_urls` 至少一个 | 对帐单/发票 PDF(`.pdf`)。同名字段重复多次即可上传多个文件 |
-| `target_urls` | string(可多个) | 与 `target` 至少一个 | PDF 的 URL(`http/https`,`.pdf`)。同名字段重复多次,可传多个 URL。下载超 `external_max_upload_mb` 会中断 |
+| `target_urls` | string[] | 与 `target` 至少一个 | PDF URL 数组。multipart 中推荐传一个 JSON 字符串数组，如 `target_urls=["https://.../a.pdf","https://.../b.pdf"]`；同名字段重复多次仍兼容。下载超 `external_max_upload_mb` 会中断 |
 | `document_no` | string | **是** | 单据号(用于回调与审计追溯)。非空,≤ 255 字符 |
 | `callback_url` | string | 异步必填 / 同步可选 | 结果回调地址。规则见[合同比对文档](./external-api.md#callback_url-校验规则) |
 | `sync` | bool | 否 | `true`=同步阻塞,`false`(默认)=异步受理 |
 
-> `target` 与 `target_urls` 可混合提交,服务端按"文件段 + URL 段"顺序串行处理。至少提供一个 PDF,否则 `400`。
+> `target` 与 `target_urls` 可混合提交,服务端按"文件段 + URL 数组顺序"串行处理。至少提供一个 PDF,否则 `400`。
 
 #### 文件大小与页数限制
 
@@ -310,4 +310,4 @@ X-Event-Id: {event_id}
 | `POST` | `/api/v1/statement/api-test` | **管线测试**(免鉴权,不触发回调,强制 `API-TEST-` 前缀) |
 | `GET` | `/api/v1/statement/api-test/{task_id}` | 查询管线测试结果(响应结构同上,仅放行 `API-TEST-` 任务) |
 
-> 管线测试端点(`api-test`)与对外端点对称,接受重复 `target` 文件和/或重复 `target_urls`(HTTP/HTTPS PDF URL),用于本机前端在不触发真实回调、不需要 `X-API-Key` 的前提下验证整条 OCR + 表格抽取 + 求和管线。提交时 `document_no` 由服务端自动生成为 `API-TEST-{随机串}`,查询端点据此隔离真实业务任务(非 `API-TEST-` 前缀 → `404`)。这些端点不属于 `/api/v1/external/*` 前缀,**不**入审计中间件、**不**计入外部调用审计表。
+> 管线测试端点(`api-test`)与对外端点对称,接受重复 `target` 文件和/或 `target_urls` JSON 数组(也兼容重复 URL 字段),用于本机前端在不触发真实回调、不需要 `X-API-Key` 的前提下验证整条 OCR + 表格抽取 + 求和管线。提交时 `document_no` 由服务端自动生成为 `API-TEST-{随机串}`,查询端点据此隔离真实业务任务(非 `API-TEST-` 前缀 → `404`)。这些端点不属于 `/api/v1/external/*` 前缀,**不**入审计中间件、**不**计入外部调用审计表。

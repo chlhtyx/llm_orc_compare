@@ -65,7 +65,7 @@ export interface StatementApiTestSubmitArgs {
 export function submitStatementApiTest(args: StatementApiTestSubmitArgs): Promise<StatementApiTestInfo> {
   const form = new FormData()
   args.targets.forEach((file) => form.append('target', file))
-  args.targetUrls.forEach((url) => form.append('target_urls', url))
+  if (args.targetUrls.length > 0) form.append('target_urls', JSON.stringify(args.targetUrls))
   return request('/api/v1/statement/api-test', { method: 'POST', body: form })
 }
 

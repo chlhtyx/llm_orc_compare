@@ -31,6 +31,19 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+def test_scan_protection_rejects_sensitive_path_and_adds_security_headers(client):
+    """敏感文件探测不进入路由，正常响应也带基础浏览器防护头。"""
+    blocked = client.get("/.env")
+    assert blocked.status_code == 404
+    assert blocked.json() == {"code": 404, "message": "not found"}
+    assert blocked.headers["x-content-type-options"] == "nosniff"
+    assert blocked.headers["x-frame-options"] == "DENY"
+
+    healthy = client.get("/health")
+    assert healthy.headers["referrer-policy"] == "same-origin"
+    assert "camera=()" in healthy.headers["permissions-policy"]
+
+
 def test_version_endpoint(client):
     """GET /api/v1/version 始终返回一个非空版本字符串(真相源:settings.version)。"""
     r = client.get("/api/v1/version")

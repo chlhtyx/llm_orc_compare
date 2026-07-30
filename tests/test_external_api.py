@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 import pymupdf
 import pytest
@@ -644,7 +645,7 @@ def _patch_download(monkeypatch, *, source_name="source.docx", target_name="targ
         calls["urls"].append(url)
         settings.ensure_dirs()
         name = source_name if role == "source" else target_name
-        temp = settings.uploads_dir / f".test-pending-{role}-{name}"
+        temp = settings.uploads_dir / f".test-pending-{role}-{calls['count']}-{name}"
         if role == "source":
             temp.write_bytes(_docx_bytes().getvalue())
         else:
@@ -1110,6 +1111,37 @@ def test_statement_api_test_accepts_file_and_url_targets(external_client, monkey
     assert len(captured["pdf_paths"]) == 2
     assert captured["pdf_paths"][0].endswith("upload.pdf")
     assert captured["pdf_paths"][1].endswith("from-url.pdf")
+
+
+def test_statement_api_test_accepts_json_url_array(external_client, monkeypatch):
+    """multipart 的 target_urls 可用单个 JSON 数组字段提交。"""
+    from document_comparison.api.app import task_manager
+
+    captured: dict = {}
+
+    async def _capture_run(_task_id, pdf_paths, file_names, **_kwargs):
+        captured["pdf_paths"] = pdf_paths
+        captured["file_names"] = file_names
+
+    monkeypatch.setattr(task_manager, "run_statement", _capture_run)
+    calls = _patch_download(monkeypatch, target_name="from-array.pdf")
+    response = external_client.post(
+        "/api/v1/statement/api-test",
+        data={
+            "target_urls": json.dumps([
+                "https://files.example.test/first.pdf",
+                "https://files.example.test/second.pdf",
+            ])
+        },
+    )
+
+    assert response.status_code == 202, response.json()
+    assert calls["urls"] == [
+        "https://files.example.test/first.pdf",
+        "https://files.example.test/second.pdf",
+    ]
+    assert captured["file_names"] == ["from-array.pdf", "from-array.pdf"]
+    assert len(captured["pdf_paths"]) == 2
 
 
 def test_statement_api_test_requires_complete_external_config(external_client):

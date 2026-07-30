@@ -42,6 +42,16 @@ class Settings:
     # —— 服务 ——
     host: str = field(default_factory=lambda: _env("DC_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(_env("DC_PORT", "8000")))
+    # 仅拦截永远不会是本服务合法路由的敏感文件、路径穿越和常见扫描端点。
+    # 分布式限速应放在网关或共享存储中，不能在这里做 per-worker 计数。
+    scan_protection_enabled: bool = field(
+        default_factory=lambda: _env("DC_SCAN_PROTECTION_ENABLED", "1").lower()
+        not in ("0", "false", "no")
+    )
+    security_headers_enabled: bool = field(
+        default_factory=lambda: _env("DC_SECURITY_HEADERS_ENABLED", "1").lower()
+        not in ("0", "false", "no")
+    )
 
     # —— 应用版本号(单一真相源 = .env 的 DC_VERSION;与镜像 tag 同源)——
     # 未配置时回退到 package __version__(__init__.py),避免本地/单测无 .env 时为空。

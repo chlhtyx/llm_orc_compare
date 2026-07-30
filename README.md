@@ -50,6 +50,12 @@ curl http://localhost:8000/health
 
 更完整的容器运维说明见 [Docker 部署指南](docs/deploy.md)。
 
+## 漏洞扫描防护
+
+应用默认拒绝路径穿越、敏感文件（如 `.env`、`.git`）和常见 CMS/运维端点探测，并对所有响应添加 `nosniff`、禁止页面嵌入、Referrer 与浏览器权限限制等基础安全头。被拒绝请求统一返回 `404`，日志只保留探测类别，不记录原始载荷或客户端地址。
+
+可用 `DC_SCAN_PROTECTION_ENABLED=0` 或 `DC_SECURITY_HEADERS_ENABLED=0` 临时关闭对应应用层能力。公网部署仍应在反向代理/WAF 层配置 HTTPS、请求体大小限制、基于真实客户端 IP 的共享限速和告警；不要使用每个 worker 独立的内存限速器。
+
 ## 并发与多 worker
 
 默认单进程(`DC_UVICORN_WORKERS=1`)、并发任务上限 4(`DC_MAX_CONCURRENT_TASKS=4`)。
@@ -397,7 +403,7 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `target` | 与 `target_urls` 至少一个 | 对帐单/发票 `.pdf`（文件，可重复多次上传多个） |
-| `target_urls` | 与 `target` 至少一个 | 对帐单 URL（`http`/`https` `.pdf`，可重复多次）；可与 `target` 混合提交，服务端下载后统计 |
+| `target_urls` | 与 `target` 至少一个 | 对帐单 URL 数组（`http`/`https` `.pdf`）；multipart 推荐传 JSON 字符串数组，也兼容同名字段重复，可与 `target` 混合提交 |
 | `document_no` | 是 | 外部单据号（≤255 字符） |
 | `callback_url` | 异步必填，同步可选 | HTTP/HTTPS 完成回调地址 |
 | `sync` | 否 | `true` 同步模式；缺省=`false` 异步模式 |
@@ -413,7 +419,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
   -F 'callback_url=https://business.example.com/callbacks/amount-stat'
 ```
 
-> 也可用 URL 提交：把 `-F 'target=@./...'` 换成 `-F 'target_urls=https://.../statement-1.pdf'`，多个 URL 重复多次。文件与 URL 可混合，后缀（`.pdf`）与大小限制不变。
+> 也可用 URL 数组提交：把 `-F 'target=@./...'` 换成 `-F 'target_urls=["https://.../statement-1.pdf","https://.../statement-2.pdf"]'`。同名字段重复多次也兼容；文件与 URL 可混合，后缀（`.pdf`）与大小限制不变。
 
 提交响应（HTTP 202）：
 
@@ -513,7 +519,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
 
 #### 管线测试（免鉴权）
 
-与合同比对页对称，金额统计也提供免鉴权的管线测试端点，支持重复 `target` 文件和/或重复 `target_urls`（HTTP/HTTPS PDF URL），供本机前端在不触发真实回调的前提下验证整条 OCR + 表格抽取 + 求和管线（强制 `document_no` 以 `API-TEST-` 开头，查询端点据此隔离真实任务）：
+与合同比对页对称，金额统计也提供免鉴权的管线测试端点，支持重复 `target` 文件和/或 `target_urls` JSON 数组（兼容重复 HTTP/HTTPS PDF URL 字段），供本机前端在不触发真实回调的前提下验证整条 OCR + 表格抽取 + 求和管线（强制 `document_no` 以 `API-TEST-` 开头，查询端点据此隔离真实任务）：
 
 ```bash
 # 提交(无需 X-API-Key,可多选 PDF)
