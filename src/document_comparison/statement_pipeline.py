@@ -1,4 +1,4 @@
-"""对帐单金额统计流水线(独立逻辑,与 TamperReport / TextDiffReport 体系完全隔离)。
+"""金额统计流水线(独立逻辑,与 TamperReport / TextDiffReport 体系完全隔离)。
 
 流程(多文件串行):
   对每个 PDF:
@@ -42,6 +42,7 @@ from .statement.amount_column import (
     merge_cross_page_tables,
     summarize_table,
 )
+from .statement.invoice_layout import looks_like_invoice, parse_invoice_page
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,18 @@ def _process_one_pdf(
                 if _is_table_block(block):
                     tables_with_page.append((block.table, block.page_index))
 
+        # 全电发票专用解析:pymupdf/OCR 会把发票明细表压扁成纯文本单元格,
+        # 用确定性坐标解析器重建明细表(仅对发票页面生效,对帐单等回退原表)。
+        page_texts = {
+            i: "\n".join(b.content for b in blocks if b.content)
+            for i, blocks in enumerate(pages_blocks)
+        }
+        invoice_pages = [i for i, t in page_texts.items() if looks_like_invoice(t)]
+        if invoice_pages:
+            tables_with_page = _apply_invoice_layout(
+                pdf_path, tables_with_page, invoice_pages
+            )
+
         # 顶层诊断:OCR 产出了什么、有没有 table block。定位"识别不到金额"时,这是
         # 判断卡在哪一层(OCR 没出表 / 出了表但抽空 / LLM 兜底失败)的第一手信息。
         page_block_summary = {
@@ -141,8 +154,8 @@ def _process_one_pdf(
             for i, blocks in enumerate(pages_blocks)
         }
         logger.info(
-            "statement ocr output file=%s pages=%s table_blocks=%s blocks_per_page=%s",
-            file_name, len(pages_blocks), len(tables_with_page), page_block_summary,
+            "statement ocr output file=%s pages=%s table_blocks=%s invoice_pages=%s blocks_per_page=%s",
+            file_name, len(pages_blocks), len(tables_with_page), invoice_pages, page_block_summary,
         )
 
         # 合并跨页续表
@@ -159,10 +172,8 @@ def _process_one_pdf(
 
         # 各页 OCR 纯文本(所有 block.content 拼接),作为 LLM 金额抽取的 grounding
         # 逐字溯源依据:LLM 返回的每个金额必须能在其中找到,否则丢弃。
-        page_groundings: dict[int, str] = {
-            i: "\n".join(b.content for b in blocks if b.content)
-            for i, blocks in enumerate(pages_blocks)
-        }
+        # (page_texts 已在上方发票识别时构建,这里复用)
+        page_groundings = page_texts
 
         table_summaries: list[StatementTableSummary] = []
         recognition_needs_review = any(not d.reliable for d in diagnostics)
@@ -207,11 +218,11 @@ def _process_one_pdf(
                 if whole_summary is not None:
                     table_summaries.append(whole_summary)
 
-        # 单 PDF 合计
+        # 单 PDF 合计(含税口径):用各表 tax_inclusive_total 而非所有 column_sums,
+        # 避免把 amount+tax 重复计入(有含税列时也已排除不含税/税额)。
         file_total = Decimal("0")
         for ts in table_summaries:
-            for v in ts.column_sums.values():
-                file_total += Decimal(str(v))
+            file_total += Decimal(str(ts.tax_inclusive_total))
 
         return StatementFileSummary(
             file_index=file_index,
@@ -376,6 +387,9 @@ def _summarize_one_table(
         summary.column_sums = {col_name: float(total)}
         summary.items = amount_items
         summary.column_source = {col_name: "llm"}
+        # LLM 抽取路径:含税口径统一标「LLM 抽取」(列角色体系不适用,已是数据行金额)
+        summary.tax_inclusive_total = float(total)
+        summary.tax_inclusive_method = "LLM 抽取"
         _log_summary_stage("llm-amount", summary)
         return summary
 
@@ -479,6 +493,8 @@ def _extract_whole_page_amounts(
         column_sums={col_name: float(total)},
         items=items,
         column_source={col_name: "llm"},
+        tax_inclusive_total=float(total),
+        tax_inclusive_method="LLM 抽取",
     )
     _log_summary_stage("whole-page", summary)
     return summary
@@ -504,10 +520,13 @@ def _aggregate(file_summaries: list[StatementFileSummary]) -> StatementSummaryRe
         for ts in fs.tables:
             total_tables += 1
             total_items += len(ts.items)
-            for col_name, value in ts.column_sums.items():
-                grand_total += Decimal(str(value))
-                grand_by_column[col_name] = grand_by_column.get(col_name, Decimal("0")) + Decimal(str(value))
+            # grand_total 用含税口径(各表 tax_inclusive_total),避免重复计入
+            grand_total += Decimal(str(ts.tax_inclusive_total))
+            if ts.tax_inclusive_total > 0 or ts.column_sums:
                 has_any_amount = True
+            # grand_totals_by_column 仍按列名分桶展示构成(价税合计/金额/税额各行)
+            for col_name, value in ts.column_sums.items():
+                grand_by_column[col_name] = grand_by_column.get(col_name, Decimal("0")) + Decimal(str(value))
             for src in ts.column_source.values():
                 column_detection_summary[src] = column_detection_summary.get(src, 0) + 1
 
@@ -557,3 +576,61 @@ def _is_table_block(block: Block) -> bool:
         getattr(block, "label", "") == "table"
         and getattr(block, "table", None) is not None
     )
+
+
+def _apply_invoice_layout(
+    pdf_path: str | Path,
+    tables_with_page: list[tuple[TableStructure, int]],
+    invoice_pages: list[int],
+) -> list[tuple[TableStructure, int]]:
+    """对发票页面用坐标解析器重建明细表,替换 OCR/pymupdf 压扁的表。
+
+    全电发票明细表会被 pymupdf ``find_tables`` 压扁成纯文本单元格,无法用通用列定位。
+    本函数重开 PDF 取原生文本层 span 坐标,用 ``invoice_layout.parse_invoice_page``
+    确定性重建明细 TableStructure。对帐单等非发票页面保持原表不动。
+
+    策略:发票页面的原表全部丢弃(发票的 pymupdf 表是错乱的),换成解析器产出;
+    非发票页面的表原样保留。
+    """
+    try:
+        import pymupdf as fitz  # 延迟导入,避免无 PDF 依赖时 import 失败
+    except ImportError:  # pragma: no cover
+        try:
+            import fitz  # type: ignore
+        except ImportError:
+            logger.warning("invoice_layout: pymupdf 不可用,回退原表")
+            return tables_with_page
+
+    invoice_page_set = set(invoice_pages)
+    # 保留非发票页面的原表
+    result: list[tuple[TableStructure, int]] = [
+        (t, p) for t, p in tables_with_page if p not in invoice_page_set
+    ]
+
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("invoice_layout: 打开 PDF 失败 %s,回退原表: %s", pdf_path, exc)
+        return tables_with_page
+
+    try:
+        for page_index in invoice_pages:
+            if page_index >= doc.page_count:
+                continue
+            table, grand_total = parse_invoice_page(doc[page_index])
+            if table is not None:
+                result.append((table, page_index))
+                logger.info(
+                    "invoice_layout 应用了发票坐标解析 page=%s 价税合计=%s",
+                    page_index, grand_total,
+                )
+            else:
+                logger.info("invoice_layout 未识别出明细表 page=%s,保留原表", page_index)
+                # 回退:该发票页保留原 OCR 表(若有)
+                for t, p in tables_with_page:
+                    if p == page_index:
+                        result.append((t, p))
+    finally:
+        doc.close()
+
+    return result

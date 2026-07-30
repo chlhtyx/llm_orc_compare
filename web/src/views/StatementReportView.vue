@@ -114,7 +114,7 @@ function tableSourceBadge(source: string | undefined): string {
     <header class="card report-head">
       <div class="head-left">
         <h2 class="page-title">
-          对帐单金额统计
+          金额统计
           <span class="task-id muted">task {{ taskId }}</span>
         </h2>
         <template v-if="!report">
@@ -154,7 +154,7 @@ function tableSourceBadge(source: string | undefined): string {
 
       <!-- 总合计大字 -->
       <section class="card hero">
-        <span class="hero-label">总合计(所有文件)</span>
+        <span class="hero-label">含税合计(所有文件)</span>
         <span class="hero-num">¥{{ fmtMoney(report.grand_total) }}</span>
         <span class="hero-meta muted">
           {{ report.total_files }} 个文件 · {{ report.total_tables }} 张表 · {{ report.total_items }} 条金额
@@ -163,7 +163,7 @@ function tableSourceBadge(source: string | undefined): string {
 
       <!-- 按列汇总 + 列定位分布 -->
       <section class="card">
-        <h3 class="section-title">按金额列汇总</h3>
+        <h3 class="section-title">按金额列汇总(含税口径)</h3>
         <table v-if="columnTotalsRows.length" class="tbl">
           <thead>
             <tr><th>列名</th><th class="num-col">合计(元)</th></tr>
@@ -219,6 +219,13 @@ function tableSourceBadge(source: string | undefined): string {
             <div class="table-head">
               <span>表 {{ t.table_index + 1 }}(第 {{ t.page_index + 1 }} 页)</span>
               <span class="muted">{{ t.items.length }} 条金额</span>
+            </div>
+
+            <!-- 本表含税口径 -->
+            <div v-if="t.tax_inclusive_method" class="verify-row">
+              <span class="muted">本表含税口径:</span>
+              <span class="verify-item ok">{{ t.tax_inclusive_method }}</span>
+              <span class="verify-item">¥{{ fmtMoney(t.tax_inclusive_total) }}</span>
             </div>
 
             <!-- 声明核对 -->

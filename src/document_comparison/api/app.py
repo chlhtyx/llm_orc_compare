@@ -1271,7 +1271,7 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "report not ready")
         return JSONResponse(content=report.model_dump())
 
-    # —— 对帐单金额统计端点:与 /api/v1/raw-compare 完全独立 ——
+    # —— 金额统计端点:与 /api/v1/raw-compare 完全独立 ——
     # 单端 PDF(对帐单扫描件),支持一次上传多个 PDF;后端串行 OCR + 表格抽取 + 代码求和,
     # 聚合输出所有文件的总金额。LLM 仅用于列定位兜底,绝不参与数值识别或求和。
     @app.post("/api/v1/statement")

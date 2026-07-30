@@ -1,4 +1,4 @@
-"""对帐单金额统计 — LLM 兜底列指认单元测试。
+"""金额统计 — LLM 兜底列指认单元测试。
 
 mock LLMOCREngine._post_chat,验证 JSON 解析与失败降级路径。
 不发起真实网络请求。
@@ -79,6 +79,37 @@ def test_invalid_role_filtered(monkeypatch):
     )
     result = lcd.llm_detect_amount_columns(b"fake-png", ["日期", "金额"])
     assert result == {1: "amount"}
+
+
+def test_tax_inclusive_and_tax_roles_accepted(monkeypatch):
+    """含税金额统计:tax_inclusive / tax 角色在白名单内,能被正确解析。"""
+    fake_content = (
+        '{"columns": [{"index": 3, "role": "tax_inclusive"}, '
+        '{"index": 2, "role": "tax"}, {"index": 1, "role": "amount"}]}'
+    )
+    monkeypatch.setattr(
+        "document_comparison.ocr.llm.LLMOCREngine._post_chat",
+        lambda self, payload, kind: fake_content,
+    )
+    result = lcd.llm_detect_amount_columns(b"fake-png", ["项目", "金额", "税额", "价税合计"])
+    assert result == {1: "amount", 2: "tax", 3: "tax_inclusive"}
+
+
+def test_prompt_mentions_tax_inclusive(monkeypatch):
+    """LLM 列指认 prompt 应含含税金额语义(本任务统计含税)。"""
+    captured: dict = {}
+
+    def fake_post(self, payload, kind):
+        captured["payload"] = payload
+        return '{"columns": []}'
+
+    monkeypatch.setattr(
+        "document_comparison.ocr.llm.LLMOCREngine._post_chat", fake_post,
+    )
+    lcd.llm_detect_amount_columns(b"fake-png", ["价税合计"])
+    system = captured["payload"]["messages"][0]["content"]
+    assert "含税" in system
+    assert "tax_inclusive" in system
 
 
 def test_index_out_of_range_filtered(monkeypatch):

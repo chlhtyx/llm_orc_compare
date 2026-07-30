@@ -609,7 +609,7 @@ def test_external_api_config_rejects_invalid_values(client, payload):
     assert response.status_code == 400
 
 
-# —— 对帐单金额统计端点冒烟(/api/v1/statement)——
+# —— 金额统计端点冒烟(/api/v1/statement)——
 
 def test_statement_accepts_multiple_pdfs(client, monkeypatch):
     """POST /api/v1/statement 接受多个 PDF,返回 task_id + file_count。

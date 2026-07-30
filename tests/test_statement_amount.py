@@ -1,4 +1,4 @@
-"""对帐单金额统计 — 纯函数单测(列定位 / 金额抽取 / 求和 / 跨页合并)。
+"""金额统计 — 纯函数单测(列定位 / 金额抽取 / 求和 / 跨页合并)。
 
 不依赖 OCR / LLM;覆盖 statement.amount_column 的确定性逻辑。
 """
@@ -56,6 +56,41 @@ def test_detect_amount_columns_user_keywords_override():
     # 用户关键词命中
     result = detect_amount_columns(headers, user_keywords=["Money"])
     assert result == {1: "amount"}
+
+
+# —— 含税金额角色(tax_inclusive / tax) ——
+
+def test_detect_amount_columns_tax_inclusive_role():
+    """价税合计/含税 命中 tax_inclusive 角色(优先级高于 amount)。"""
+    headers = ["项目", "价税合计"]
+    assert detect_amount_columns(headers) == {1: "tax_inclusive"}
+    headers = ["项目", "含税金额"]
+    assert detect_amount_columns(headers) == {1: "tax_inclusive"}
+    headers = ["项目", "含税"]
+    assert detect_amount_columns(headers) == {1: "tax_inclusive"}
+
+
+def test_detect_amount_columns_tax_role():
+    """税额 命中 tax 角色。"""
+    headers = ["项目", "税额"]
+    assert detect_amount_columns(headers) == {1: "tax"}
+    headers = ["项目", "税金"]
+    assert detect_amount_columns(headers) == {1: "tax"}
+
+
+def test_detect_amount_columns_tax_inclusive_priority_over_amount_and_tax():
+    """「价税合计」应取 tax_inclusive 而非被 amount/tax 抢匹配。"""
+    headers = ["项目", "金额", "税额", "价税合计"]
+    result = detect_amount_columns(headers)
+    assert result == {1: "amount", 2: "tax", 3: "tax_inclusive"}
+
+
+def test_detect_amount_columns_tax_removed_from_amount():
+    """「金额」行不再含「价税合计」(已上提为独立 tax_inclusive 角色)。"""
+    headers = ["价税合计"]
+    result = detect_amount_columns(headers)
+    assert result == {0: "tax_inclusive"}
+    assert result != {0: "amount"}
 
 
 def test_detect_amount_columns_empty_headers():
@@ -185,7 +220,7 @@ def test_summarize_table_total_row_mismatch():
 
 
 def test_summarize_table_multi_amount_columns():
-    """已付/未付 多金额列分别求和。"""
+    """已付/未付 多金额列分别求和(已付/未付不入含税合计)。"""
     table = TableStructure(
         headers=["项目", "已付", "未付"],
         rows=[
@@ -199,6 +234,88 @@ def test_summarize_table_multi_amount_columns():
     )
     assert s.column_sums == {"已付": 300.0, "未付": 80.0}
     assert len(s.items) == 4  # 2 行 × 2 金额列
+    # 已付/未付不构成含税口径 → 含税合计为 0、口径为空
+    assert s.tax_inclusive_total == 0.0
+    assert s.tax_inclusive_method == ""
+
+
+# —— 含税金额合计三种 Case ——
+
+def test_summarize_table_tax_inclusive_case1_has_inclusive_column():
+    """Case 1:有价税合计列 → 只用它,排除同表金额/税额列(防重复计入)。"""
+    table = TableStructure(
+        headers=["项目", "金额", "税额", "价税合计"],
+        rows=[
+            ["A", "100元", "13元", "113元"],
+            ["B", "200元", "26元", "226元"],
+        ],
+    )
+    s = summarize_table(
+        table, file_index=0, file_name="x.pdf",
+        table_index=0, page_index=0,
+    )
+    # 各列仍按列名分桶(便于展示构成)
+    assert s.column_sums == {"金额": 300.0, "税额": 39.0, "价税合计": 339.0}
+    # 含税合计只取价税合计列(113+226),不重复计入金额+税额
+    assert s.tax_inclusive_total == 339.0
+    assert s.tax_inclusive_method == "含税/价税合计列"
+
+
+def test_summarize_table_tax_inclusive_case2_amount_plus_tax():
+    """Case 2:无含税列,有金额(不含税)+税额 → 跨列相加 含税=金额+税额。"""
+    table = TableStructure(
+        headers=["项目", "金额", "税额"],
+        rows=[
+            ["A", "100元", "13元"],
+            ["B", "200元", "26元"],
+        ],
+    )
+    s = summarize_table(
+        table, file_index=0, file_name="x.pdf",
+        table_index=0, page_index=0,
+    )
+    assert s.column_sums == {"金额": 300.0, "税额": 39.0}
+    # 含税 = 300 + 39 = 339
+    assert s.tax_inclusive_total == 339.0
+    assert s.tax_inclusive_method == "金额(不含税)列 + 税额列"
+
+
+def test_summarize_table_tax_inclusive_case3_amount_only():
+    """Case 3:只有金额列,无任何税相关列 → 照旧求和(语义上视作含税)。"""
+    table = TableStructure(
+        headers=["项目", "金额"],
+        rows=[
+            ["A", "30000元"],
+            ["B", "70000元"],
+        ],
+    )
+    s = summarize_table(
+        table, file_index=0, file_name="x.pdf",
+        table_index=0, page_index=0,
+    )
+    assert s.column_sums == {"金额": 100000.0}
+    assert s.tax_inclusive_total == 100000.0
+    assert s.tax_inclusive_method == "金额列"
+
+
+def test_summarize_table_tax_inclusive_no_double_count_with_total_row():
+    """含税列存在时,价税合计行(合计行)入 declared_totals 不重复计入含税合计。"""
+    table = TableStructure(
+        headers=["项目", "金额", "税额", "价税合计"],
+        rows=[
+            ["A", "100元", "13元", "113元"],
+            ["价税合计", "100元", "13元", "113元"],  # 合计行 → declared_totals
+        ],
+    )
+    s = summarize_table(
+        table, file_index=0, file_name="x.pdf",
+        table_index=0, page_index=0,
+    )
+    # 数据行价税合计列 113;合计行被跳过(skipped_rows)
+    assert s.tax_inclusive_total == 113.0
+    assert s.tax_inclusive_method == "含税/价税合计列"
+    assert 1 in s.skipped_rows
+    assert s.declared_totals.get("价税合计") == 113.0
 
 
 def test_summarize_table_no_amount_columns():

@@ -1,4 +1,4 @@
-// 对帐单金额统计任务 store:与 stores/rawTask.ts 平行,持有 StatementSummaryReport。
+// 金额统计任务 store:与 stores/rawTask.ts 平行,持有 StatementSummaryReport。
 // 提交、跟踪进度(SSE 主、轮询兜底)、终结后落 statement_report。
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'

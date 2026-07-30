@@ -9,7 +9,7 @@
 - `src/document_comparison/api/`：FastAPI 路由、SSE 进度和配置接口;`/api/v1/tasks*` 提供比对记录列表、里程碑时间线、模型调用明细与外部接口调用审计查询;`_external_audit_middleware` 为 `/api/v1/external/*` 入站请求异步落库审计记录。
 - `src/document_comparison/pipeline.py`：结构化条款比对主流水线。
 - `src/document_comparison/raw_pipeline.py`：纯文本快速比对流水线；不要与主流水线混为一谈。
-- `src/document_comparison/statement_pipeline.py`：对帐单金额统计流水线(多文件串行);与 `raw_pipeline` 完全独立。
+- `src/document_comparison/statement_pipeline.py`：金额统计流水线(多文件串行);与 `raw_pipeline` 完全独立。
 - `src/document_comparison/observability.py`：阶段耗时 + 模型调用日志,也是**对话型 LLM 调用记录的单点拦截入口**(`log_model_request/response/failure` 经 `current_llm_collector` contextvar 收集)。
 - `src/document_comparison/db/`：SQLAlchemy ORM、引擎工厂、任务记录/里程碑事件/LLM 配置/LLM 调用记录/外部接口调用审计 CRUD;Postgres 为硬依赖,未配置 `DATABASE_URL` 启动失败。
 - `alembic/`：数据库迁移脚本;生产用 `alembic upgrade head`,开发可用 `DC_DB_AUTO_CREATE=1`。
@@ -24,7 +24,7 @@
 
 - 字符级/表格级差异和 canonical 强校验是变化判定的依据；语义向量只用于条款对齐。
 - LLM 辅助说明只能补充已确认差异的解释或严重度建议，不能撤销确定的变化。
-- 对帐单金额统计通道中,**LLM 仅用于列定位兜底(指认金额列索引)与金额抽取兜底**(`statement/llm_amount_extract.py`,仅当正则对该表抽空时触发,典型为发票纯数字无单位金额);**LLM 抽出的每个金额必须 grounding 校验能在 OCR 文本中逐字溯源(数字归一化后子串包含),否则丢弃→needs_review**;**金额抽取仍以代码为主(带元/万元/¥/中文大写的对帐单走正则,免费确定),求和始终由代码用 `Decimal` 完成**;不可让 LLM 做算术或撤销确定性结论。
+- 金额统计通道中,**LLM 仅用于列定位兜底(指认金额列索引)与金额抽取兜底**(`statement/llm_amount_extract.py`,仅当正则对该表抽空时触发,典型为发票纯数字无单位金额);**LLM 抽出的每个金额必须 grounding 校验能在 OCR 文本中逐字溯源(数字归一化后子串包含),否则丢弃→needs_review**;**金额抽取仍以代码为主(带元/万元/¥/中文大写的对帐单走正则,免费确定),求和始终由代码用 `Decimal` 完成**;不可让 LLM 做算术或撤销确定性结论。
 - 原生 PDF 文本优先；仅在需要时降级 OCR，并保留低质量结果为“待复核”的语义。
 - 改动报告数据结构时，保持 JSON、PDF、DOCX 输出及前端展示的一致性。
 - 改动 API 合约时，同步检查 `web/src/api/`、相关 stores、视图和后端测试。

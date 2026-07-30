@@ -408,7 +408,7 @@ class RawCompareOptions(BaseModel):
     ocr_backend: Literal["llm", "paddleocr"] | None = None
 
 
-# —— 对帐单金额统计(独立通道,与 TamperReport / TextDiffReport 完全隔离)——
+# —— 金额统计(独立通道,与 TamperReport / TextDiffReport 完全隔离)——
 # 一次可上传多个 PDF,串行 OCR + 表格抽取 + 代码确定性求和,聚合输出总金额。
 # LLM 仅在启发式列定位失败时指认金额列(列索引+角色),绝不参与数值识别或求和。
 class StatementAmountItem(BaseModel):
@@ -444,6 +444,10 @@ class StatementTableSummary(BaseModel):
     skipped_rows: list[int] = Field(default_factory=list, description="被跳过的行号(合计行本身,避免重复计入)")
     # 列定位方式:heuristic(启发式) | llm(LLM 兜底) | none(定位失败)
     column_source: dict[str, Literal["heuristic", "llm", "none"]] = Field(default_factory=dict)
+    # 本表含税金额合计(代码确定性算术,见 amount_column.summarize_table 三种 Case)
+    tax_inclusive_total: float = 0.0
+    # 含税口径来源:如「含税/价税合计列」「金额(不含税)列 + 税额列」「金额列」「LLM 抽取」
+    tax_inclusive_method: str = ""
 
 
 class StatementFileSummary(BaseModel):
@@ -459,7 +463,7 @@ class StatementFileSummary(BaseModel):
 
 
 class StatementSummaryReport(BaseModel):
-    """对帐单金额统计报告(多文件聚合)。"""
+    """金额统计报告(多文件聚合)。"""
 
     files: list[StatementFileSummary] = Field(default_factory=list)
     grand_total: float = Field(default=0.0, description="所有文件所有金额列之和")

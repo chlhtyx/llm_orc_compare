@@ -15,7 +15,7 @@
 - **合同比对默认仅列举差异**(字符级 / 表格单元格级),不做风险判别;在提交选项里传 `enable_risk_assessment=true` 可恢复完整风险分级 + 高风险要素校验 + LLM 辅助说明。
 - **LLM 直接比对**:`options.enable_llm_direct_diff=true`(或外部 API 默认配置 `external_enable_llm_direct_diff`)开启后,跳过条款切分/对齐/裁决,把 Word 与 PDF 各自解析成纯文本后直接交给 LLM 比对差异并标注;结果适配为标准报告,不做风险分级、不生成 PDF 高亮框(无坐标信息)。
 - 提供标准条款比对和纯文本快速比对两种模式。
-- **对帐单金额统计**:一次可上传多个对帐单 PDF(扫描件),OCR 识别表格后用确定性代码抽取并累加金额,聚合输出所有文件的总金额;自动核对「合计/小计」声明值;列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
+- **金额统计**:一次可上传多个对帐单 PDF(扫描件),OCR 识别表格后用确定性代码抽取并累加金额,聚合输出所有文件的总金额;自动核对「合计/小计」声明值;列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
 - 通过 SSE 实时展示任务进度、各阶段耗时，并支持任务完成 Webhook。
 - 输出 JSON 报告、带差异标注的 PDF，以及带整段高亮的 Word 报告。
 - 报告页可在线查看带坐标的 PDF 差异标注，并可下载高亮 Word 报告。
@@ -218,7 +218,7 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 | `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
-| `POST` | `/api/v1/statement` | 提交对帐单金额统计(支持多文件,`target` 字段同键多值) |
+| `POST` | `/api/v1/statement` | 提交金额统计(支持多文件,`target` 字段同键多值) |
 | `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
 | `GET` | `/api/v1/statement/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/statement/{task_id}/report` | 获取统计报告(含总合计、按列汇总、逐行明细) |
@@ -385,4 +385,4 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 查询入口：按任务 `GET /api/v1/tasks/{task_id}/external-calls`（前端「比对记录 → 外部调用」tab），
 或全局 `GET /api/v1/external-calls`（支持按端点/状态码/单据号筛选）。
 
-完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)；对帐单金额统计的设计与边界见 [对帐单金额统计方案](docs/对帐单金额统计方案.md)。
+完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)；金额统计的设计与边界见 [金额统计方案](docs/金额统计方案.md)。

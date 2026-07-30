@@ -55,7 +55,7 @@ async function onSubmit(): Promise<void> {
 <template>
   <div class="submit">
     <section class="card">
-      <h2 class="page-title">对帐单金额统计</h2>
+      <h2 class="page-title">金额统计</h2>
       <p class="muted page-desc">
         一次可上传多个对帐单 PDF(扫描件),系统 OCR 识别表格后用<b>确定性代码</b>抽取并累加金额,
         汇总所有文件的总金额。若表格含「合计/小计」行,会自动核对声明值与实算是否一致;

@@ -44,7 +44,7 @@ const reportHref = computed(() => {
       </div>
       <nav class="app-nav">
         <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对 API</RouterLink>
-        <RouterLink to="/statement" :class="{ active: activeName === 'statement-submit' }">对帐单统计</RouterLink>
+        <RouterLink to="/statement" :class="{ active: activeName === 'statement-submit' }">金额统计</RouterLink>
         <RouterLink
           v-if="reportHref"
           :to="reportHref"

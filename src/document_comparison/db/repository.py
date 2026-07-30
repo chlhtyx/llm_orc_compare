@@ -158,7 +158,7 @@ def save_raw_report(task_id: str, report: TextDiffReport) -> None:
 
 
 def save_statement_report(task_id: str, report: StatementSummaryReport) -> None:
-    """存对帐单金额统计报告 JSONB。"""
+    """存金额统计报告 JSONB。"""
     _save_report(task_id, "report_statement", report.model_dump(mode="json"))
 
 

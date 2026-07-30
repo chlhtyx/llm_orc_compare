@@ -1,4 +1,4 @@
-// 对帐单金额统计端点封装,对齐 src/document_comparison/api/app.py 的 /api/v1/statement。
+// 金额统计端点封装,对齐 src/document_comparison/api/app.py 的 /api/v1/statement。
 // 与 api/raw.ts、api/compare.ts 完全隔离,不共享 task store。
 // 一次可上传多个 PDF,后端串行处理并聚合输出所有文件的总金额。
 import type {

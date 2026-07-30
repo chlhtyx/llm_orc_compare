@@ -1,4 +1,4 @@
-"""对帐单金额统计 — 列定位 + 金额抽取 + 确定性求和(主逻辑,零 LLM)。
+"""金额统计 — 列定位 + 金额抽取 + 确定性求和(主逻辑,零 LLM)。
 
 核心理念(AGENTS.md「确定性优先,LLM 辅助」):
   - 金额抽取复用 compare.elements._fact_spans(已处理金额/日期/比例重叠优先级,
@@ -27,11 +27,21 @@ logger = logging.getLogger(__name__)
 # —— 启发式金额列关键词(按优先级排序,列表靠前优先级高)——
 # 每个 tuple: (关键词正则, 角色标签)。列名匹配时取命中的最高优先级角色。
 # 用正则而非子串:允许 "未付金额" 同时命中 unpaid 与 amount,取靠前的 unpaid。
+#
+# 含税金额统计(本通道目标):role 现在是**功能性**的,驱动含税合计口径:
+#   - tax_inclusive: 价税合计/含税 → 优先用此列,排除 amount/tax(防重复计入)
+#   - tax:          纯税额 → 无含税列时与 amount 列相加
+#   - amount:       不含税金额 → 无含税列时与 tax 列相加;无税列时单独作含税合计
+#   - paid/unpaid:  已付/未付 → 不进入含税合计(仅保留语义)
+#   - total:        总计/小计列 → 行级合计行的列形态,只入 declared_totals 不入 column_sums
 AMOUNT_COLUMN_KEYWORDS: list[tuple[str, str]] = [
+    # 价税合计/含税 优先级必须最高:否则会被 total(含「合计」)抢匹配为 total
+    (r"价税合计|含税金额|含税总价|含税|税价合计|价税", "tax_inclusive"),
     (r"合计|小计|总计|总额|总金额|合计金额", "total"),
+    (r"税额|税款|税金", "tax"),
     (r"未付|应付|未结|待结|欠款", "unpaid"),
     (r"已付|实付|已结|已收|实收", "paid"),
-    (r"金额|款额|数额|价税合计", "amount"),
+    (r"金额|款额|数额", "amount"),
 ]
 
 # 合计行识别:前若干列单元格含这些关键词即认为是合计行。
@@ -205,6 +215,39 @@ def summarize_table(
         diff = abs(column_sums[col_name] - declared_totals[col_name])
         totals_match[col_name] = diff <= Decimal("0.01")
 
+    # —— 含税金额合计(确定性,Decimal;LLM/代码均不做求和幻觉,此处是代码确定性算术)——
+    # 按列角色分组:role → 命中列的列名集合
+    cols_by_role: dict[str, list[str]] = {}
+    for col_idx, role_col in column_roles.items():
+        col_name = headers[col_idx] if col_idx < len(headers) else f"col{col_idx}"
+        cols_by_role.setdefault(role_col, []).append(col_name)
+
+    def _sum_cols(names: list[str]) -> Decimal:
+        total = Decimal("0")
+        for n in names:
+            total += column_sums.get(n, Decimal("0"))
+        return total
+
+    tax_inclusive_total = Decimal("0")
+    tax_inclusive_method = ""
+    tax_incl_cols = cols_by_role.get("tax_inclusive", [])
+    amount_cols = cols_by_role.get("amount", [])
+    tax_cols = cols_by_role.get("tax", [])
+
+    if tax_incl_cols:
+        # Case 1:有含税/价税合计列 → 只用它,排除 amount/tax(防重复计入)
+        tax_inclusive_total = _sum_cols(tax_incl_cols)
+        tax_inclusive_method = "含税/价税合计列"
+    elif amount_cols and tax_cols:
+        # Case 2:无含税列,但有金额(不含税)+税额 → 跨列相加(新增确定性算术)
+        tax_inclusive_total = _sum_cols(amount_cols) + _sum_cols(tax_cols)
+        tax_inclusive_method = "金额(不含税)列 + 税额列"
+    elif amount_cols:
+        # Case 3:只有金额列,无任何税相关列 → 照旧求和(语义上视作含税)
+        tax_inclusive_total = _sum_cols(amount_cols)
+        tax_inclusive_method = "金额列"
+    # 否则(只有 paid/unpaid/total 列)→ 含税合计为 0,口径为空(调用方/前端据此标 needs_review 或略过)
+
     return StatementTableSummary(
         file_index=file_index,
         file_name=file_name,
@@ -217,6 +260,8 @@ def summarize_table(
         items=items,
         skipped_rows=skipped_rows,
         column_source=column_source,
+        tax_inclusive_total=float(tax_inclusive_total),
+        tax_inclusive_method=tax_inclusive_method,
     )
 
 

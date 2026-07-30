@@ -95,7 +95,7 @@ class Task:
     kind: str = ""  # compare | raw | statement(用于 PG 双写)
     report: TamperReport | None = None
     raw_report: TextDiffReport | None = None  # 无标注版报告(与 report 互斥)
-    statement_report: StatementSummaryReport | None = None  # 对帐单金额统计报告(与上两者互斥)
+    statement_report: StatementSummaryReport | None = None  # 金额统计报告(与上两者互斥)
     events: list[dict] = field(default_factory=list)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
@@ -452,7 +452,7 @@ class TaskManager:
         amount_column_keywords: list[str] | None = None,
         enable_llm_column_detection: bool = True,
     ) -> None:
-        """对帐单金额统计任务:多文件串行 OCR + 表格抽取 + 代码确定性求和。"""
+        """金额统计任务:多文件串行 OCR + 表格抽取 + 代码确定性求和。"""
         task = self._tasks.get(task_id)
         if task is None:
             return

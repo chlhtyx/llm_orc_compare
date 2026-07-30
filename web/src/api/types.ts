@@ -197,7 +197,7 @@ export interface RawTaskInfo extends TaskInfo {
   raw_report?: TextDiffReport
 }
 
-// —— 对帐单金额统计(与后端 statement_pipeline 对应,独立通道)——
+// —— 金额统计(与后端 statement_pipeline 对应,独立通道)——
 export type StatementColumnSource = 'heuristic' | 'llm' | 'none'
 
 export interface StatementAmountItem {
@@ -225,6 +225,10 @@ export interface StatementTableSummary {
   items: StatementAmountItem[]
   skipped_rows: number[]
   column_source: Record<string, StatementColumnSource>
+  /** 本表含税金额合计(代码确定性算术) */
+  tax_inclusive_total: number
+  /** 含税口径来源,如「含税/价税合计列」「金额(不含税)列 + 税额列」「金额列」「LLM 抽取」 */
+  tax_inclusive_method: string
 }
 
 export interface StatementFileSummary {

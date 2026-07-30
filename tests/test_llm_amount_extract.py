@@ -1,4 +1,4 @@
-"""对帐单金额统计 — LLM 兜底金额抽取单元测试。
+"""金额统计 — LLM 兜底金额抽取单元测试。
 
 mock LLMOCREngine._post_chat,验证:
   - 发票纯数字金额抽取 + grounding 校验通过/拒绝

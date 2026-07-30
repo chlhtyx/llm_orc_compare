@@ -21,7 +21,7 @@ const router = createRouter({
       props: true,
     },
     {
-      // 对帐单金额统计:多文件 PDF,串行 OCR + 代码确定性求和 + 聚合总金额。
+      // 金额统计:多文件 PDF,串行 OCR + 代码确定性求和 + 聚合总金额。
       path: '/statement',
       name: 'statement-submit',
       component: () => import('@/views/StatementSubmitView.vue'),

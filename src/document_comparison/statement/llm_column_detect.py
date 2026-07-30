@@ -1,4 +1,4 @@
-"""对帐单金额统计 — LLM 兜底列指认。
+"""金额统计 — LLM 兜底列指认。
 
 仅在启发式 detect_amount_columns 返回空(无法定位金额列)时调用。
 让多模态 LLM 只指认"哪一列是金额列",返回列索引 + 角色(amount/paid/unpaid/total)。
@@ -20,18 +20,23 @@ from ..observability import log_value_summary, model_call_context
 logger = logging.getLogger(__name__)
 
 # LLM 返回的角色白名单(对齐 AMOUNT_COLUMN_KEYWORDS 的角色)
-_VALID_ROLES = {"amount", "paid", "unpaid", "total"}
+# tax_inclusive=含税/价税合计(本任务目标), tax=税额, amount=不含税金额
+_VALID_ROLES = {"amount", "paid", "unpaid", "total", "tax_inclusive", "tax"}
 
 _SYSTEM_PROMPT = (
-    "你是表格结构分析助手。任务:看图识别表格中哪些列是金额列。"
+    "你是表格结构分析助手。本任务只统计【含税金额】。任务:看图识别表格中哪些列是金额列。"
     "只返回 JSON,不做任何数值识别或计算。"
-    "金额列角色:amount=一般金额, paid=已付/实付, unpaid=未付/应付, total=合计/小计。"
+    "列角色:tax_inclusive=价税合计/含税/含税金额(本任务唯一目标,优先指认),"
+    "amount=金额/不含税金额(税前,需排除), tax=税额/税款(需排除),"
+    "paid=已付/实付, unpaid=未付/应付, total=合计/小计。"
+    "若同时存在 tax_inclusive 与 amount/tax 列,只指认 tax_inclusive,不要指认 amount 与 tax(避免重复计入)。"
 )
 
 _USER_PROMPT_TEMPLATE = (
     "下表表头各列如下(0 基索引):\n{headers_block}\n\n"
-    "请只返回 JSON,格式为 {{\"columns\": [{{\"index\": 0, \"role\": \"amount\"}}]}}。"
-    "只指认金额相关的列;如果没有金额列,返回 {{\"columns\": []}}。"
+    "请只返回 JSON,格式为 {{\"columns\": [{{\"index\": 0, \"role\": \"tax_inclusive\"}}]}}。"
+    "只指认金额相关的列;如果有含税/价税合计列,只指认它,跳过同表的金额(不含税)与税额列;"
+    "如果没有金额列,返回 {{\"columns\": []}}。"
     "不要识别具体数值,不要做任何加法或求和。"
 )
 

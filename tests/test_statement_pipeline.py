@@ -1,4 +1,4 @@
-"""对帐单金额统计流水线集成测试。
+"""金额统计流水线集成测试。
 
 用 mock OCR 引擎(让 recognize 返回构造好的 Block(label="table", table=TableStructure))
 避开真实 LLM 调用,覆盖 pipeline 的所有分支。
@@ -98,6 +98,116 @@ def test_single_pdf_single_table_heuristic(monkeypatch, tmp_path):
     assert report.files[0].error is None
     assert report.column_detection_summary.get("heuristic") == 1
     assert report.column_detection_summary.get("llm", 0) == 0
+
+
+def test_tax_inclusive_column_no_double_count(monkeypatch, tmp_path):
+    """含税金额统计:有价税合计列时 grand_total 用含税合计,不重复计入金额+税额。"""
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
+    block = _make_table_block(
+        headers=["项目", "金额", "税额", "价税合计"],
+        rows=[
+            ["A", "100元", "13元", "113元"],
+            ["B", "200元", "26元", "226元"],
+        ],
+        page_index=0,
+    )
+    reader = _make_mock_reader([[block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+    _disable_render(monkeypatch)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    # 含税合计 = 价税合计列 = 113 + 226 = 339(不是 100+200+13+26+113+226)
+    assert report.grand_total == 339.0
+    assert report.files[0].total_amount == 339.0
+    # 按列分桶仍展示构成(用于「按金额列汇总」)
+    assert report.grand_totals_by_column == {"金额": 300.0, "税额": 39.0, "价税合计": 339.0}
+    # 单表含税口径
+    assert report.files[0].tables[0].tax_inclusive_total == 339.0
+    assert report.files[0].tables[0].tax_inclusive_method == "含税/价税合计列"
+
+
+def test_tax_inclusive_amount_plus_tax_no_inclusive_column(monkeypatch, tmp_path):
+    """含税金额统计:无含税列时 含税=金额(不含税)+税额。"""
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
+    block = _make_table_block(
+        headers=["项目", "金额", "税额"],
+        rows=[["A", "100元", "13元"], ["B", "200元", "26元"]],
+        page_index=0,
+    )
+    reader = _make_mock_reader([[block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+    _disable_render(monkeypatch)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    # 含税 = 300 + 39 = 339
+    assert report.grand_total == 339.0
+    assert report.files[0].tables[0].tax_inclusive_total == 339.0
+    assert report.files[0].tables[0].tax_inclusive_method == "金额(不含税)列 + 税额列"
+
+
+# —— 全电发票坐标解析器集成 ——
+# parse_invoice_page 的坐标解析逻辑已在 test_invoice_layout.py 用 _FakePage 充分测试;
+# 此处只验证 pipeline 的"发票分发"接线:OCR 文本含发票特征时,丢弃 OCR 压扁的乱表,
+# 改用 invoice_layout 产出。通过 mock parse_invoice_page 返回已知表来隔离 PDF 渲染
+# (测试环境 pymupdf 无中文字体,无法渲染可读中文)。
+
+def test_invoice_dispatch_replaces_ocr_table(monkeypatch, tmp_path):
+    """OCR 文本像发票 → 丢弃 OCR 乱表,改用 invoice_layout 产出的规整表。"""
+    import document_comparison.statement_pipeline as sp
+    from document_comparison.models import TableStructure
+
+    pdf_path = _make_real_pdf(tmp_path, "inv.pdf", num_pages=1)
+    # OCR 返回"压扁"的乱表(模拟 pymupdf find_tables 对发票的失效结果)
+    bad_block = _make_table_block(
+        headers=["购买方信息"],
+        rows=[["商品A 100.00 13.00 商品B 200.00 26.00"]],
+        page_index=0,
+    )
+    reader = _make_mock_reader([[bad_block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+    _disable_render(monkeypatch)
+
+    # 让 OCR 文本含发票特征(触发 looks_like_invoice)
+    bad_block.content = "电⼦发票（普通发票）\n价税合计（大写）"
+
+    # mock parse_invoice_page 返回规整发票表(金额+税额两列),隔离坐标解析细节
+    good_table = TableStructure(
+        headers=["项目名称", "金额", "税额"],
+        rows=[["商品A", "100.00元", "13.00元"], ["商品B", "200.00元", "26.00元"]],
+    )
+    monkeypatch.setattr(
+        sp, "parse_invoice_page", lambda page: (good_table, 339.00)
+    )
+
+    report = run_statement_pipeline([pdf_path], ["inv.pdf"])
+    # 发票价税合计 = 金额(300) + 税额(39) = 339
+    assert report.grand_total == 339.0
+    assert report.files[0].total_amount == 339.0
+    # 用的是发票表(3 列),不是 OCR 的 1 列乱表
+    assert report.files[0].tables[0].headers == ["项目名称", "金额", "税额"]
+    assert report.files[0].tables[0].tax_inclusive_method == "金额(不含税)列 + 税额列"
+
+
+def test_non_invoice_not_dispatched_to_layout(monkeypatch, tmp_path):
+    """对帐单(非发票)不走坐标解析器,用 OCR 产出的原表。"""
+    pdf_path = _make_real_pdf(tmp_path, "stmt.pdf", num_pages=1)
+    block = _make_table_block(
+        headers=["项目", "金额"],
+        rows=[["A", "30000元"]],
+        page_index=0,
+    )
+    reader = _make_mock_reader([[block]])
+    _patch_get_ocr_engine(monkeypatch, reader)
+    _patch_page_metas(monkeypatch, 1)
+    _disable_render(monkeypatch)
+
+    report = run_statement_pipeline([pdf_path], ["stmt.pdf"])
+    # 对帐单走原表,金额 30000
+    assert report.grand_total == 30000.0
+    assert report.files[0].tables[0].tax_inclusive_method == "金额列"
 
 
 def test_heuristic_failure_no_llm_flag_marks_needs_review(monkeypatch, tmp_path):
