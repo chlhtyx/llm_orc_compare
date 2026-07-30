@@ -5,8 +5,9 @@
 - `task_events`:任务里程碑事件(start / 各阶段 done / done / failed),用于
   历史时间线查看;不入全量进度事件(高频写入),只入里程碑。
 - `llm_config`:LLM/OCR 模型配置单行 JSONB(UI 设置页持久化,不再走文件)。
-- `task_llm_calls`:对话型 LLM 调用的输入/输出记录(OCR/judge/llm-diff/statement-column/
-  statement-amount,含失败/重试),供「对比记录」页面查看模型调用明细。embedding 不入。
+- `task_llm_calls`:对话型 LLM 调用的输入/输出及最终 OCR 解析结果记录
+  (OCR/judge/llm-diff/statement-column/statement-amount/ocr-result,含失败/重试),
+  供「对比记录」页面查看模型/OCR明细。embedding 不入。
 - `external_api_calls`:外部接口(/api/v1/external/*)入站 HTTP 请求审计记录,
   覆盖提交/查询/图片请求以及 401 鉴权失败、422 校验失败等无 task_records 痕迹的调用。
 
@@ -157,9 +158,9 @@ class LlmConfigRecord(Base):
 
 
 class TaskLlmCall(Base):
-    """单次对话型 LLM HTTP 调用记录(含成功/失败/重试中间态)。
+    """单次对话型 LLM HTTP 调用或最终 OCR 解析结果记录。
 
-    由 observability.log_model_request/response/failure 经 contextvar 收集器产生,
+    由 observability 的模型调用拦截器或 record_ocr_result 经 contextvar 收集器产生,
     任务结束时批量入库。embedding 调用不入本表(文本→向量,非对话型)。
 
     payload 中的图片 base64 已在收集阶段由 _safe_model_value 脱敏为
@@ -174,7 +175,8 @@ class TaskLlmCall(Base):
         String(32), ForeignKey("task_records.task_id", ondelete="CASCADE"), index=True
     )
     # kind 与 observability._COLLECTED_KINDS 对齐:
-    # ocr | ocr-whole | paddleocr | judge | alignment | llm-diff | statement-column | statement-amount
+    # ocr | ocr-whole | ocr-result | paddleocr | judge | alignment | llm-diff
+    # | statement-column | statement-amount
     kind: Mapped[str] = mapped_column(String(32), index=True)
     # 第几次尝试(1-based;重试递增)。每次 attempt 各一行,便于看重试模式。
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -185,8 +187,8 @@ class TaskLlmCall(Base):
     error: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     # 请求体(图片已脱敏);非空。
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    # 响应体(截断 64KB);失败为 None。
-    response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True, default=None)
+    # 响应体(截断 64KB,超限时为带 truncated 标记的字符串);失败为 None。
+    response: Mapped[Any | None] = mapped_column(JSONB, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
     )

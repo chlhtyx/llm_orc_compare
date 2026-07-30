@@ -4,8 +4,10 @@
 - ``timed_stage``:阶段耗时上下文管理器(所有 pipeline 使用)。
 - ``log_model_request`` / ``log_model_response`` / ``log_model_failure``:对话型 LLM
   调用的请求/响应/失败日志,同时也是 LLM IO 记录的**单点拦截入口**。
+- ``record_ocr_result`` / ``record_ocr_text_result``:记录最终被流水线采用的 OCR
+  解析结果(页码、块、坐标、受限文本预览),用于排查模型原始响应解析后的错页/丢块问题。
 - ``llm_call_collector``:contextvar 收集器上下文管理器;tasks.py 用它包住 pipeline
-  执行,所有对话型 LLM 调用经 log_model_request 自动 append 到收集器,任务结束批量入库。
+  执行,所有对话型 LLM 调用和 OCR 最终解析结果在任务结束时批量入库。
 
 embedding 调用(kind="embedding")不收集(文本→向量,量太大且非对话型),
 但仍像以前一样写日志。
@@ -29,10 +31,11 @@ from typing import Any, Iterator
 
 @dataclass
 class LlmCallRecord:
-    """一次对话型 LLM HTTP 调用的完整记录(含成功/失败/重试中间态)。
+    """一次模型调用或 OCR 最终解析快照的完整任务级记录。
 
     生命周期:log_model_request 创建(填 kind/attempt/payload/created_at,其余 None)
     → log_model_response 或 log_model_failure 补全 status_code/elapsed_ms/response/error。
+    ``ocr-result`` 由 record_ocr_result / record_ocr_text_result 直接创建为完成态。
     """
 
     kind: str
@@ -96,11 +99,12 @@ def get_log_context() -> dict[str, str]:
     """供 logging handler 读取当前关联上下文，返回副本避免被意外修改。"""
     return dict(current_log_context.get())
 
-# 对话型 LLM kind 白名单;embedding 不收集(文本→向量,量太大)。
+# 任务级模型/OCR 审计 kind 白名单;embedding 不收集(文本→向量,量太大)。
 _COLLECTED_KINDS = frozenset(
     {
         "ocr",
         "ocr-whole",
+        "ocr-result",
         "paddleocr",
         "judge",
         "alignment",
@@ -114,6 +118,11 @@ _COLLECTED_KINDS = frozenset(
 _MAX_RESPONSE_CHARS = 65536
 # error 字段截断上限(对齐 ORM 列 String(512))。
 _MAX_ERROR_CHARS = 512
+# 最终 OCR 解析结果的双重体积限制。逐块预览用于定位断句/错页问题；完整内容可由
+# content_sha256 关联原始模型响应，避免同一份大合同在 JSONB 中重复保存多次。
+_MAX_OCR_RESULT_BLOCKS = 100
+_MAX_OCR_BLOCK_PREVIEW_CHARS = 300
+_MAX_OCR_TEXT_PREVIEW_CHARS = 32768
 
 
 @contextmanager
@@ -226,6 +235,221 @@ def _model_log_summary(value: Any) -> dict[str, Any]:
 def log_value_summary(value: Any) -> dict[str, Any]:
     """返回适合日志的内容摘要，供模型响应解析失败分支复用。"""
     return _model_log_summary(value)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _diagnostic_audit_value(diagnostic: Any) -> dict[str, Any]:
+    """提取不含原文的逐页识别诊断字段。"""
+    return {
+        key: getattr(diagnostic, key)
+        for key in (
+            "page_index",
+            "source",
+            "reliable",
+            "reasons",
+            "char_count",
+            "table_count",
+            "location_status",
+            "bbox_coverage",
+        )
+        if hasattr(diagnostic, key)
+    }
+
+
+def _table_shape(table: Any) -> dict[str, int] | None:
+    """只记录表格维度，不在摘要中重复保存单元格原文。"""
+    if table is None:
+        return None
+    headers = getattr(table, "headers", []) or []
+    rows = getattr(table, "rows", []) or []
+    return {
+        "header_count": len(headers),
+        "row_count": len(rows),
+        "max_columns": max(
+            [len(headers), *(len(row) for row in rows if isinstance(row, list))],
+            default=0,
+        ),
+    }
+
+
+def record_ocr_result(
+    logger: logging.Logger,
+    pages_blocks: list[list[Any]],
+    *,
+    diagnostics: list[Any] | None = None,
+    stage: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """把流水线最终采用的结构化 OCR blocks 写入当前任务的受控审计明细。
+
+    这是解析结果快照，不代表一次额外 HTTP 调用，因此直接创建已完成的
+    ``ocr-result`` 记录。常规 app.log 只写计数/字符数，不写内容；任务明细中每块
+    保存字符数、SHA-256 和最多 300 字预览，整条记录仍受 64KB 上限保护。
+    """
+    collector = current_llm_collector.get()
+    page_summaries: list[dict[str, Any]] = []
+    block_records: list[dict[str, Any]] = []
+    total_blocks = sum(len(blocks) for blocks in pages_blocks)
+    total_chars = 0
+    located_blocks = 0
+    if total_blocks <= _MAX_OCR_RESULT_BLOCKS:
+        selected_block_offsets = set(range(total_blocks))
+    elif _MAX_OCR_RESULT_BLOCKS > 1:
+        # 大合同时在整份文档上等距取样，避免“只记录前 100 块”导致第 4 页及后续页
+        # 恰好成为诊断盲区。逐页汇总仍覆盖所有页。
+        selected_block_offsets = {
+            round(index * (total_blocks - 1) / (_MAX_OCR_RESULT_BLOCKS - 1))
+            for index in range(_MAX_OCR_RESULT_BLOCKS)
+        }
+    else:
+        selected_block_offsets = {0}
+    block_offset = 0
+
+    for outer_page_index, blocks in enumerate(pages_blocks):
+        label_counts: dict[str, int] = {}
+        page_located = 0
+        for block in blocks:
+            content = str(getattr(block, "content", "") or "")
+            total_chars += len(content)
+            label = str(getattr(block, "label", "") or "")
+            label_counts[label] = label_counts.get(label, 0) + 1
+            bbox = list(getattr(block, "bbox", []) or [])
+            if len(bbox) >= 4:
+                located_blocks += 1
+                page_located += 1
+            if block_offset not in selected_block_offsets:
+                block_offset += 1
+                continue
+            preview = content[:_MAX_OCR_BLOCK_PREVIEW_CHARS]
+            block_records.append(
+                {
+                    "outer_page_index": outer_page_index,
+                    "block_page_index": getattr(block, "page_index", None),
+                    "block_id": getattr(block, "block_id", ""),
+                    "label": label,
+                    "bbox": bbox,
+                    "content_chars": len(content),
+                    "content_sha256": _sha256_text(content),
+                    "content_preview": preview,
+                    "content_truncated": len(preview) < len(content),
+                    "table_shape": _table_shape(getattr(block, "table", None)),
+                }
+            )
+            block_offset += 1
+        page_summaries.append(
+            {
+                "page_index": outer_page_index,
+                "block_count": len(blocks),
+                "located_block_count": page_located,
+                "label_counts": label_counts,
+            }
+        )
+
+    omitted_blocks = max(0, total_blocks - len(block_records))
+    logger.info(
+        "ocr parsed result stage=%s pages=%s blocks=%s located=%s chars=%s omitted=%s",
+        stage,
+        len(pages_blocks),
+        total_blocks,
+        located_blocks,
+        total_chars,
+        omitted_blocks,
+    )
+    if collector is None:
+        return
+
+    payload = {
+        "operation": "final_ocr_blocks",
+        "stage": stage,
+        "preview_policy": {
+            "max_blocks": _MAX_OCR_RESULT_BLOCKS,
+            "max_chars_per_block": _MAX_OCR_BLOCK_PREVIEW_CHARS,
+            "max_record_chars": _MAX_RESPONSE_CHARS,
+        },
+    }
+    if metadata:
+        payload["metadata"] = _safe_model_value(metadata)
+    response = {
+        "summary": {
+            "page_count": len(pages_blocks),
+            "block_count": total_blocks,
+            "located_block_count": located_blocks,
+            "content_chars": total_chars,
+            "recorded_block_count": len(block_records),
+            "omitted_block_count": omitted_blocks,
+        },
+        "pages": page_summaries,
+        "diagnostics": [
+            _diagnostic_audit_value(item) for item in (diagnostics or [])
+        ],
+        "blocks": block_records,
+    }
+    collector.append(
+        LlmCallRecord(
+            kind="ocr-result",
+            attempt=1,
+            payload=payload,
+            status_code=200,
+            elapsed_ms=0,
+            response=_truncate(response, _MAX_RESPONSE_CHARS),
+        )
+    )
+
+
+def record_ocr_text_result(
+    logger: logging.Logger,
+    text: str,
+    *,
+    diagnostic: Any = None,
+    stage: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """记录无结构化 blocks 的最终 PDF 读取文本(原生文本层或整篇 OCR)。"""
+    content = text or ""
+    logger.info(
+        "ocr parsed text result stage=%s chars=%s sha256=%s",
+        stage,
+        len(content),
+        _sha256_text(content),
+    )
+    collector = current_llm_collector.get()
+    if collector is None:
+        return
+    payload = {
+        "operation": "final_ocr_text",
+        "stage": stage,
+        "preview_policy": {
+            "max_chars": _MAX_OCR_TEXT_PREVIEW_CHARS,
+            "max_record_chars": _MAX_RESPONSE_CHARS,
+        },
+    }
+    if metadata:
+        payload["metadata"] = _safe_model_value(metadata)
+    preview = content[:_MAX_OCR_TEXT_PREVIEW_CHARS]
+    response = {
+        "summary": {
+            "content_chars": len(content),
+            "content_sha256": _sha256_text(content),
+            "content_truncated": len(preview) < len(content),
+        },
+        "diagnostic": (
+            _diagnostic_audit_value(diagnostic) if diagnostic is not None else None
+        ),
+        "content_preview": preview,
+    }
+    collector.append(
+        LlmCallRecord(
+            kind="ocr-result",
+            attempt=1,
+            payload=payload,
+            status_code=200,
+            elapsed_ms=0,
+            response=_truncate(response, _MAX_RESPONSE_CHARS),
+        )
+    )
 
 
 def log_model_request(

@@ -20,7 +20,7 @@ from .compare.llm_diff import llm_text_diff
 from .config import Settings, settings
 from .models import TextDiffReport
 from .ocr import get_text_ocr_engine
-from .observability import timed_stage
+from .observability import record_ocr_text_result, timed_stage
 from .parsing import parse_word
 from .structure.normalize import normalize_text
 
@@ -74,6 +74,13 @@ def run_raw_pipeline(
         read = ocr_whole_document(pdf_path, text_ocr, on_progress=_progress)
         pdf_text = read.text
         diagnostic = read.diagnostic
+    record_ocr_text_result(
+        logger,
+        pdf_text,
+        diagnostic=diagnostic,
+        stage="raw",
+        metadata={"ocr_backend": ocr_backend or cfg.ocr_backend},
+    )
     _progress("ocr_done", 0.70)
 
     # —— ③ normalize ——

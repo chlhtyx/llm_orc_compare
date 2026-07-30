@@ -16,12 +16,13 @@ import re
 from typing import Any
 
 from ..observability import log_value_summary, model_call_context
+from .amount_column import AMOUNT_COLUMN_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
 # LLM 返回的角色白名单(对齐 AMOUNT_COLUMN_KEYWORDS 的角色)
 # tax_inclusive=含税/价税合计(本任务目标), tax=税额, amount=不含税金额
-_VALID_ROLES = {"amount", "paid", "unpaid", "total", "tax_inclusive", "tax"}
+_VALID_ROLES = {role for _, role in AMOUNT_COLUMN_KEYWORDS}
 
 _SYSTEM_PROMPT = (
     "你是表格结构分析助手。本任务只统计【含税金额】。任务:看图识别表格中哪些列是金额列。"
@@ -50,7 +51,7 @@ def llm_detect_amount_columns(
     """启发式列定位失败时,让多模态 LLM 指认金额列。
 
     Args:
-        png_bytes: 表格所在页的 PNG 渲染字节(由 parsing.pdf.render_pages 产出)。
+        png_bytes: 表格所在页的 PNG 渲染字节(由 parsing.pdf.render_page 产出)。
         headers: 表头列表(用于在 prompt 中列出各列名)。
 
     Returns:

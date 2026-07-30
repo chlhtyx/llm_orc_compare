@@ -15,6 +15,7 @@ from pathlib import Path
 from docx import Document
 
 from document_comparison.parsing.word import parse_word
+from document_comparison.structure.clause import build_clauses
 
 
 def _make_rich_docx(path: Path) -> None:
@@ -101,3 +102,20 @@ def test_empty_table_dropped_warning(tmp_path, caplog):
     # 解析结果:只有段落,表格被跳过
     assert len(items) == 1
     assert items[0].kind == "paragraph"
+
+
+def test_word_page_break_is_preserved_as_deleted_location_hint(tmp_path):
+    """显式分页后的 Word 条款应携带页序，供 deleted 跨页占位定位使用。"""
+    doc = Document()
+    doc.add_paragraph("第十条 其他约定")
+    doc.add_page_break()
+    doc.add_paragraph("10.4 测试条款1232456767")
+    docx_path = tmp_path / "paged.docx"
+    doc.save(str(docx_path))
+
+    items = parse_word(str(docx_path))
+    clauses = build_clauses(items, "word")
+
+    assert [item.page_index for item in items] == [0, 1]
+    assert clauses[1].number == "10.4"
+    assert clauses[1].source_page_index == 1

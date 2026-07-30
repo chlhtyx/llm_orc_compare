@@ -393,13 +393,13 @@ def save_llm_config(config: dict[str, Any]) -> None:
             rec.config = payload
 
 
-# —— LLM 调用记录 CRUD(对话型调用 IO,embedding 不入)——
+# —— 模型调用与 OCR 解析结果记录 CRUD(embedding 不入)——
 
 
 def save_llm_calls_batch(
     task_id: str, records: "list[Any]"
 ) -> int:
-    """批量插入一个任务收集到的 LLM 调用记录(来自 observability 收集器)。
+    """批量插入一个任务收集到的模型调用/OCR 解析结果记录。
 
     records 元素是 observability.LlmCallRecord dataclass。一次 session 批量 add,
     失败由 session_scope 记日志并回滚(调用方 _safe_db 会再吞一次)。

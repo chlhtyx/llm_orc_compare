@@ -55,14 +55,17 @@ export interface TaskEventItem {
   created_at: string | null
 }
 
-/** 对话型 LLM 调用 kind(后端 observability._COLLECTED_KINDS)。embedding 不入。 */
+/** 任务级模型/OCR 审计 kind(后端 observability._COLLECTED_KINDS)。embedding 不入。 */
 export type LlmCallKind =
   | 'ocr'
   | 'ocr-whole'
+  | 'ocr-result'
   | 'paddleocr'
   | 'judge'
+  | 'alignment'
   | 'llm-diff'
   | 'statement-column'
+  | 'statement-amount'
 
 /** 单次 LLM 调用记录(后端 repository.llm_call_to_dict)。 */
 export interface LlmCallItem {
@@ -75,8 +78,8 @@ export interface LlmCallItem {
   error: string | null
   /** payload 中图片 base64 已被脱敏为 {data_url, base64_chars, sha256} */
   payload: Record<string, unknown>
-  /** response 截断到 64KB;失败为 null */
-  response: Record<string, unknown> | null
+  /** response 截断到 64KB;超限时可能是带 truncated 标记的字符串 */
+  response: unknown | null
   created_at: string | null    // ISO
 }
 

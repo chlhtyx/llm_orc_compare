@@ -94,7 +94,11 @@ def get_page_metas(path: str | Path, dpi: int = 300) -> list[PageMeta]:
 
 
 def render_pages(path: str | Path, dpi: int = 300) -> list[bytes]:
-    """渲染每页为 PNG 字节流(交给真实 OCR 引擎)。"""
+    """渲染每页为 PNG 字节流(交给真实 OCR 引擎)。
+
+    一次性打开文档遍历所有页,适合需要全部页面的场景(如 OCR)。
+    若只需某一页,用 render_page 避免全量渲染。
+    """
     scale = dpi / 72.0
     matrix = fitz.Matrix(scale, scale)
     images: list[bytes] = []
@@ -103,6 +107,19 @@ def render_pages(path: str | Path, dpi: int = 300) -> list[bytes]:
             pix = page.get_pixmap(matrix=matrix)
             images.append(pix.tobytes("png"))
     return images
+
+
+def render_page(path: str | Path, page_index: int, dpi: int = 300) -> bytes:
+    """渲染指定页为 PNG 字节流(惰性按页渲染)。
+
+    供 LLM 兜底等「只需个别页面」的场景调用,避免对整份 PDF 做全量渲染。
+    """
+    scale = dpi / 72.0
+    matrix = fitz.Matrix(scale, scale)
+    with fitz.open(str(path)) as doc:
+        page = doc.load_page(page_index)
+        pix = page.get_pixmap(matrix=matrix)
+        return pix.tobytes("png")
 
 
 def extract_text_blocks(path: str | Path) -> list[list[Block]]:

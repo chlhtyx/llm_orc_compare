@@ -22,6 +22,7 @@ from typing import Any
 from ..compare import elements as _elements
 from ..models import StatementAmountItem
 from ..observability import log_value_summary, model_call_context
+from .amount_column import AMOUNT_COLUMN_COMPILED
 
 logger = logging.getLogger(__name__)
 
@@ -280,11 +281,8 @@ def _pick_amount_column_name(headers: list[str]) -> str:
 
     优先取表头里最像金额的列名(金额/价税合计/税额/合计);都没有则用 "金额(llm)"。
     """
-    from .amount_column import AMOUNT_COLUMN_KEYWORDS
-
-    compiled = [re.compile(pat) for pat, _ in AMOUNT_COLUMN_KEYWORDS]
     for h in headers:
         name = re.sub(r"\s+", "", str(h)).strip()
-        if name and any(p.search(name) for p in compiled):
+        if name and any(p.search(name) for p, _ in AMOUNT_COLUMN_COMPILED):
             return h
     return "金额(llm)"

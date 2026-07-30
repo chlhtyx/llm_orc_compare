@@ -38,6 +38,11 @@ const router = createRouter({
       component: () => import('@/views/ModelConfigView.vue'),
     },
     {
+      path: '/api-config',
+      name: 'external-api-config',
+      component: () => import('@/views/ExternalApiConfigView.vue'),
+    },
+    {
       // 比对记录:从 Postgres 查询历史任务列表与里程碑时间线。
       path: '/history',
       name: 'history',

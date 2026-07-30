@@ -17,6 +17,7 @@ from document_comparison.models import (
     PageRegion,
     TamperReport,
 )
+from document_comparison.observability import llm_call_collector
 from document_comparison.parsing.pdf import count_pages, extract_text_blocks
 from document_comparison.pipeline import run_pipeline
 from document_comparison.report.builder import burn_pdf
@@ -108,6 +109,16 @@ class _TextLayerOCR:
 
     def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
         return extract_text_blocks(pdf_path)
+
+
+class _MisindexedTextLayerOCR:
+    """模拟第三方 OCR 把多个物理页错误标成同一页的回归用例。"""
+
+    def recognize(self, pdf_path: Path, page_metas: list[PageMeta], *, on_progress=None):
+        return [
+            [block.model_copy(update={"page_index": 1}) for block in blocks]
+            for blocks in extract_text_blocks(pdf_path)
+        ]
 
 
 class _MergedTextLayerOCR:
@@ -486,6 +497,54 @@ def _make_multipage_pdf(tmp_path: Path, n_pages: int) -> Path:
     pdf.save(path)
     pdf.close()
     return path
+
+
+def test_pipeline_corrects_misindexed_ocr_blocks_before_pdf_highlighting(tmp_path: Path):
+    """页 1、2、4 的差异不得因 OCR 页号错误而都画到第 2 页。"""
+    wpath = tmp_path / "c.docx"
+    word = Document()
+    for page_number in range(1, 5):
+        word.add_heading(f"第{page_number}条 原始内容", level=1)
+        if page_number < 4:
+            word.add_page_break()
+    word.save(wpath)
+
+    ppath = tmp_path / "4p-changed.pdf"
+    pdf = fitz.open()
+    for page_number in range(1, 5):
+        page = pdf.new_page(width=595, height=842)
+        page.insert_text(
+            (72, 100),
+            f"第{page_number}条 回收件已修改内容",
+            fontname="china-s",
+            fontsize=16,
+        )
+    pdf.save(ppath)
+    pdf.close()
+
+    with llm_call_collector() as audit_records:
+        report = run_pipeline(
+            wpath, ppath, ocr=_MisindexedTextLayerOCR(), embed=MockEmbedding(),
+        )
+    ocr_result = next(record for record in audit_records if record.kind == "ocr-result")
+    assert isinstance(ocr_result.response, dict)
+    assert {
+        block["block_page_index"] for block in ocr_result.response["blocks"]
+    } == {0, 1, 2, 3}
+    highlighted_pages = {
+        region.page_index
+        for diff in [*report.diffs, *report.unmatched_clauses]
+        for region in diff.page_regions
+    }
+    assert {0, 1, 3}.issubset(highlighted_pages)
+
+    annotated = tmp_path / "annotated.pdf"
+    burn_pdf(ppath, report, annotated)
+    with fitz.open(annotated) as annotated_doc:
+        assert [
+            len(list(annotated_doc[page_index].annots() or []))
+            for page_index in (0, 1, 3)
+        ] == [1, 1, 1]
 
 
 def test_pipeline_truncates_trailing_drawings_after_estimated_contract_pages(

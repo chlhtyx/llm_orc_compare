@@ -372,3 +372,61 @@ def test_audit_record_survives_task_deletion(external_client, monkeypatch):
     records, total = db_repo.list_external_calls(document_no="BILL-DEL")
     assert total >= 1
     assert any(r.task_id == task_id for r in records)
+
+
+def test_statement_submit_and_result_record_audit(external_client, monkeypatch):
+    """金额统计对外 API:提交与查询均落库审计,endpoint 标签为 amountStat.*。"""
+    from document_comparison.api.app import task_manager
+
+    async def _no_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run_statement", _no_run)
+    submit = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "STMT-AUDIT-1",
+            "callback_url": "http://internal/callback",
+        },
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert submit.status_code == 202, submit.json()
+    task_id = submit.json()["task_id"]
+
+    _wait_for_call_count(
+        lambda: any(
+            c.task_id == task_id and c.endpoint == "amountStat.submit"
+            for c in _all_calls()
+        )
+    )
+    rec = next(
+        c for c in _all_calls()
+        if c.task_id == task_id and c.endpoint == "amountStat.submit"
+    )
+    assert rec.method == "POST"
+    assert rec.status_code == 202
+    assert rec.document_no == "STMT-AUDIT-1"
+    assert rec.error is None
+    assert submit.headers.get("X-Request-Id") == rec.request_id
+
+    # 查询端点
+    query = external_client.get(
+        f"/api/v1/external/amountStat/{task_id}",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert query.status_code == 200
+    _wait_for_call_count(
+        lambda: any(
+            c.task_id == task_id and c.endpoint == "amountStat.result"
+            for c in _all_calls()
+        )
+    )
+    rec2 = next(
+        c for c in _all_calls()
+        if c.task_id == task_id and c.endpoint == "amountStat.result"
+    )
+    assert rec2.method == "GET"
+    assert rec2.status_code == 200

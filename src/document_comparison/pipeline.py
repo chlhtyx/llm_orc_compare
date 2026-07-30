@@ -18,10 +18,10 @@ from .align.llm_resolver import (
 from .align.raw_plan import align_raw_items
 from .config import Settings, settings
 from .embed import get_embed_engine, is_mock_engine
-from .models import TamperReport, TruncationRecord
+from .models import Block, TamperReport, TruncationRecord
 from .ocr import get_ocr_engine
 from .ocr.quality import apply_recognition_gate
-from .observability import timed_stage
+from .observability import record_ocr_result, timed_stage
 from .parsing import count_pages, estimate_page_count, get_page_metas, parse_word, slice_pdf
 from .report import build_report
 from .structure import blocks_to_raw, build_clauses
@@ -29,6 +29,36 @@ from .structure import blocks_to_raw, build_clauses
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str, float], None]
+
+
+def _enforce_ocr_page_indexes(pages_blocks: list[list[Block]]) -> list[list[Block]]:
+    """以 OCR 返回的外层页序为准，校正块中错误的页号。
+
+    ``OCREngine.recognize`` 的返回值按页分组，外层下标才是跨引擎稳定的页归属。
+    第三方 OCR/版面服务偶发把多页结果都标成同一个 ``page_index``；若直接信任
+    该字段，后续条款、报告和 PDF 预览会把不同页的高亮全部叠到同一页。
+    """
+    corrected_pages: set[int] = set()
+    corrected_blocks = 0
+    normalized: list[list[Block]] = []
+    for expected_page_index, blocks in enumerate(pages_blocks):
+        normalized_page: list[Block] = []
+        for block in blocks:
+            if block.page_index != expected_page_index:
+                corrected_pages.add(expected_page_index)
+                corrected_blocks += 1
+                block = block.model_copy(
+                    update={"page_index": expected_page_index}
+                )
+            normalized_page.append(block)
+        normalized.append(normalized_page)
+    if corrected_blocks:
+        logger.warning(
+            "ocr block page-index mismatch corrected blocks=%s pages=%s",
+            corrected_blocks,
+            sorted(corrected_pages),
+        )
+    return normalized
 
 
 def run_pipeline(
@@ -132,6 +162,7 @@ def run_pipeline(
             pages_blocks = ocr.recognize(
                 Path(pdf_path), direct_page_metas, on_progress=_progress
             )
+            pages_blocks = _enforce_ocr_page_indexes(pages_blocks)
         total_blocks = sum(len(b) for b in pages_blocks)
         with_bbox = sum(
             1 for page in pages_blocks for b in page if len(b.bbox) >= 4
@@ -147,6 +178,13 @@ def run_pipeline(
             b.content for page in pages_blocks for b in page if b.content
         )
         diagnostics = list(getattr(ocr, "last_diagnostics", []) or [])
+        record_ocr_result(
+            logger,
+            pages_blocks,
+            diagnostics=diagnostics,
+            stage="llm-direct",
+            metadata={"ocr_backend": ocr_backend or cfg.ocr_backend},
+        )
 
         # —— normalize 两端 ——
         _progress("normalize", 0.75)
@@ -234,6 +272,15 @@ def run_pipeline(
         page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
     with timed_stage(logger, "pdf_ocr", pages=len(page_metas)):
         pages_blocks = ocr.recognize(Path(pdf_path), page_metas, on_progress=_progress)
+        pages_blocks = _enforce_ocr_page_indexes(pages_blocks)
+    diagnostics = list(getattr(ocr, "last_diagnostics", []) or [])
+    record_ocr_result(
+        logger,
+        pages_blocks,
+        diagnostics=diagnostics,
+        stage="compare",
+        metadata={"ocr_backend": ocr_backend or cfg.ocr_backend},
+    )
     total_blocks = sum(len(b) for b in pages_blocks)
     logger.info(
         "ocr done pages=%s blocks=%s dpi=%s",
@@ -325,7 +372,6 @@ def run_pipeline(
             enable_risk_assessment=enable_risk_assessment,
             truncation=truncation,
         )
-        diagnostics = list(getattr(ocr, "last_diagnostics", []))
         apply_recognition_gate(
             report, diagnostics, enable_risk_assessment=enable_risk_assessment,
         )

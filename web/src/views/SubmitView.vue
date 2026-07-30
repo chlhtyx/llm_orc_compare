@@ -9,16 +9,10 @@ const configStore = useModelConfigStore()
 
 const sourceFile = ref<File | null>(null)
 const targetFile = ref<File | null>(null)
-const keyDirty = ref(false)
 const saved = ref(false)
 const saveError = ref<string | null>(null)
 
 const form = reactive({
-  external_api_key: '',
-  external_public_base_url: '',
-  external_max_upload_mb: 50,
-  external_image_dpi: 144,
-  external_ocr_backend: 'paddleocr' as 'llm' | 'paddleocr',
   external_enable_llm_judge: false,
   external_enable_llm_alignment: false,
   external_enable_risk_assessment: false,
@@ -29,24 +23,17 @@ const form = reactive({
 const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWith('.docx'))
 const targetValid = computed(() => !!targetFile.value?.name.toLowerCase().endsWith('.pdf'))
 const endpoint = computed(() => {
-  const base = form.external_public_base_url.trim().replace(/\/$/, '')
+  const base = (configStore.config?.external_public_base_url || '').trim().replace(/\/$/, '')
   return `${base || 'https://compare.example.com'}/api/v1/external/contractCompare`
 })
 
 function syncFromConfig(config: LlmConfig | null): void {
   if (!config) return
-  // 不把脱敏值放回可编辑框，避免用户编辑星号后误覆盖真实 Key。
-  form.external_api_key = ''
-  form.external_public_base_url = config.external_public_base_url || ''
-  form.external_max_upload_mb = config.external_max_upload_mb ?? 50
-  form.external_image_dpi = config.external_image_dpi ?? 144
-  form.external_ocr_backend = config.external_ocr_backend || 'paddleocr'
   form.external_enable_llm_judge = config.external_enable_llm_judge ?? false
   form.external_enable_llm_alignment = config.external_enable_llm_alignment ?? false
   form.external_enable_risk_assessment = config.external_enable_risk_assessment ?? false
   form.external_enable_llm_direct_diff = config.external_enable_llm_direct_diff ?? false
   form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
-  keyDirty.value = false
 }
 
 onMounted(async () => {
@@ -61,11 +48,6 @@ async function onSave(): Promise<void> {
   saved.value = false
   saveError.value = null
   const ok = await configStore.save({
-    external_api_key: keyDirty.value ? form.external_api_key : '********',
-    external_public_base_url: form.external_public_base_url.trim(),
-    external_max_upload_mb: Number(form.external_max_upload_mb),
-    external_image_dpi: Number(form.external_image_dpi),
-    external_ocr_backend: form.external_ocr_backend,
     external_enable_llm_judge:
       form.external_enable_risk_assessment && form.external_enable_llm_judge,
     external_enable_llm_alignment: form.external_enable_llm_alignment,
@@ -88,19 +70,6 @@ async function onReset(): Promise<void> {
   saved.value = false
 }
 
-// 已设置 Key 时输入框恒为空(syncFromConfig 不回填脱敏值),用户无法通过 @input
-// 触发 keyDirty,清空路径走不通。onClearKey 显式标记为待清除,保存时发空串。
-const keyPendingClear = computed(
-  () =>
-    keyDirty.value &&
-    form.external_api_key === '' &&
-    !!configStore.config?.external_api_key_set,
-)
-
-function onClearKey(): void {
-  form.external_api_key = ''
-  keyDirty.value = true
-}
 </script>
 
 <template>
@@ -110,7 +79,7 @@ function onClearKey(): void {
         <p class="eyebrow">Contract comparison API</p>
         <h1>合同比对 API</h1>
         <p class="header-copy">
-          配置外部系统调用入口，并用真实合同验证从识别、比对到高亮图片的完整管线。
+          用真实合同验证从识别、比对到高亮图片的完整外部 API 管线。
         </p>
       </div>
       <div class="service-state" :class="{ enabled: configStore.config?.external_enabled }">
@@ -128,106 +97,18 @@ function onClearKey(): void {
       <div class="section-heading">
         <div>
           <span class="section-index">01</span>
-          <h2>API 服务配置</h2>
-          <p>保存后立即应用于正式外部接口和下方管线测试，无需重启服务。</p>
+          <h2>比对默认选项</h2>
+          <p>仅维护合同比对的流程选项；通用访问配置统一在外部 API 配置页维护。</p>
         </div>
         <code>POST {{ endpoint }}</code>
-      </div>
-
-      <div class="form-grid">
-        <div class="field span-2">
-          <label for="external-api-key">外部调用 API Key</label>
-          <input
-            id="external-api-key"
-            v-model="form.external_api_key"
-            class="input"
-            type="password"
-            autocomplete="new-password"
-            :placeholder="configStore.config?.external_api_key_set ? '已设置，输入新值可覆盖' : '请输入高强度随机 Key'"
-            @input="keyDirty = true"
-          />
-          <span class="hint">
-            <template v-if="configStore.config?.external_api_key_set">
-              当前值：{{ configStore.config.external_api_key || '****' }}；不修改此输入框即可保留原 Key。
-              <button
-                v-if="!keyPendingClear"
-                type="button"
-                class="link-btn danger"
-                @click="onClearKey"
-              >清除当前 Key</button>
-              <span v-else class="pending-clear">将清除当前 Key（不鉴权直接放行）</span>
-            </template>
-            <template v-else>外部系统通过 <code>X-API-Key</code> 请求头鉴权。</template>
-          </span>
-        </div>
-
-        <div class="field span-2">
-          <label for="external-base-url">服务公开地址</label>
-          <input
-            id="external-base-url"
-            v-model="form.external_public_base_url"
-            class="input"
-            placeholder="https://compare.example.com"
-          />
-          <span class="hint">用于生成结果查询地址和高亮 PNG 绝对链接，不要包含查询参数或 # 片段。</span>
-        </div>
-
-        <div class="field">
-          <label for="upload-limit">单文件上传上限</label>
-          <div class="input-with-unit">
-            <input
-              id="upload-limit"
-              v-model.number="form.external_max_upload_mb"
-              class="input"
-              type="number"
-              min="1"
-              max="1024"
-            />
-            <span>MiB</span>
-          </div>
-          <span class="hint">分别限制原始 DOCX 和回收 PDF。</span>
-        </div>
-
-        <div class="field">
-          <label for="image-dpi">高亮图片清晰度</label>
-          <div class="input-with-unit">
-            <input
-              id="image-dpi"
-              v-model.number="form.external_image_dpi"
-              class="input"
-              type="number"
-              min="72"
-              max="600"
-            />
-            <span>DPI</span>
-          </div>
-          <span class="hint">用于生成整份回收件的逐页 PNG。</span>
-        </div>
       </div>
 
       <div class="options-panel">
         <div class="options-copy">
           <h3>比对选项 <span>可选</span></h3>
           <p>作为 API 的默认比对配置，正式调用与测试任务保持一致。</p>
+          <RouterLink to="/api-config" class="config-link">维护通用 API 配置</RouterLink>
         </div>
-
-        <fieldset class="engine-field">
-          <legend>识别引擎</legend>
-          <label class="choice" :class="{ selected: form.external_ocr_backend === 'paddleocr' }">
-            <input v-model="form.external_ocr_backend" type="radio" value="paddleocr" />
-            <span>
-              <strong>PaddleOCR</strong>
-              <small>专用 OCR 模型</small>
-            </span>
-          </label>
-          <label class="choice" :class="{ selected: form.external_ocr_backend === 'llm' }">
-            <input v-model="form.external_ocr_backend" type="radio" value="llm" />
-            <span>
-              <strong>LLM</strong>
-              <small>通用视觉语言模型</small>
-            </span>
-          </label>
-        </fieldset>
 
        <div class="option-toggles">
           <label class="toggle-row">
@@ -289,7 +170,7 @@ function onClearKey(): void {
 
       <div class="config-actions">
         <button class="btn btn-primary" :disabled="configStore.saving" @click="onSave">
-          {{ configStore.saving ? '保存中…' : '保存 API 配置' }}
+          {{ configStore.saving ? '保存中…' : '保存比对选项' }}
         </button>
         <button class="btn" type="button" :disabled="configStore.loading" @click="onReset">
           恢复已保存配置
@@ -501,7 +382,7 @@ function onClearKey(): void {
 }
 .options-panel {
   display: grid;
-  grid-template-columns: 0.8fr 1.3fr 1.2fr;
+  grid-template-columns: 0.8fr 1.6fr;
   gap: 22px;
   align-items: center;
   margin-top: 26px;
@@ -523,6 +404,13 @@ function onClearKey(): void {
   margin: 5px 0 0;
   color: var(--text-muted);
   font-size: 12px;
+}
+.config-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
 }
 .engine-field {
   display: flex;

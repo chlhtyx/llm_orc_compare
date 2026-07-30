@@ -25,7 +25,11 @@ from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
 from .statement_pipeline import run_statement_pipeline
 from .observability import llm_call_collector, log_context
-from .external_api import build_external_result, render_external_highlight_images
+from .external_api import (
+    build_external_result,
+    build_external_statement_result,
+    render_external_highlight_images,
+)
 from .storage import compared_pdf_path, effective_target_path
 from . import webhook
 
@@ -492,11 +496,22 @@ class TaskManager:
                 "task done(statement) grand_total=%s verdict=%s stage_timings=%s",
                 report.grand_total, report.verdict, task.info.stage_timings,
             )
-            await self._fire_callback(task_id, "done", {
-                "grand_total": report.grand_total,
-                "verdict": report.verdict,
-                "report_url": f"/api/v1/statement/{task_id}/report",
-            })
+            if task.external_request and task.document_no:
+                external = build_external_statement_result(
+                    task_id, task.document_no, report
+                )
+                payload = {
+                    "event_type": "statement.summary.completed",
+                    "document_no": task.document_no,
+                }
+                payload.update(external)
+                await self._fire_or_schedule_callback(task_id, "done", payload)
+            else:
+                await self._fire_callback(task_id, "done", {
+                    "grand_total": report.grand_total,
+                    "verdict": report.verdict,
+                    "report_url": f"/api/v1/statement/{task_id}/report",
+                })
         except Exception as e:  # noqa: BLE001
             task.info.status = "failed"
             task.info.error = str(e)
@@ -508,7 +523,14 @@ class TaskManager:
                 stage_timings=dict(task.info.stage_timings),
             )
             self._record_milestone(task, "failed", task.info.progress)
-            await self._fire_callback(task_id, "failed", {"error": str(e)})
+            if task.external_request:
+                await self._fire_or_schedule_callback(task_id, "failed", {
+                    "event_type": "statement.summary.failed",
+                    "document_no": task.document_no,
+                    "error": str(e),
+                })
+            else:
+                await self._fire_callback(task_id, "failed", {"error": str(e)})
         finally:
             task.done.set()
             task.finalize_elapsed()

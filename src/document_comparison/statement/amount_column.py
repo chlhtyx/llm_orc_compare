@@ -44,6 +44,11 @@ AMOUNT_COLUMN_KEYWORDS: list[tuple[str, str]] = [
     (r"金额|款额|数额", "amount"),
 ]
 
+# 预编译(模块级常量,避免每张表重复编译);亦供 llm_amount_extract 复用。
+AMOUNT_COLUMN_COMPILED: list[tuple[re.Pattern, str]] = [
+    (re.compile(pat), role) for pat, role in AMOUNT_COLUMN_KEYWORDS
+]
+
 # 合计行识别:前若干列单元格含这些关键词即认为是合计行。
 TOTAL_ROW_KEYWORDS: tuple[str, ...] = ("合计", "小计", "总计", "总额", "价税合计")
 
@@ -75,13 +80,12 @@ def detect_amount_columns(
                 result[idx] = "amount"
         return result
 
-    compiled = [(re.compile(pat), role) for pat, role in AMOUNT_COLUMN_KEYWORDS]
     for idx, raw in enumerate(headers):
         name = _normalize_header(raw)
         if not name:
             continue
         # 按优先级遍历,命中即取
-        for pattern, role in compiled:
+        for pattern, role in AMOUNT_COLUMN_COMPILED:
             if pattern.search(name):
                 result[idx] = role
                 break
@@ -158,7 +162,7 @@ def summarize_table(
 
     column_source: dict[str, ColumnSource] = {}
     for col_idx in column_roles:
-        col_name = headers[col_idx] if col_idx < len(headers) else f"col{col_idx}"
+        col_name = _col_name(headers, col_idx)
         if column_source_override and col_idx in column_source_override:
             column_source[col_name] = column_source_override[col_idx]
         else:
@@ -180,7 +184,7 @@ def summarize_table(
             if col_idx >= len(row):
                 continue
             cell = row[col_idx]
-            col_name = headers[col_idx] if col_idx < len(headers) else f"col{col_idx}"
+            col_name = _col_name(headers, col_idx)
             amounts = extract_amounts_from_cell(str(cell or ""))
             if not amounts:
                 continue
@@ -219,8 +223,7 @@ def summarize_table(
     # 按列角色分组:role → 命中列的列名集合
     cols_by_role: dict[str, list[str]] = {}
     for col_idx, role_col in column_roles.items():
-        col_name = headers[col_idx] if col_idx < len(headers) else f"col{col_idx}"
-        cols_by_role.setdefault(role_col, []).append(col_name)
+        cols_by_role.setdefault(role_col, []).append(_col_name(headers, col_idx))
 
     def _sum_cols(names: list[str]) -> Decimal:
         total = Decimal("0")
@@ -317,6 +320,11 @@ def merge_cross_page_tables(
 
 
 # —— 内部工具 ——
+
+def _col_name(headers: list[str], idx: int) -> str:
+    """列名取值:越界时回退为 f"col{idx}",避免索引异常。"""
+    return headers[idx] if idx < len(headers) else f"col{idx}"
+
 
 def _normalize_header(raw: str) -> str:
     """列名归一化:去空白、统一全角/半角,便于关键词匹配。"""

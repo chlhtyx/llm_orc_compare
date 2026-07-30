@@ -354,6 +354,7 @@ def build_clauses(raw_items: list[RawItem], doc_type: DocType) -> list[Clause]:
             number=number,
             title=title,
             text=text,
+            source_page_index=item.page_index if doc_type == "word" else None,
             blocks=blocks,
             field_key=field_key,
             parent_path=parent_path,

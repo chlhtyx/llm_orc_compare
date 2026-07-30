@@ -45,6 +45,19 @@ def _iter_block_items(doc: _Doc):
             yield Table(child, doc)
 
 
+def _paragraph_page_break_count(paragraph: Paragraph) -> int:
+    """返回段落中的显式或 Word 保存时记录的分页标记数。"""
+    from docx.oxml.ns import qn  # type: ignore[import-untyped]
+
+    count = 0
+    for element in paragraph._p.iter():
+        if element.tag == qn("w:br") and element.get(qn("w:type")) == "page":
+            count += 1
+        elif element.tag == qn("w:lastRenderedPageBreak"):
+            count += 1
+    return count
+
+
 def _table_rows(table: Table) -> list[list[str]]:
     """提取表格各行单元格文本(已 strip),处理两类常见版式:
 
@@ -157,28 +170,38 @@ def parse_word(path: str | Path) -> list[RawItem]:
     doc = Document(str(path))
     items: list[RawItem] = []
     skipped_empty = 0
+    page_index = 0
     for block in _iter_block_items(doc):
         if isinstance(block, Paragraph):
             text = block.text.strip()
             if not text:
                 skipped_empty += 1
-                continue
-            style = (block.style.name or "") if block.style else ""
-            if "heading" in style.lower() or "title" in style.lower():
-                items.append(
-                    RawItem(
-                        text=text,
-                        kind="heading",
-                        heading_level=_heading_level(style),
-                    )
-                )
             else:
-                items.append(RawItem(text=text, kind="paragraph"))
+                style = (block.style.name or "") if block.style else ""
+                if "heading" in style.lower() or "title" in style.lower():
+                    items.append(
+                        RawItem(
+                            text=text,
+                            kind="heading",
+                            heading_level=_heading_level(style),
+                            page_index=page_index,
+                        )
+                    )
+                else:
+                    items.append(
+                        RawItem(text=text, kind="paragraph", page_index=page_index)
+                    )
+            page_index += _paragraph_page_break_count(block)
         elif isinstance(block, Table):
             txt = _table_to_text(block)
             if txt.strip():
                 items.append(
-                    RawItem(text=txt, kind="table", table=_table_to_structure(block))
+                    RawItem(
+                        text=txt,
+                        kind="table",
+                        table=_table_to_structure(block),
+                        page_index=page_index,
+                    )
                 )
     _log_parse_summary(path, doc, items, skipped_empty, started_at)
     return items

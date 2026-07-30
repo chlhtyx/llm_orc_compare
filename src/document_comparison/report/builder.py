@@ -219,6 +219,7 @@ def _estimate_deleted_page_regions(
     ]
     pre = _neighbor_page_regions(position, -1, word_pos, paired, pdf_by, pmeta)
     post = _neighbor_page_regions(position, +1, word_pos, paired, pdf_by, pmeta)
+    source_page_index = word_by[word_clause_id].source_page_index
 
     def _placeholder(page_index: int, bbox: list[float]) -> PageRegion:
         return PageRegion(page_index=page_index, bbox=bbox, shape="rect", kind="placeholder")
@@ -250,13 +251,22 @@ def _estimate_deleted_page_regions(
                         pre_r.page_index,
                         [left / pw, top / ph, right / pw, bottom / ph],
                     )]
-        # 跨页:退化为贴前邻居下方(若前邻居存在)
-        if pre:
-            return _attach_to_neighbor(pre[-1], pmeta, after=True, _placeholder=_placeholder)
+        # 跨页时不能无条件选前邻居。例如第十条从第 2 页延续到第 4 页，
+        # 10.4 删除后贴第 2 页会生成错误的「推断位置」。若 Word 的页序线索
+        # 指向后邻居所在页，优先贴后邻居上方；否则不伪造单页位置。
+        if source_page_index is not None and post[0].page_index == source_page_index:
+            return _attach_to_neighbor(
+                post[0], pmeta, after=False, _placeholder=_placeholder
+            )
+        return []
 
-    # 仅前向邻居:贴其下方
+    # 仅前向邻居:若 Word 页序已指向另一页，不能把 deleted 硬贴到前页。
     if pre:
-        return _attach_to_neighbor(pre[-1], pmeta, after=True, _placeholder=_placeholder)
+        if source_page_index is None or pre[-1].page_index == source_page_index:
+            return _attach_to_neighbor(
+                pre[-1], pmeta, after=True, _placeholder=_placeholder
+            )
+        return []
 
     # 仅后向邻居:贴其上方
     if post:

@@ -145,16 +145,19 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 默认无鉴权，仅服务端开启鉴权时填写 API Key；该模式不消耗 AI Studio 配额。三套
 配置(vllm / official_sdk / paddlex_serving)分开保存，切换不会覆盖另一套。
 
-“合同比对 API”页集中维护外部调用 API Key、服务公开地址、单文件上传上限、高亮
-图片 DPI 以及 OCR/LLM 比对选项；保存后立即生效，Key 只以脱敏值回显。该页也可
-上传 DOCX/PDF 运行完整管线测试，验证结果文本和逐页高亮图片，且不发送真实回调。
+“外部 API 配置”页集中维护合同比对与金额统计共用的 API Key、服务公开地址、单文件
+上传上限、高亮图片 DPI 和 OCR 默认引擎；保存后立即生效，Key 只以脱敏值回显。
+“合同比对 API”页仅维护比对流程选项并可上传 DOCX/PDF 运行完整管线测试；“金额统计
+API”页提供多 PDF 的统计管线测试。两类测试都不发送真实回调。
 
 服务端基础配置仍通过环境变量提供：
 
 日志同时写入控制台和 `${DC_STORAGE_DIR}/logs/app.log`。每条日志都带 `task` 和
 `req` 关联标识，可按任务或外部接口请求串联排障；模型请求/响应在文件日志中仅记录
 模型、状态、耗时、长度和 SHA-256 摘要，不记录合同原文。需要查看受控调用明细时，使用
-任务的 LLM 调用记录接口。
+任务的模型/OCR记录接口。标准比对、无标注比对和金额统计都会额外保存最终被流水线采用的
+OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-256 和受限文本预览；单块预览
+最多 300 字、单条记录最多 64KB，结构化表格的 headers/rows 不重复展开，只记录行列维度。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -222,11 +225,13 @@ PP-StructureV3 版面解析产线(返回段落/表格/标题结构)。鉴权可�
 | `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
 | `GET` | `/api/v1/statement/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/statement/{task_id}/report` | 获取统计报告(含总合计、按列汇总、逐行明细) |
+| `POST` | `/api/v1/external/amountStat` | 外部系统提交金额统计(`X-API-Key`,多 PDF,支持 `target`/`target_urls` 混合);默认异步,`sync=true` 同步返回结果。详见 [金额统计对外 API 文档](docs/external-amount-api.md) |
+| `GET` | `/api/v1/external/amountStat/{task_id}` | 外部系统查询金额统计结果(扁平汇总字段 + 完整明细 `report`) |
 | `GET` | `/api/v1/config/llm` | 获取当前模型配置（Key 脱敏） |
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 | `GET` | `/api/v1/tasks?kind=&status=&limit=&offset=` | 查询任务历史(支持按类型/状态筛选 + 分页) |
 | `GET` | `/api/v1/tasks/{task_id}/events` | 查询单任务的里程碑事件时间线 |
-| `GET` | `/api/v1/tasks/{task_id}/llm-calls` | 查询单任务的对话型 LLM 调用明细(OCR/judge/llm-diff 等) |
+| `GET` | `/api/v1/tasks/{task_id}/llm-calls` | 查询单任务的模型调用与最终 OCR 解析结果明细(OCR/judge/llm-diff/ocr-result 等) |
 | `GET` | `/api/v1/tasks/{task_id}/external-calls` | 查询单任务的外部接口入站调用审计记录 |
 | `GET` | `/api/v1/external-calls?endpoint=&status_code=&document_no=&q=&limit=&offset=` | 全局外部接口调用审计列表(含 401/422 等无 task_id 的失败调用) |
 
@@ -374,7 +379,7 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 每次对 `/api/v1/external/*` 的入站请求（提交、查询、图片下载，**含 401 鉴权失败、
 413/422 校验失败**）都会落库一条审计记录到 `external_api_calls` 表，字段包括：
 
-- `endpoint`（`contractCompare.submit` / `.result` / `.image`）、`method`、`status_code`、`elapsed_ms`
+- `endpoint`（`contractCompare.submit` / `.result` / `.image` / `amountStat.submit` / `amountStat.result`）、`method`、`status_code`、`elapsed_ms`
 - `client_ip`（取 `X-Forwarded-For[0]` / `X-Real-IP` / `client.host`）
 - `api_key_sha256`（X-API-Key 的 sha256 指纹，**不存明文 Key**）
 - `document_no`、`task_id`（提交成功时关联；401/422 等任务创建前失败为 `null`，且**不加外键**——任务删除不会清除审计记录）
@@ -384,5 +389,140 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 每个响应都会带 `X-Request-Id` 响应头（与响应体 `request_id` 一致），便于调用方与服务端联查。
 查询入口：按任务 `GET /api/v1/tasks/{task_id}/external-calls`（前端「比对记录 → 外部调用」tab），
 或全局 `GET /api/v1/external-calls`（支持按端点/状态码/单据号筛选）。
+
+### 外部金额统计调用示例
+
+接口 `POST /api/v1/external/amountStat`，请求体 `multipart/form-data`，与合同比对共用 `X-API-Key` 鉴权、审计、回调机制，差异在于：输入为**多个对帐单 PDF**、产出为**金额汇总**（无高亮图片）、回调 `event_type` 为 `statement.summary.*`。完整字段字典与错误码见 [金额统计对外 API 文档](docs/external-amount-api.md)。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `target` | 与 `target_urls` 至少一个 | 对帐单/发票 `.pdf`（文件，可重复多次上传多个） |
+| `target_urls` | 与 `target` 至少一个 | 对帐单 URL（`http`/`https` `.pdf`，可重复多次）；可与 `target` 混合提交，服务端下载后统计 |
+| `document_no` | 是 | 外部单据号（≤255 字符） |
+| `callback_url` | 异步必填，同步可选 | HTTP/HTTPS 完成回调地址 |
+| `sync` | 否 | `true` 同步模式；缺省=`false` 异步模式 |
+
+#### 异步模式（默认，`sync` 缺省或 `false`）
+
+```bash
+curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
+  -H 'X-API-Key: <YOUR_API_KEY>' \
+  -F 'target=@./statement-1.pdf' \
+  -F 'target=@./statement-2.pdf' \
+  -F 'document_no=STMT-2026-0001' \
+  -F 'callback_url=https://business.example.com/callbacks/amount-stat'
+```
+
+> 也可用 URL 提交：把 `-F 'target=@./...'` 换成 `-F 'target_urls=https://.../statement-1.pdf'`，多个 URL 重复多次。文件与 URL 可混合，后缀（`.pdf`）与大小限制不变。
+
+提交响应（HTTP 202）：
+
+```json
+{
+  "task_id": "a1b2c3d4e5f6",
+  "document_no": "STMT-2026-0001",
+  "status": "pending"
+}
+```
+
+统计完成后用 `task_id` 主动查询：
+
+```bash
+curl -H 'X-API-Key: <YOUR_API_KEY>' \
+  'https://compare.example.com/api/v1/external/amountStat/<TASK_ID>'
+```
+
+#### 同步模式（`sync=true`）
+
+HTTP 连接保持至统计完成，完整结果直接在提交响应体内返回；此模式下 `callback_url` 非必填。
+
+```bash
+curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
+  -H 'X-API-Key: <YOUR_API_KEY>' \
+  -F 'target=@./statement-1.pdf' \
+  -F 'document_no=STMT-2026-0001' \
+  -F 'sync=true'
+```
+
+同步提交响应 / 异步查询响应（HTTP 200，顶层扁平汇总字段 + 嵌套完整明细 `report`）：
+
+```jsonc
+{
+  "task_id": "a1b2c3d4e5f6",
+  "document_no": "STMT-2026-0001",
+  "status": "done",
+  "stage": "done",
+  "progress": 1.0,
+  "error": null,
+  "grand_total": 100000.0,                 // 所有文件、所有金额列之和(核心输出)
+  "verdict": "clean",                      // clean / changed / needs_review
+  "file_totals": [
+    { "file_index": 0, "file_name": "statement1.pdf", "total_amount": 60000.0, "error": null },
+    { "file_index": 1, "file_name": "statement2.pdf", "total_amount": 40000.0, "error": null }
+  ],
+  "total_files": 2,
+  "total_tables": 2,
+  "total_items": 5,
+  "reasons": [],
+  "result_url": "https://compare.example.com/api/v1/external/amountStat/a1b2c3d4e5f6"
+}
+// 任务失败时 status="failed"、error 为失败原因,其余结果字段缺省。
+```
+
+> **算术确定性**：`grand_total` 与各级合计始终由代码用 `Decimal` 求和；LLM 仅在正则启发式列定位失败时兜底指认金额列，抽出的每个金额必须能在 OCR 文本中逐字溯源，否则丢弃并标记 `needs_review`。详见 [金额统计方案](docs/金额统计方案.md)。
+
+#### 完成回调（异步模式 `callback_url` 非空时触发）
+
+统计结束（成功或失败）后，服务端向 `callback_url` 发起 `POST`，请求头与合同比对回调一致（`Content-Type: application/json`、`X-Event-Id`），投递失败按指数退避（1/4/16 秒）最多重试 3 次。
+
+成功回调 body（字段与查询 `done` 响应一致，去掉 `event_id`/`task_id`/`status` 信封）：
+
+```jsonc
+{
+  "event_id": "9f2c1b7a-1234-5678-9abc-def012345678",
+  "task_id": "a1b2c3d4e5f6",
+  "status": "done",
+  "event_type": "statement.summary.completed",
+  "document_no": "STMT-2026-0001",
+  "grand_total": 100000.0,
+  "verdict": "clean",
+  "file_totals": [
+    { "file_index": 0, "file_name": "statement1.pdf", "total_amount": 60000.0, "error": null },
+    { "file_index": 1, "file_name": "statement2.pdf", "total_amount": 40000.0, "error": null }
+  ],
+  "total_files": 2,
+  "total_tables": 2,
+  "total_items": 5,
+  "reasons": [],
+  "result_url": "https://compare.example.com/api/v1/external/amountStat/a1b2c3d4e5f6"
+}
+```
+
+失败回调 body：
+
+```jsonc
+{
+  "event_id": "9f2c1b7a-1234-5678-9abc-def012345678",
+  "task_id": "a1b2c3d4e5f6",
+  "status": "failed",
+  "event_type": "statement.summary.failed",
+  "document_no": "STMT-2026-0001",
+  "error": "OCR 解析失败"
+}
+```
+
+#### 管线测试（免鉴权）
+
+与合同比对页对称，金额统计也提供免鉴权的管线测试端点，支持重复 `target` 文件和/或重复 `target_urls`（HTTP/HTTPS PDF URL），供本机前端在不触发真实回调的前提下验证整条 OCR + 表格抽取 + 求和管线（强制 `document_no` 以 `API-TEST-` 开头，查询端点据此隔离真实任务）：
+
+```bash
+# 提交(无需 X-API-Key,可多选 PDF)
+curl -X POST 'https://compare.example.com/api/v1/statement/api-test' \
+  -F 'target=@./statement-1.pdf' \
+  -F 'target=@./statement-2.pdf'
+
+# 轮询查询结果(响应结构与对外 amountStat 查询一致)
+curl 'https://compare.example.com/api/v1/statement/api-test/<TASK_ID>'
+```
 
 完整数据结构和设计取舍见 [技术方案](docs/技术方案.md)；金额统计的设计与边界见 [金额统计方案](docs/金额统计方案.md)。

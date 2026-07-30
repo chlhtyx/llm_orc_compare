@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from .config import Settings, settings
 from .models import (
@@ -37,7 +37,8 @@ from .models import (
     TableStructure,
 )
 from .ocr import get_ocr_engine
-from .parsing.pdf import get_page_metas, render_pages
+from .observability import record_ocr_result
+from .parsing.pdf import get_page_metas, render_page
 from .statement.amount_column import (
     merge_cross_page_tables,
     summarize_table,
@@ -127,6 +128,16 @@ def _process_one_pdf(
             Path(pdf_path), page_metas, on_progress=on_progress
         )
         diagnostics = list(getattr(reader, "last_diagnostics", []))
+        record_ocr_result(
+            logger,
+            pages_blocks,
+            diagnostics=diagnostics,
+            stage="statement",
+            metadata={
+                "file_index": file_index,
+                "ocr_backend": ocr_backend or cfg.ocr_backend,
+            },
+        )
 
         # 抽取所有结构化表格(block.label="table" 且 block.table is not None)
         tables_with_page: list[tuple[TableStructure, int]] = []
@@ -161,14 +172,19 @@ def _process_one_pdf(
         # 合并跨页续表
         merged_tables = merge_cross_page_tables(tables_with_page)
 
-        # 预渲染各页 PNG(LLM 兜底列指认/金额抽取用;按需才渲染,避免无谓开销)
-        page_pngs: dict[int, bytes] = {}
-        if enable_llm_column_detection:
-            try:
-                png_list = render_pages(pdf_path, cfg.pdf_render_dpi)
-                page_pngs = {i: png for i, png in enumerate(png_list)}
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("render_pages failed for llm fallback: %s", exc)
+        # 惰性按页渲染 PNG(LLM 兜底列指认/金额抽取用)。
+        # OCR 引擎在 recognize 内已渲染过一次全部页面,此处只在兜底真正需要某页时
+        # 才按需渲染该页(并按页缓存,避免同页多次渲染),启发式命中(常见路径)则完全不渲染。
+        page_png_cache: dict[int, bytes] = {}
+
+        def render_page_png(page_index: int) -> bytes:
+            if page_index not in page_png_cache:
+                try:
+                    page_png_cache[page_index] = render_page(pdf_path, page_index, cfg.pdf_render_dpi)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("render_page failed file=%s page=%s: %s", file_name, page_index, exc)
+                    page_png_cache[page_index] = b""
+            return page_png_cache[page_index]
 
         # 各页 OCR 纯文本(所有 block.content 拼接),作为 LLM 金额抽取的 grounding
         # 逐字溯源依据:LLM 返回的每个金额必须能在其中找到,否则丢弃。
@@ -187,7 +203,7 @@ def _process_one_pdf(
                 page_index=page_index,
                 user_keywords=amount_column_keywords,
                 enable_llm_column_detection=enable_llm_column_detection,
-                page_pngs=page_pngs,
+                render_page_png=render_page_png,
                 page_groundings=page_groundings,
             )
             table_summaries.append(summary)
@@ -209,7 +225,7 @@ def _process_one_pdf(
                     continue
                 whole_summary = _extract_whole_page_amounts(
                     page_text,
-                    png=page_pngs.get(page_index, b""),
+                    png=render_page_png(page_index),
                     file_index=file_index,
                     file_name=file_name,
                     page_index=page_index,
@@ -255,6 +271,27 @@ def _has_amounts(summary: StatementTableSummary) -> bool:
     return bool(summary.column_sums or summary.declared_totals)
 
 
+def _none_column_source(headers: list[str]) -> dict[str, Literal["none"]]:
+    """把全部非空列名标记为 column_source="none"(列定位失败,需人工复核)。"""
+    return {h: "none" for h in headers if h and h.strip()}
+
+
+def _llm_amount_summary_fields(
+    items: list[StatementAmountItem],
+) -> tuple[str, float, float]:
+    """把 LLM 抽取的 items 用 Decimal 精确累加,返回 (col_name, column_sums 值, 含税合计)。
+
+    LLM 抽取路径统一标「LLM 抽取」含税口径(列角色体系不适用,已是数据行金额);
+    column_sums 值与含税合计相同,由调用方分别写入对应字段。
+    """
+    col_name = items[0].column or "金额(llm)"
+    total = Decimal("0")
+    for it in items:
+        total += Decimal(str(it.value))
+    value = float(total)
+    return col_name, value, value
+
+
 def _log_summary_stage(stage: str, summary: StatementTableSummary) -> None:
     """记录各级抽取的诊断信息,便于分析"识别不到金额"的根因。
 
@@ -285,7 +322,7 @@ def _summarize_one_table(
     page_index: int,
     user_keywords: list[str] | None,
     enable_llm_column_detection: bool,
-    page_pngs: dict[int, bytes],
+    render_page_png: Callable[[int], bytes],
     page_groundings: dict[int, str],
 ) -> StatementTableSummary:
     """对单张表做三级级联金额抽取,代码求和。
@@ -314,17 +351,15 @@ def _summarize_one_table(
     # 第 2 步:启发式未抽到金额,尝试 LLM 列指认
     if not enable_llm_column_detection:
         # 未启用兜底:重写 column_source 标记失败列(用全部 headers 标 none)
-        summary.column_source = {
-            h: "none" for h in table.headers if h and h.strip()
-        }
+        summary.column_source = _none_column_source(table.headers)
         return summary
 
     if not table.headers:
         return summary
 
-    png = page_pngs.get(page_index)
-    if png is None:
-        summary.column_source = {h: "none" for h in table.headers if h and h.strip()}
+    png = render_page_png(page_index)
+    if not png:
+        summary.column_source = _none_column_source(table.headers)
         return summary
 
     # 延迟导入(LLM 引擎实例化需要 api_base 配置)
@@ -380,21 +415,18 @@ def _summarize_one_table(
     if amount_items:
         # 把通过 grounding 校验的金额写入 column_sums(代码累加,不破坏聚合路径);
         # column_source 标 "llm" 表明本表金额由 LLM 兜底抽取得到。
-        col_name = amount_items[0].column or "金额(llm)"
-        total = Decimal("0")
-        for it in amount_items:
-            total += Decimal(str(it.value))
-        summary.column_sums = {col_name: float(total)}
+        col_name, value, tax_total = _llm_amount_summary_fields(amount_items)
+        summary.column_sums = {col_name: value}
         summary.items = amount_items
         summary.column_source = {col_name: "llm"}
         # LLM 抽取路径:含税口径统一标「LLM 抽取」(列角色体系不适用,已是数据行金额)
-        summary.tax_inclusive_total = float(total)
+        summary.tax_inclusive_total = tax_total
         summary.tax_inclusive_method = "LLM 抽取"
         _log_summary_stage("llm-amount", summary)
         return summary
 
     # 三级全部抽空 → 标 none(needs_review)
-    summary.column_source = {h: "none" for h in table.headers if h and h.strip()}
+    summary.column_source = _none_column_source(table.headers)
     _log_summary_stage("exhausted", summary)
     return summary
 
@@ -480,20 +512,17 @@ def _extract_whole_page_amounts(
         )
         return None
 
-    col_name = items[0].column or "金额(llm)"
-    total = Decimal("0")
-    for it in items:
-        total += Decimal(str(it.value))
+    col_name, value, tax_total = _llm_amount_summary_fields(items)
     summary = StatementTableSummary(
         file_index=file_index,
         file_name=file_name,
         table_index=table_index,
         page_index=page_index,
         headers=["全文"],
-        column_sums={col_name: float(total)},
+        column_sums={col_name: value},
         items=items,
         column_source={col_name: "llm"},
-        tax_inclusive_total=float(total),
+        tax_inclusive_total=tax_total,
         tax_inclusive_method="LLM 抽取",
     )
     _log_summary_stage("whole-page", summary)

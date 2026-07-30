@@ -295,15 +295,17 @@ onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
 })
 
-/** LLM 调用 kind → 中文标签。 */
+/** 模型调用/OCR 解析结果 kind → 中文标签。 */
 const llmKindText: Record<string, string> = {
   'ocr': 'OCR 识别',
   'ocr-whole': '整页 OCR',
+  'ocr-result': 'OCR 解析结果',
   'paddleocr': 'PaddleOCR',
   'judge': '辅助说明',
   'alignment': '条款对齐',
   'llm-diff': '整篇比对',
   'statement-column': '列定位',
+  'statement-amount': '金额抽取',
 }
 
 /** 外部接口 endpoint → 中文标签。 */
@@ -507,7 +509,7 @@ onMounted(refresh)
                         :class="['tab', { 'tab-active': detailTab === 'llm-calls' }]"
                         type="button"
                         @click="showLlmCalls(item.task_id)"
-                      >模型调用</button>
+                      >模型 / OCR 记录</button>
                      <button
                        v-if="item.external_request"
                        :class="['tab', { 'tab-active': detailTab === 'external-calls' }]"
@@ -522,7 +524,7 @@ onMounted(refresh)
                      >回调</button>
                    </div>
                    <div v-if="eventsLoading" class="muted detail-loading">
-                     {{ detailTab === 'events' ? '加载时间线…' : detailTab === 'llm-calls' ? '加载模型调用…' : '加载外部调用…' }}
+                     {{ detailTab === 'events' ? '加载时间线…' : detailTab === 'llm-calls' ? '加载模型 / OCR 记录…' : '加载外部调用…' }}
                    </div>
                     <template v-else-if="detailTab === 'events'">
                       <ol v-if="selectedEvents.length" class="event-list">
@@ -538,7 +540,7 @@ onMounted(refresh)
                     </template>
                     <template v-else-if="detailTab === 'llm-calls'">
                       <div v-if="!selectedLlmCalls.length" class="muted">
-                        该任务没有已保存的模型调用记录(embedding 不记录;可能创建于本功能上线前)。
+                        该任务没有已保存的模型 / OCR 记录(embedding 不记录;可能创建于本功能上线前)。
                       </div>
                       <ul v-else class="llm-call-list">
                         <li v-for="call in selectedLlmCalls" :key="call.id" class="llm-call-item">
@@ -559,11 +561,15 @@ onMounted(refresh)
                           <div v-if="call.error" class="llm-call-err small">⚠ {{ call.error }}</div>
                           <div v-if="expandedCalls[call.id]" class="llm-call-body">
                             <div class="llm-block">
-                              <div class="llm-block-title muted small">请求 payload(图片已脱敏)</div>
+                              <div class="llm-block-title muted small">
+                                {{ call.kind === 'ocr-result' ? '识别结果元数据' : '请求 payload(图片已脱敏)' }}
+                              </div>
                               <pre class="llm-json">{{ jsonPreview(call.payload) }}</pre>
                             </div>
                             <div v-if="call.response" class="llm-block">
-                              <div class="llm-block-title muted small">响应 response(截断 64KB)</div>
+                              <div class="llm-block-title muted small">
+                                {{ call.kind === 'ocr-result' ? '最终解析结果(文本预览受限，整条最多 64KB)' : '响应 response(截断 64KB)' }}
+                              </div>
                               <pre class="llm-json">{{ jsonPreview(call.response) }}</pre>
                             </div>
                           </div>

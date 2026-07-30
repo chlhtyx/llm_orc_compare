@@ -813,6 +813,72 @@ def test_deleted_clause_only_pre_neighbor_placeholder_below_it():
     assert regions[0].bbox[1] > 100 / 842 - 0.01
 
 
+def test_deleted_clause_cross_page_uses_word_page_hint_not_earlier_anchor():
+    """第十条跨页时，10.4 删除不能被无条件推到前一页。"""
+    word_pre = Clause(clause_id="w1", doc_type="word", text="第十条 其他约定。")
+    word_missing = Clause(
+        clause_id="w2",
+        doc_type="word",
+        number="10.4",
+        text="测试条款1232456767",
+        source_page_index=3,
+    )
+    word_post = Clause(clause_id="w3", doc_type="word", text="第十一条 附则。")
+    pdf_pre = _pdf_clause_with_bbox("p1", "第十条 其他约定。", page=1, y1=720, y2=750)
+    pdf_post = _pdf_clause_with_bbox("p3", "第十一条 附则。", page=3, y1=220, y2=250)
+
+    report = build_report(
+        alignments=[
+            Alignment(word_clause_id="w1", pdf_clause_id="p1", match_type="number", similarity=1.0),
+            Alignment(word_clause_id="w2", pdf_clause_id=None, match_type="unmatched", similarity=0.0),
+            Alignment(word_clause_id="w3", pdf_clause_id="p3", match_type="number", similarity=1.0),
+        ],
+        word_by={"w1": word_pre, "w2": word_missing, "w3": word_post},
+        pdf_by={"p1": pdf_pre, "p3": pdf_post},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[_page_meta(page=index) for index in range(4)],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    deleted = [d for d in report.unmatched_clauses if d.status == "deleted"]
+    assert len(deleted) == 1
+    assert deleted[0].page_regions[0].page_index == 3
+    assert deleted[0].page_regions[0].bbox[3] <= 220 / 842 + 0.01
+
+
+def test_deleted_clause_does_not_claim_earlier_page_without_later_anchor():
+    """没有第 4 页 PDF 锚点时，不能把 Word 第 4 页 deleted 误报为第 2 页。"""
+    word_pre = Clause(clause_id="w1", doc_type="word", text="第十条 其他约定。")
+    word_missing = Clause(
+        clause_id="w2",
+        doc_type="word",
+        number="10.4",
+        text="测试条款1232456767",
+        source_page_index=3,
+    )
+    pdf_pre = _pdf_clause_with_bbox("p1", "第十条 其他约定。", page=1, y1=720, y2=750)
+
+    report = build_report(
+        alignments=[
+            Alignment(word_clause_id="w1", pdf_clause_id="p1", match_type="number", similarity=1.0),
+            Alignment(word_clause_id="w2", pdf_clause_id=None, match_type="unmatched", similarity=0.0),
+        ],
+        word_by={"w1": word_pre, "w2": word_missing},
+        pdf_by={"p1": pdf_pre},
+        embed=_AlmostIdenticalEmbedding(),
+        page_metas=[_page_meta(page=index) for index in range(4)],
+        thresholds={"identical": 0.98, "modified": 0.85},
+        source="source.docx",
+        target="target.pdf",
+    )
+
+    deleted = [d for d in report.unmatched_clauses if d.status == "deleted"]
+    assert len(deleted) == 1
+    assert deleted[0].page_regions == []
+
+
 def test_deleted_clause_no_paired_neighbors_has_no_region():
     """无任何已配对邻居时不生成占位框(deleted 仍以文本形式体现)。"""
     missing = Clause(clause_id="w1", doc_type="word", text="第一条 验收。", number="第一条")

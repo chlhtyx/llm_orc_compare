@@ -10,6 +10,7 @@ from docx import Document
 from document_comparison.config import settings
 from document_comparison.external_api import (
     build_external_result,
+    build_external_statement_result,
     build_result_text,
     render_external_highlight_images,
     require_external_api_key,
@@ -20,6 +21,8 @@ from document_comparison.models import (
     DiffSegment,
     PageMeta,
     PageRegion,
+    StatementFileSummary,
+    StatementSummaryReport,
     TamperReport,
 )
 
@@ -803,3 +806,396 @@ def test_external_url_rejects_invalid_scheme(external_client):
     )
     assert response.status_code == 400
     assert "HTTP/HTTPS" in response.json()["message"]
+
+
+# —— 金额统计对外 API(/api/v1/external/amountStat)——
+
+
+def _statement_report(grand_total: float = 100000.0) -> StatementSummaryReport:
+    """构造一个简单的金额统计报告,供 done 结果断言使用。"""
+    return StatementSummaryReport(
+        files=[
+            StatementFileSummary(
+                file_index=0,
+                file_name="target.pdf",
+                total_amount=grand_total,
+            )
+        ],
+        grand_total=grand_total,
+        grand_totals_by_column={"金额": grand_total},
+        total_files=1,
+        total_tables=1,
+        total_items=2,
+        verdict="clean",
+        reasons=[],
+        column_detection_summary={"heuristic": 1, "llm": 0, "none": 0},
+    )
+
+
+def test_build_external_statement_result_returns_each_file_total():
+    report = _statement_report(60000.0)
+    report.files.append(
+        StatementFileSummary(
+            file_index=1,
+            file_name="failed.pdf",
+            total_amount=0.0,
+            error="OCR 解析失败",
+        )
+    )
+    report.grand_total = 60000.0
+    report.total_files = 2
+
+    result = build_external_statement_result("task-1", "STMT-1", report)
+
+    assert "grand_totals_by_column" not in result
+    assert result["file_totals"] == [
+        {"file_index": 0, "file_name": "target.pdf", "total_amount": 60000.0, "error": None},
+        {"file_index": 1, "file_name": "failed.pdf", "total_amount": 0.0, "error": "OCR 解析失败"},
+    ]
+    assert "column_detection_summary" not in result
+    assert "report" not in result
+
+
+def test_external_statement_submit_async_echoes_document_no(external_client, monkeypatch):
+    from document_comparison.api.app import task_manager
+
+    async def _no_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run_statement", _no_run)
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "STMT-2026-001",
+            "callback_url": "http://internal/callback",
+        },
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+            ("target", ("b.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert response.status_code == 202, response.json()
+    body = response.json()
+    assert body["document_no"] == "STMT-2026-001"
+    assert body["status"] == "pending"
+    task = task_manager.get(body["task_id"])
+    assert task is not None
+    assert task.external_request is True
+    assert task.kind == "statement"
+    assert task.sync_mode is False
+
+
+def test_external_statement_rejects_missing_files(external_client):
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "STMT-EMPTY",
+            "callback_url": "http://internal/callback",
+        },
+    )
+    assert response.status_code == 400
+    assert "target" in response.json()["message"]
+
+
+def test_external_statement_rejects_non_pdf(external_client):
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "STMT-NONPDF",
+            "callback_url": "http://internal/callback",
+        },
+        files=[
+            ("target", ("a.txt", io.BytesIO(b"not a pdf"), "text/plain")),
+        ],
+    )
+    assert response.status_code == 400
+    assert ".pdf" in response.json()["message"]
+
+
+def test_external_statement_async_requires_callback_url(external_client):
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "STMT-NOCB"},
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert response.status_code == 400
+    assert "callback_url" in response.json()["message"]
+
+
+def test_external_statement_sync_returns_full_result(external_client, monkeypatch):
+    from document_comparison.api.app import task_manager
+
+    report = _statement_report()
+
+    async def _set_report(task_id, pdf_paths, file_names, **_kwargs):
+        task = task_manager.get(task_id)
+        assert task is not None
+        task.statement_report = report
+        task.info.status = "done"
+        task.push_event("done", 1.0)
+
+    monkeypatch.setattr(task_manager, "run_statement", _set_report)
+
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "STMT-SYNC", "sync": "true"},
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    assert body["status"] == "done"
+    assert body["grand_total"] == 100000.0
+    assert body["verdict"] == "clean"
+    assert "grand_totals_by_column" not in body
+    assert body["file_totals"] == [
+        {"file_index": 0, "file_name": "target.pdf", "total_amount": 100000.0, "error": None}
+    ]
+    assert body["total_files"] == 1
+    assert body["total_items"] == 2
+    assert "column_detection_summary" not in body
+    assert "report" not in body
+    assert body["result_url"].endswith(f"/api/v1/external/amountStat/{body['task_id']}")
+
+
+def test_external_statement_query_done_returns_flat_result(external_client, monkeypatch):
+    from document_comparison.api.app import task_manager
+
+    report = _statement_report()
+
+    async def _set_report(task_id, pdf_paths, file_names, **_kwargs):
+        task = task_manager.get(task_id)
+        assert task is not None
+        task.statement_report = report
+        task.info.status = "done"
+        task.push_event("done", 1.0)
+
+    monkeypatch.setattr(task_manager, "run_statement", _set_report)
+
+    submit = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={"document_no": "STMT-Q", "sync": "true"},
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    task_id = submit.json()["task_id"]
+    query = external_client.get(
+        f"/api/v1/external/amountStat/{task_id}",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert query.status_code == 200, query.json()
+    body = query.json()
+    assert body["status"] == "done"
+    assert body["grand_total"] == 100000.0
+    assert body["verdict"] == "clean"
+    assert "column_detection_summary" not in body
+    assert "report" not in body
+
+
+def test_external_statement_query_internal_statement_task_isolated(external_client, monkeypatch):
+    """内部 statement 任务(external_request=False)不可被外部端点查询 → 404。"""
+    from document_comparison.api.app import task_manager
+
+    task_id = task_manager.create("statement", target_names=["a.pdf"])
+    task = task_manager.get(task_id)
+    assert task is not None
+    assert task.external_request is False
+
+    response = external_client.get(
+        f"/api/v1/external/amountStat/{task_id}",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert response.status_code == 404
+
+
+def test_external_statement_query_unknown_task_404(external_client):
+    response = external_client.get(
+        "/api/v1/external/amountStat/nonexistent",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert response.status_code == 404
+
+
+def test_external_statement_auth_required(external_client, monkeypatch):
+    # 配置了 Key:缺失/错误头 → 401
+    assert external_client.post(
+        "/api/v1/external/amountStat",
+        data={"document_no": "X", "callback_url": "http://internal/callback"},
+        files=[("target", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+    ).status_code == 401
+    # 未配置 Key:鉴权跳过,放行到业务层
+    monkeypatch.setattr(settings, "external_api_key", "")
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        data={"document_no": "X", "callback_url": "http://internal/callback"},
+        files=[("target", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert response.status_code == 202
+
+
+# —— 管线测试端点 /api/v1/statement/api-test(免鉴权,仿 compare/api-test)——
+
+
+def test_statement_api_test_submit_reuses_external_flow_without_callback(
+    external_client, monkeypatch
+):
+    """管线测试:免鉴权(无需 X-API-Key)、强制 API-TEST- 前缀、不设回调、走 external 任务流。"""
+    from document_comparison.api.app import task_manager
+
+    captured: dict = {}
+
+    async def _capture_run(task_id, pdf_paths, file_names, **kwargs):
+        captured["task_id"] = task_id
+        captured["pdf_paths"] = pdf_paths
+        captured["file_names"] = file_names
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(task_manager, "run_statement", _capture_run)
+    # 不带 X-API-Key(管线测试免鉴权)
+    response = external_client.post(
+        "/api/v1/statement/api-test",
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+            ("target", ("b.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert response.status_code == 202, response.json()
+    body = response.json()
+    assert body["document_no"].startswith("API-TEST-")
+    assert body["status"] == "pending"
+    task = task_manager.get(body["task_id"])
+    assert task is not None
+    assert task.external_request is True
+    assert task.kind == "statement"
+    assert task.callback_url is None  # 不发回调
+    # 多文件按 index 落定,不互相覆盖
+    assert len(captured["pdf_paths"]) == 2
+    assert captured["file_names"] == ["a.pdf", "b.pdf"]
+    assert captured["kwargs"]["ocr_backend"] == "paddleocr"  # 读 external_ocr_backend
+
+
+def test_statement_api_test_accepts_file_and_url_targets(external_client, monkeypatch):
+    """管线测试与正式 amountStat 一致，文件与 URL 可混合提交。"""
+    from document_comparison.api.app import task_manager
+
+    captured: dict = {}
+
+    async def _capture_run(task_id, pdf_paths, file_names, **kwargs):
+        captured["task_id"] = task_id
+        captured["pdf_paths"] = pdf_paths
+        captured["file_names"] = file_names
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(task_manager, "run_statement", _capture_run)
+    calls = _patch_download(monkeypatch, target_name="from-url.pdf")
+    response = external_client.post(
+        "/api/v1/statement/api-test",
+        data={"target_urls": "https://files.example.test/from-url.pdf"},
+        files=[("target", ("upload.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+
+    assert response.status_code == 202, response.json()
+    assert calls["urls"] == ["https://files.example.test/from-url.pdf"]
+    assert captured["file_names"] == ["upload.pdf", "from-url.pdf"]
+    assert len(captured["pdf_paths"]) == 2
+    assert captured["pdf_paths"][0].endswith("upload.pdf")
+    assert captured["pdf_paths"][1].endswith("from-url.pdf")
+
+
+def test_statement_api_test_requires_complete_external_config(external_client):
+    """外部 API 未配置完整 → 400(与 compare/api-test 一致,即使免鉴权也拦截)。"""
+    # external_client fixture 已配齐 external_*;临时置坏其中一个
+    saved = settings.external_max_upload_mb
+    settings.external_max_upload_mb = 0
+    try:
+        response = external_client.post(
+            "/api/v1/statement/api-test",
+            files=[("target", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+        )
+        assert response.status_code == 400
+        assert "配置" in response.json()["message"]
+    finally:
+        settings.external_max_upload_mb = saved
+
+
+def test_statement_api_test_rejects_non_pdf_and_empty(external_client):
+    # 无文件也无 URL → 业务校验 400；URL-only 是合法输入。
+    empty = external_client.post("/api/v1/statement/api-test", files=[])
+    assert empty.status_code == 400
+    assert "target" in empty.json()["message"]
+    # 非 pdf
+    bad = external_client.post(
+        "/api/v1/statement/api-test",
+        files=[("target", ("a.txt", io.BytesIO(b"not a pdf"), "text/plain"))],
+    )
+    assert bad.status_code == 400
+    assert ".pdf" in bad.json()["message"]
+
+
+def test_statement_api_test_query_returns_done_result(external_client, monkeypatch):
+    """管线测试查询:复用对外响应结构,done 时返回扁平汇总字段;非 API-TEST- 任务 404。"""
+    from document_comparison.api.app import task_manager
+
+    report = _statement_report()
+
+    async def _set_report(task_id, pdf_paths, file_names, **_kwargs):
+        task = task_manager.get(task_id)
+        assert task is not None
+        task.statement_report = report
+        task.info.status = "done"
+        task.push_event("done", 1.0)
+
+    monkeypatch.setattr(task_manager, "run_statement", _set_report)
+    submit = external_client.post(
+        "/api/v1/statement/api-test",
+        files=[("target", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert submit.status_code == 202
+    task_id = submit.json()["task_id"]
+    # 轮询直到 done(异步任务,事件循环在 run_statement 设好报告后推进)
+    import time
+
+    deadline = time.perf_counter() + 2.0
+    while time.perf_counter() < deadline:
+        query = external_client.get(f"/api/v1/statement/api-test/{task_id}")
+        if query.json().get("status") == "done":
+            break
+        time.sleep(0.05)
+    else:
+        query = external_client.get(f"/api/v1/statement/api-test/{task_id}")
+    assert query.status_code == 200, query.json()
+    body = query.json()
+    assert body["status"] == "done"
+    assert body["grand_total"] == 100000.0
+    assert body["verdict"] == "clean"
+    assert body["document_no"].startswith("API-TEST-")
+
+
+def test_statement_api_test_query_isolates_non_test_tasks(external_client, monkeypatch):
+    """非 API-TEST- 前缀的(对外/内部)金额统计任务不可被管线测试端点查询 → 404。"""
+    from document_comparison.api.app import task_manager
+
+    # 一个真实对外金额统计任务(无 API-TEST- 前缀)
+    task_id = task_manager.create(
+        "statement",
+        document_no="STMT-REAL",
+        external_request=True,
+    )
+    task = task_manager.get(task_id)
+    assert task is not None
+    task.statement_report = _statement_report()
+    task.info.status = "done"
+    task.push_event("done", 1.0)
+
+    response = external_client.get(f"/api/v1/statement/api-test/{task_id}")
+    assert response.status_code == 404

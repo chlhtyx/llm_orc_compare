@@ -50,9 +50,9 @@ def _patch_page_metas(monkeypatch, num_pages):
 
 
 def _disable_render(monkeypatch):
-    """禁用 render_pages(避免真实 PDF 渲染;LLM 兜底测试单独覆盖)。"""
+    """禁用 render_page(避免真实 PDF 渲染;LLM 兜底测试单独覆盖)。"""
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"")
 
 
 def _make_real_pdf(tmp_path, name="x.pdf", num_pages=1):
@@ -438,9 +438,9 @@ def test_llm_fallback_picks_up_columns(monkeypatch, tmp_path):
     _patch_get_ocr_engine(monkeypatch, reader)
     _patch_page_metas(monkeypatch, 1)
 
-    # render_pages 返回一个占位 PNG(让 pipeline 进入 LLM 路径)
+    # render_page 返回一个占位 PNG(让 pipeline 进入 LLM 路径)
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"fake-png")
 
     # mock llm_detect_amount_columns 指认 index=1 为 amount 列
     import document_comparison.statement.llm_column_detect as lcd
@@ -470,7 +470,7 @@ def test_llm_fallback_failure_marks_needs_review(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
 
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"fake-png")
 
     # mock 列指认返回 None(失败)
     import document_comparison.statement.llm_column_detect as lcd
@@ -511,7 +511,7 @@ def test_invoice_amount_extraction_cascade(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
 
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"fake-png")
 
     # 列指认失败(表头无金额关键词)
     import document_comparison.statement.llm_column_detect as lcd
@@ -560,7 +560,7 @@ def test_invoice_realistic_header_amount_plain_digits(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
 
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"fake-png")
 
     # 第三级 LLM 金额抽取必须被调用;断言被调用且金额正确
     from document_comparison.models import StatementAmountItem
@@ -594,7 +594,7 @@ def test_invoice_amount_extraction_all_fail(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
 
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"fake-png")
 
     import document_comparison.statement.llm_column_detect as lcd
     monkeypatch.setattr(
@@ -626,7 +626,7 @@ def test_whole_page_fallback_when_no_table_block(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
 
     import document_comparison.statement_pipeline as sp
-    monkeypatch.setattr(sp, "render_pages", lambda path, dpi=200: [b"fake-png"])
+    monkeypatch.setattr(sp, "render_page", lambda path, page_index, dpi=200: b"fake-png")
 
     # 整页兜底调用 llm_extract_amounts(此时 merged_tables 为空,不经过 _summarize_one_table)
     from document_comparison.models import StatementAmountItem

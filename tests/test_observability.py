@@ -5,6 +5,11 @@ import logging
 
 import pytest
 
+from document_comparison.models import (
+    Block,
+    PageRecognitionDiagnostic,
+    TableStructure,
+)
 from document_comparison.observability import (
     LlmCallRecord,
     _MAX_RESPONSE_CHARS,
@@ -16,6 +21,8 @@ from document_comparison.observability import (
     log_model_response,
     model_call_context,
     log_value_summary,
+    record_ocr_result,
+    record_ocr_text_result,
 )
 
 
@@ -175,6 +182,138 @@ def test_model_log_summary_does_not_include_contract_text():
     assert len(summary["sha256"]) == 64
     assert secret_clause not in str(summary)
     assert log_value_summary(secret_clause) == _model_log_summary(secret_clause)
+
+
+# —— 最终 OCR 解析结果 ——
+
+def test_structured_ocr_result_records_page_bbox_and_bounded_preview(
+    quiet_logger, caplog,
+):
+    """最终 blocks 可按页排障，但普通日志不泄露合同文本或表格单元格。"""
+    secret_clause = "10.4 测试条款1232456767"
+    table = TableStructure(
+        headers=["项目", "金额"],
+        rows=[["保密项目", "987654.32"]],
+    )
+    pages = [
+        [
+            Block(
+                block_id="p0-b0",
+                page_index=0,
+                label="paragraph_title",
+                bbox=[10, 20, 300, 48],
+                content=secret_clause,
+            )
+        ],
+        [
+            Block(
+                block_id="p1-b0",
+                page_index=1,
+                label="table",
+                bbox=[12, 50, 400, 500],
+                content="项目 金额\n保密项目 987654.32",
+                table=table,
+            )
+        ],
+    ]
+    diagnostics = [
+        PageRecognitionDiagnostic(
+            page_index=0,
+            source="fallback",
+            reliable=True,
+            char_count=len(secret_clause),
+            bbox_coverage=1.0,
+        )
+    ]
+
+    with caplog.at_level(logging.INFO, logger=quiet_logger.name):
+        with llm_call_collector() as recs:
+            record_ocr_result(
+                quiet_logger,
+                pages,
+                diagnostics=diagnostics,
+                stage="compare",
+                metadata={"ocr_backend": "official_sdk"},
+            )
+
+    assert len(recs) == 1
+    record = recs[0]
+    assert record.kind == "ocr-result"
+    assert record.status_code == 200
+    assert record.payload["operation"] == "final_ocr_blocks"
+    assert record.payload["stage"] == "compare"
+    assert isinstance(record.response, dict)
+    assert record.response["summary"]["page_count"] == 2
+    assert record.response["summary"]["block_count"] == 2
+    assert record.response["blocks"][0]["outer_page_index"] == 0
+    assert record.response["blocks"][0]["block_page_index"] == 0
+    assert record.response["blocks"][0]["bbox"] == [10.0, 20.0, 300.0, 48.0]
+    assert record.response["blocks"][0]["content_preview"] == secret_clause
+    assert len(record.response["blocks"][0]["content_sha256"]) == 64
+    assert record.response["blocks"][1]["table_shape"] == {
+        "header_count": 2,
+        "row_count": 1,
+        "max_columns": 2,
+    }
+    assert "保密项目" not in str(record.response["blocks"][1]["table_shape"])
+    assert record.response["diagnostics"][0]["source"] == "fallback"
+    assert secret_clause not in caplog.text
+    assert "987654.32" not in caplog.text
+
+
+def test_ocr_result_limits_blocks_and_each_content_preview(quiet_logger):
+    """大文档按块数和单块字符数限流，并明确报告省略数量。"""
+    pages = [
+        [
+            Block(
+                block_id=f"b-{index}",
+                page_index=0,
+                label="text",
+                content="长" * 1000,
+            )
+            for index in range(170)
+        ]
+    ]
+    with llm_call_collector() as recs:
+        record_ocr_result(quiet_logger, pages, stage="compare")
+
+    response = recs[0].response
+    assert isinstance(response, dict)
+    assert response["summary"]["block_count"] == 170
+    assert response["summary"]["recorded_block_count"] == 100
+    assert response["summary"]["omitted_block_count"] == 70
+    assert len(response["blocks"][0]["content_preview"]) == 300
+    assert response["blocks"][0]["content_truncated"] is True
+
+
+def test_raw_ocr_text_result_records_bounded_preview_without_plaintext_log(
+    quiet_logger, caplog,
+):
+    """无标注管线也保存最终文本，超长内容只留受限预览。"""
+    secret_text = "机密合同正文" * 7000
+    diagnostic = PageRecognitionDiagnostic(
+        page_index=0,
+        source="native",
+        reliable=True,
+        char_count=len(secret_text),
+    )
+    with caplog.at_level(logging.INFO, logger=quiet_logger.name):
+        with llm_call_collector() as recs:
+            record_ocr_text_result(
+                quiet_logger,
+                secret_text,
+                diagnostic=diagnostic,
+                stage="raw",
+            )
+
+    response = recs[0].response
+    assert isinstance(response, dict)
+    assert recs[0].kind == "ocr-result"
+    assert response["summary"]["content_chars"] == len(secret_text)
+    assert response["summary"]["content_truncated"] is True
+    assert len(response["content_preview"]) == 32768
+    assert response["diagnostic"]["source"] == "native"
+    assert "机密合同正文" not in caplog.text
 
 
 def test_log_context_is_scoped_and_restored():

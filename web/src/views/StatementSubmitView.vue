@@ -1,172 +1,78 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
 import FileDropMulti from '@/components/FileDropMulti.vue'
-import { ApiError } from '@/api/statement'
-import { useStatementTaskStore } from '@/stores/statementTask'
+import StatementApiPipelineTest from '@/components/StatementApiPipelineTest.vue'
+import { useModelConfigStore } from '@/stores/modelConfig'
 
-const router = useRouter()
-const statementStore = useStatementTaskStore()
-
+const configStore = useModelConfigStore()
 const targetFiles = ref<File[]>([])
-const submitting = ref(false)
-const submitError = ref<string | null>(null)
 
-const opts = reactive({
-  ocrBackend: 'paddleocr' as 'llm' | 'paddleocr',
-  enableLlmColumnDetection: true,
-  customKeywords: '', // 逗号分隔的金额列关键词(可选)
+const endpoint = computed(() => {
+  const base = (configStore.config?.external_public_base_url || '').trim().replace(/\/$/, '')
+  return `${base || 'https://compare.example.com'}/api/v1/external/amountStat`
 })
-const callbackUrl = ref('')
-
 const allPdf = computed(() =>
-  targetFiles.value.length > 0 &&
-  targetFiles.value.every((f) => f.name.toLowerCase().endsWith('.pdf')),
+  targetFiles.value.length > 0 && targetFiles.value.every((file) => file.name.toLowerCase().endsWith('.pdf')),
 )
-const canSubmit = computed(() => allPdf.value && !submitting.value)
 
-async function onSubmit(): Promise<void> {
-  submitError.value = null
-  if (targetFiles.value.length === 0) return
-  submitting.value = true
-  try {
-    const keywords = opts.customKeywords
-      .split(/[,，]/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-    const id = await statementStore.submit({
-      targets: targetFiles.value,
-      options: {
-        ocr_backend: opts.ocrBackend,
-        enable_llm_column_detection: opts.enableLlmColumnDetection,
-        ...(keywords.length > 0 ? { amount_column_keywords: keywords } : {}),
-      },
-      callbackUrl: callbackUrl.value.trim() || undefined,
-    })
-    router.push(`/statement/report/${id}`)
-  } catch (e) {
-    submitError.value = e instanceof ApiError ? e.message : `提交失败: ${(e as Error).message}`
-  } finally {
-    submitting.value = false
-  }
-}
+onMounted(() => void configStore.fetch())
 </script>
 
 <template>
-  <div class="submit">
-    <section class="card">
-      <h2 class="page-title">金额统计</h2>
-      <p class="muted page-desc">
-        一次可上传多个对帐单 PDF(扫描件),系统 OCR 识别表格后用<b>确定性代码</b>抽取并累加金额,
-        汇总所有文件的总金额。若表格含「合计/小计」行,会自动核对声明值与实算是否一致;
-        列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
+  <div class="api-workbench">
+    <header class="workbench-header">
+      <div>
+        <p class="eyebrow">Amount statistics API</p>
+        <h1>金额统计 API</h1>
+        <p class="header-copy">使用真实 PDF 验证外部金额统计接口的 OCR、表格抽取、金额列定位和确定性求和。</p>
+      </div>
+      <div class="service-state" :class="{ enabled: configStore.config?.external_enabled }">
+        <span class="state-dot" />
+        <div><small>服务状态</small><strong>{{ configStore.config?.external_enabled ? '可调用' : '待配置' }}</strong></div>
+      </div>
+    </header>
+
+    <p v-if="configStore.loading" class="loading-state">正在读取外部 API 配置…</p>
+
+    <section class="card test-card">
+      <div class="section-heading">
+        <div>
+          <span class="section-index">01</span>
+          <h2>API 管线测试</h2>
+          <p>上传对帐单 PDF，或在下方填写 PDF URL；两种方式可混合，测试任务不会发送回调。</p>
+        </div>
+        <code>POST {{ endpoint }}</code>
+      </div>
+
+      <p class="config-note">
+        API Key、公开地址、上传限制与共用 OCR 默认引擎统一在
+        <RouterLink to="/api-config">外部 API 配置</RouterLink>
+        维护。
       </p>
 
       <div class="field">
-        <label>对帐单 PDF(可多选)</label>
-        <FileDropMulti
-          v-model="targetFiles"
-          accept=".pdf"
-          label="选择一个或多个 .pdf 文件"
-          hint="对帐单扫描件,可分批添加"
-        />
+        <label>对帐单 PDF（可多选）</label>
+        <FileDropMulti v-model="targetFiles" accept=".pdf" label="选择一个或多个 .pdf 文件" hint="可与下方 PDF URL 混合，后端按顺序串行统计" />
         <span v-if="targetFiles.length > 0 && !allPdf" class="err">所有文件必须是 .pdf 格式</span>
       </div>
-    </section>
-
-    <section class="card">
-      <h3 class="section-title">统计选项(可选)</h3>
-      <div class="opts">
-        <div class="field">
-          <label>识别引擎</label>
-          <div class="radio-row">
-            <label class="radio">
-              <input type="radio" value="paddleocr" v-model="opts.ocrBackend" />
-              <span>paddleocr(专用 OCR 模型)</span>
-            </label>
-            <label class="radio">
-              <input type="radio" value="llm" v-model="opts.ocrBackend" />
-              <span>llm(通用 VL 模型)</span>
-            </label>
-          </div>
-          <span class="hint">识别 PDF 扫描件版面所用的引擎。两套引擎在设置页分别配置,需确保所选引擎已配置。</span>
-        </div>
-
-        <label class="check">
-          <input v-model="opts.enableLlmColumnDetection" type="checkbox" />
-          <span>启用 LLM 列定位兜底(启发式无法识别金额列时,让 LLM 仅指认哪一列是金额,不做求和)</span>
-        </label>
-
-        <div class="field">
-          <label>自定义金额列关键词(可选)</label>
-          <input
-            v-model="opts.customKeywords"
-            class="input"
-            placeholder="如:金额,已收,未付(逗号分隔;留空走默认启发式)"
-          />
-          <span class="hint">默认启发式已覆盖 金额/已付/未付/合计 等;仅当对帐单表头非常规时才填</span>
-        </div>
-
-        <div class="field">
-          <label>回调地址(可选)</label>
-          <input v-model="callbackUrl" class="input" placeholder="https://your/cb · 完成后回调" />
-        </div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="actions">
-        <button class="btn btn-primary" :disabled="!canSubmit" @click="onSubmit">
-          {{ submitting ? '提交中…' : '开始统计' }}
-        </button>
-      </div>
-      <p v-if="submitError" class="err">{{ submitError }}</p>
+      <StatementApiPipelineTest
+        :target-files="targetFiles"
+        :enabled="configStore.config?.external_enabled === true"
+        :public-base-url="configStore.config?.external_public_base_url || ''"
+      />
     </section>
   </div>
 </template>
 
 <style scoped>
-.page-title {
-  margin: 0 0 4px;
-  font-size: 18px;
-}
-.page-desc {
-  margin: 0 0 16px;
-}
-.opts {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-.radio-row {
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-}
-.radio {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font-size: 14px;
-}
-.radio input {
-  cursor: pointer;
-}
-.actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.err {
-  color: var(--risk-high);
-  margin-top: 8px;
-  font-size: 13px;
-}
+.api-workbench { max-width: 960px; margin: 0 auto; }
+.workbench-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; padding: 10px 2px 28px; }
+.eyebrow { margin: 0 0 8px; color: var(--primary); font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.workbench-header h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); line-height: 1.12; letter-spacing: -.035em; }
+.header-copy { max-width: 620px; margin: 10px 0 0; color: var(--text-muted); font-size: 15px; }
+.service-state { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; min-width: 118px; padding: 10px 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--risk-medium); box-shadow: 0 0 0 4px var(--risk-medium-bg); }.service-state.enabled .state-dot { background: var(--risk-clean); box-shadow: 0 0 0 4px var(--risk-low-bg); }.service-state small, .service-state strong { display: block; line-height: 1.35; }.service-state small { color: var(--text-muted); font-size: 11px; }.service-state strong { font-size: 13px; }
+.loading-state { margin: 0 0 12px; color: var(--text-muted); }.test-card { padding: 26px 28px 30px; }.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; }.section-index { display: block; margin-bottom: 4px; color: var(--primary); font-family: var(--mono); font-size: 11px; font-weight: 700; }.section-heading h2 { margin: 0; font-size: 20px; }.section-heading p { margin: 5px 0 0; color: var(--text-muted); }.section-heading > code { max-width: 46%; padding: 7px 9px; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); background: var(--surface-2); font: 11px/1.4 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.config-note { margin: 0 0 22px; padding: 10px 12px; border-left: 3px solid var(--primary); color: var(--text-muted); background: var(--surface-2); font-size: 13px; }.config-note a { color: var(--primary); font-weight: 600; }.err { margin: 8px 0 0; color: var(--risk-high); font-size: 13px; }
+@media (max-width: 780px) { .workbench-header, .section-heading { align-items: flex-start; flex-direction: column; gap: 12px; }.section-heading > code { max-width: 100%; } } @media (max-width: 560px) { .test-card { padding: 20px; } }
 </style>

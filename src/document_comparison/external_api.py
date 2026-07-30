@@ -9,7 +9,7 @@ import pymupdf
 from fastapi import Header, HTTPException
 
 from .config import settings
-from .models import Diff, TamperReport
+from .models import Diff, StatementSummaryReport, TamperReport
 from .report.builder import burn_pdf
 
 
@@ -173,4 +173,35 @@ def build_external_result(
         "result_text": build_result_text(document_no, report),
         "highlight_images": images,
         "result_url": _absolute_external_url(f"/api/v1/external/contractCompare/{task_id}"),
+    }
+
+
+def build_external_statement_result(
+    task_id: str,
+    document_no: str,
+    report: StatementSummaryReport,
+) -> dict:
+    """构造金额统计查询响应与完成回调共享的稳定结果结构。
+
+    顶层放业务最关心的核心汇总字段(总金额/判定/每文件合计/计数),便于外部系统直接消费;
+    与 `build_external_result` 风格一致:查询响应与回调 payload 共用同一结构。
+    """
+    return {
+        "document_no": document_no,
+        "grand_total": report.grand_total,
+        "verdict": report.verdict,
+        "file_totals": [
+            {
+                "file_index": file.file_index,
+                "file_name": file.file_name,
+                "total_amount": file.total_amount,
+                "error": file.error,
+            }
+            for file in report.files
+        ],
+        "total_files": report.total_files,
+        "total_tables": report.total_tables,
+        "total_items": report.total_items,
+        "reasons": list(report.reasons),
+        "result_url": _absolute_external_url(f"/api/v1/external/amountStat/{task_id}"),
     }

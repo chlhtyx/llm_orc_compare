@@ -121,6 +121,10 @@ class Clause(BaseModel):
     number: str = ""
     title: str = ""
     text: str = ""
+    source_page_index: int | None = Field(
+        default=None,
+        description="原始文档中的页序线索(仅 Word 条款);用于 deleted 占位框跨页时避免错误归页",
+    )
     blocks: list[Block] = Field(default_factory=list)
     tables: list[TableStructure] = Field(
         default_factory=list,

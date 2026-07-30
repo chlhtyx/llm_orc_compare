@@ -97,14 +97,21 @@ async def download_to_upload(
     return temp_path, filename
 
 
-def finalize_temp_file(temp_path: Path, task_id: str, role: str, filename: str) -> Path:
+def finalize_temp_file(
+    temp_path: Path, task_id: str, role: str, filename: str,
+    index: int | None = None,
+) -> Path:
     """把 `download_to_upload` 的临时产物 rename 到与 `save_upload` 一致的最终命名。
 
-    `save_upload` 的命名是 `{task_id}-{role}{suffix}`,这里保持一致(index=None 单文件分支)。
+    命名规则与 `save_upload` 对齐:index=None 时 `{task_id}-{role}{suffix}`(单文件分支),
+    index 非 None 时 `{task_id}-{role}-{index}{suffix}`(对帐单多文件场景,避免互相覆盖)。
     同文件系统 rename 原子安全;幂等性由 task_id 唯一性保证。
     """
     suffix = Path(filename).suffix or ".bin"
-    final_path = settings.uploads_dir / f"{task_id}-{role}{suffix}"
+    if index is None:
+        final_path = settings.uploads_dir / f"{task_id}-{role}{suffix}"
+    else:
+        final_path = settings.uploads_dir / f"{task_id}-{role}-{index}{suffix}"
     temp_path.replace(final_path)
     return final_path
 

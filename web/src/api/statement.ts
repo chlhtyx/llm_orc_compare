@@ -33,6 +33,46 @@ export function getStatementTask(taskId: string): Promise<StatementTaskInfo> {
   return request(`/api/v1/statement/${encodeURIComponent(taskId)}`)
 }
 
+/** 金额统计 API 管线测试的对外任务状态（不发送真实回调）。 */
+export interface StatementApiTestInfo {
+  task_id: string
+  document_no: string
+  status: TaskStatus
+  stage?: string
+  progress?: number
+  error?: string | null
+  grand_total?: number
+  verdict?: 'clean' | 'changed' | 'needs_review'
+  file_totals?: Array<{
+    file_index: number
+    file_name: string
+    total_amount: number
+    error: string | null
+  }>
+  total_files?: number
+  total_tables?: number
+  total_items?: number
+  reasons?: string[]
+  result_url?: string
+}
+
+export interface StatementApiTestSubmitArgs {
+  targets: File[]
+  targetUrls: string[]
+}
+
+/** 使用金额统计页已选文件或 URL 验证正式外部 API 的完整统计管线，不发送回调。 */
+export function submitStatementApiTest(args: StatementApiTestSubmitArgs): Promise<StatementApiTestInfo> {
+  const form = new FormData()
+  args.targets.forEach((file) => form.append('target', file))
+  args.targetUrls.forEach((url) => form.append('target_urls', url))
+  return request('/api/v1/statement/api-test', { method: 'POST', body: form })
+}
+
+export function getStatementApiTest(taskId: string): Promise<StatementApiTestInfo> {
+  return request(`/api/v1/statement/api-test/${encodeURIComponent(taskId)}`)
+}
+
 
 export interface StatementProgressHandlers {
   onEvent: (ev: ProgressEvent) => void
