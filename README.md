@@ -135,6 +135,7 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 | OCR | 扫描页文字与版面识别 | `llm`；`paddleocr` 可切换 vLLM 兼容调用/官方 SDK/自建 PaddleX serving |
 | Embedding | 无编号条款的语义对齐 | `qwen`、`bge`、`mock` |
 | Judge | 对疑似修改条款做语义复核 | OpenAI 兼容的纯文本模型 |
+| LLM 直接比对提示词 | 「LLM 直接比对」(无标注版管线 / `enable_llm_direct_diff` 分支)的系统提示词 | 复用 Judge 的纯文本模型；设置页可自定义，留空用内置默认规则 |
 
 PaddleOCR 的“官方 API / SDK”模式使用 AI Studio Access Token。填写官方示例提供的
 完整 `/layout-parsing` 地址时，使用与网页端一致的同步版面解析 API；API 地址留空时

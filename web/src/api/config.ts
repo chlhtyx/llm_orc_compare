@@ -34,6 +34,8 @@ export interface LlmConfig {
   judge_api_key_set: boolean
   judge_model: string
   judge_timeout: number
+  /** 合同 LLM 直接比对系统提示词;留空(空串)使用内置默认规则 */
+  llm_direct_diff_prompt: string
   // —— 语义向量引擎 ——
   embed_backend: string // mock | qwen | bge
   embed_api_base: string
@@ -90,6 +92,8 @@ export interface LlmConfigUpdate {
   judge_api_key?: string
   judge_model?: string
   judge_timeout?: number
+  /** 合同 LLM 直接比对系统提示词;传空串=回退内置默认(清除自定义) */
+  llm_direct_diff_prompt?: string
   // —— 语义向量引擎 ——
   embed_backend?: string
   embed_api_base?: string

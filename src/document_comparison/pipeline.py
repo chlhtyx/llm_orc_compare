@@ -84,6 +84,18 @@ def run_pipeline(
     embed = embed or get_embed_engine(cfg.embed_backend)
     thresholds = {"identical": cfg.similarity_identical, "modified": cfg.similarity_modified}
 
+    # 互斥兜底:LLM 直接比对分支会早返回,标准管线的对齐/辅助说明不会执行。
+    # 这里静默归一,避免上层(UI/外部 API)同时传 true 时产生"对齐/辅助说明也在跑"的误解。
+    # 风险评估不归一:它在 direct_diff 分支内仍作用于 apply_recognition_gate(verdict 镜像)。
+    if enable_llm_direct_diff and (enable_llm_alignment or enable_llm_judge):
+        logger.warning(
+            "enable_llm_direct_diff=True 隐式忽略 enable_llm_alignment/enable_llm_judge"
+            "(direct=%s alignment=%s judge=%s) —— 直接比对分支不进入标准管线",
+            enable_llm_direct_diff, enable_llm_alignment, enable_llm_judge,
+        )
+        enable_llm_alignment = False
+        enable_llm_judge = False
+
     def _progress(stage: str, frac: float) -> None:
         if on_progress:
             on_progress(stage, frac)

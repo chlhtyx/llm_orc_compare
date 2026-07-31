@@ -175,6 +175,37 @@ def _setup_judge(monkeypatch):
     monkeypatch.setattr(settings, "judge_model", "test-model")
 
 
+def test_llm_text_diff_uses_custom_prompt_when_configured(monkeypatch):
+    """settings.llm_direct_diff_prompt 非空时,作为系统提示词发给 LLM;空则回退内置默认。"""
+    from document_comparison.config import settings
+
+    _setup_judge(monkeypatch)
+
+    captured: dict = {}
+
+    def fake_post(system_prompt, user_content):
+        captured["system_prompt"] = system_prompt
+        captured["user_content"] = user_content
+        # 返回一个合法的空差异 JSON
+        return '{"hunks": [], "similarity": 1.0}'
+
+    monkeypatch.setattr(llm_diff_mod, "_post_judge_chat", fake_post)
+
+    # ① 自定义提示词:作为系统提示词前缀,且 char_level=True 时拼接字符级补充指令
+    custom = "【自定义比对规则】只关注金额变化。"
+    monkeypatch.setattr(settings, "llm_direct_diff_prompt", custom)
+    llm_diff_mod.llm_text_diff("原文A", "待核A", char_level=True)
+    assert captured["system_prompt"].startswith(custom)
+    assert llm_diff_mod._CHAR_DIFF_INSTRUCTION in captured["system_prompt"]
+    assert "原文A" in captured["user_content"] and "待核A" in captured["user_content"]
+
+    # ② 留空:回退内置默认提示词
+    monkeypatch.setattr(settings, "llm_direct_diff_prompt", "")
+    llm_diff_mod.llm_text_diff("原文B", "待核B", char_level=False)
+    assert captured["system_prompt"] == llm_diff_mod._DIFF_SYSTEM_PROMPT
+    assert llm_diff_mod._CHAR_DIFF_INSTRUCTION not in captured["system_prompt"]
+
+
 def test_pipeline_llm_direct_diff_branch_produces_tamper_report(tmp_path, monkeypatch):
     """开启 enable_llm_direct_diff 后,run_pipeline 走 LLM 直接比对并返回 TamperReport。
 
@@ -219,6 +250,53 @@ def test_pipeline_llm_direct_diff_branch_produces_tamper_report(tmp_path, monkey
     # 同源链路:replace hunk 应挂上真实高亮坐标
     assert len(report.diffs[0].page_regions) >= 1
     assert report.diffs[0].page_regions[0].kind == "real"
+
+
+def test_pipeline_llm_direct_diff_silently_ignores_alignment_and_judge(
+    tmp_path, monkeypatch, caplog,
+):
+    """LLM 直接比对与标准管线(对齐/辅助说明)互斥。
+
+    同时传 direct_diff=True + alignment=True + judge=True 时,pipeline 入口应静默
+    归一 alignment/judge=False 并记 warning,然后照常走直接比对分支返回 TamperReport
+    (不会因为 alignment/judge 同时为真而进入标准管线或报错)。
+    """
+    import logging
+
+    _setup_judge(monkeypatch)
+    import document_comparison.ocr.native as native_mod
+    monkeypatch.setattr(native_mod, "_MIN_NATIVE_CHARS", 1)
+
+    word_buf = _make_word([("h1", "合同"), ("p", "甲方应当支付定金三万元。")])
+    pdf_buf = _make_pdf_from_lines(["甲方应当支付定金五万元。"])
+    wpath, ppath = _to_files(word_buf, pdf_buf, tmp_path)
+
+    monkeypatch.setattr(
+        llm_diff_mod,
+        "llm_text_diff",
+        lambda wt, pt, **kw: _mock_llm_report(
+            [TextDiffHunk(tag="replace", word_lines=["三万"], pdf_lines=["五万"])],
+            similarity=0.9,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="document_comparison.pipeline"):
+        report = run_pipeline(
+            wpath, ppath,
+            ocr=NativePDFEngine(),
+            enable_llm_direct_diff=True,
+            enable_llm_alignment=True,
+            enable_llm_judge=True,
+        )
+
+    # 仍走直接比对分支
+    assert isinstance(report, TamperReport)
+    assert report.summary.get("llm_direct_diff") is True
+    # 归一被记录
+    assert any(
+        "enable_llm_direct_diff=True 隐式忽略" in rec.message
+        for rec in caplog.records
+    ), [r.message for r in caplog.records]
 
 
 def test_pipeline_llm_direct_diff_unreliable_ocr_marks_needs_review(tmp_path, monkeypatch):

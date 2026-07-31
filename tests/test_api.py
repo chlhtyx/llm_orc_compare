@@ -503,6 +503,45 @@ def test_llm_config_rejects_negative_max_pdf_pages(client):
     assert r.status_code == 400
 
 
+def test_llm_config_persists_llm_direct_diff_prompt(client, monkeypatch):
+    """PUT 应把 llm_direct_diff_prompt 写入 PG、应用到 settings 并在 GET 中回读一致。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.save_llm_config({})
+    # 防御性:确保起始态为空(回退内置默认)
+    monkeypatch.setattr(settings, "llm_direct_diff_prompt", "")
+
+    custom = "你是合同比对助手。严格输出 JSON:{\"hunks\":[],\"similarity\":1.0}"
+
+    r = client.put("/api/v1/config/llm", json={"llm_direct_diff_prompt": custom})
+    assert r.status_code == 200
+    assert r.json()["config"]["llm_direct_diff_prompt"] == custom
+
+    # 应用到运行时单例
+    assert settings.llm_direct_diff_prompt == custom
+
+    # 持久化到 PG(原值,不脱敏——提示词不是密钥)
+    persisted = db_repo.get_llm_config()
+    assert persisted["llm_direct_diff_prompt"] == custom
+
+    # GET 回读
+    fetched = client.get("/api/v1/config/llm").json()
+    assert fetched["llm_direct_diff_prompt"] == custom
+
+    # 空串 PUT → 回退内置默认(settings 字段被清空)
+    r2 = client.put("/api/v1/config/llm", json={"llm_direct_diff_prompt": ""})
+    assert r2.status_code == 200
+    assert r2.json()["config"]["llm_direct_diff_prompt"] == ""
+    assert settings.llm_direct_diff_prompt == ""
+
+
+def test_llm_config_rejects_non_string_llm_direct_diff_prompt(client):
+    """llm_direct_diff_prompt 必须是字符串。"""
+    r = client.put("/api/v1/config/llm", json={"llm_direct_diff_prompt": 123})
+    assert r.status_code == 400
+    assert "llm_direct_diff_prompt" in r.json()["message"]
+
+
 def test_llm_config_persists_paddleocr_api_mode(client):
     from document_comparison.db import repository as db_repo
 

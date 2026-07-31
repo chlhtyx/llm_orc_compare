@@ -503,6 +503,7 @@ def create_app() -> FastAPI:
             "judge_api_key_set": bool(settings.judge_api_key),
             "judge_model": settings.judge_model,
             "judge_timeout": settings.judge_timeout,
+            "llm_direct_diff_prompt": settings.llm_direct_diff_prompt,
             "embed_backend": settings.embed_backend,
             "embed_api_base": settings.embed_api_base,
             "embed_api_key": _mask_key(settings.embed_api_key),
@@ -541,7 +542,8 @@ def create_app() -> FastAPI:
         pdf_render_dpi, max_pdf_pages, external_api_key,
         external_public_base_url, external_max_upload_mb, external_image_dpi,
         external_ocr_backend, external_enable_llm_judge, external_enable_llm_alignment,
-        external_enable_risk_assessment, external_truncate_to_original_pages。
+        external_enable_risk_assessment, external_truncate_to_original_pages,
+        llm_direct_diff_prompt(合同 LLM 直接比对系统提示词,留空=内置默认)。
         空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
         """
@@ -555,6 +557,7 @@ def create_app() -> FastAPI:
             "paddleocr_paddlex_api_key",
             "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
             "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
+            "llm_direct_diff_prompt",
             "embed_backend", "embed_api_base", "embed_api_key",
             "embed_model", "embed_timeout", "pdf_render_dpi", "max_pdf_pages",
             "external_api_key", "external_public_base_url",
@@ -625,6 +628,12 @@ def create_app() -> FastAPI:
                 float(body["judge_timeout"])
             except (TypeError, ValueError):
                 raise HTTPException(400, "judge_timeout 必须为数字")
+        if (
+            "llm_direct_diff_prompt" in body
+            and body["llm_direct_diff_prompt"] is not None
+            and not isinstance(body["llm_direct_diff_prompt"], str)
+        ):
+            raise HTTPException(400, "llm_direct_diff_prompt 必须为字符串")
         if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge", "qwen"):
             raise HTTPException(400, "embed_backend 仅支持 mock | bge | qwen")
         if "embed_timeout" in body and body["embed_timeout"] is not None:
@@ -737,6 +746,7 @@ def create_app() -> FastAPI:
                 "judge_api_key_set": bool(settings.judge_api_key),
                 "judge_model": settings.judge_model,
                 "judge_timeout": settings.judge_timeout,
+                "llm_direct_diff_prompt": settings.llm_direct_diff_prompt,
                 "embed_backend": settings.embed_backend,
                 "embed_api_base": settings.embed_api_base,
                 "embed_api_key": _mask_key(settings.embed_api_key),

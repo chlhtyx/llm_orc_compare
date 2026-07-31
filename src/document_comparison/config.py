@@ -122,6 +122,11 @@ class Settings:
     # 无标注版整篇比对是重推理(超长输入+结构化输出),需要比 OCR 单页更长的超时。
     judge_timeout: float = 300.0
 
+    # —— 合同 LLM 直接比对提示词(复用 judge_* 纯文本 LLM 服务)——
+    # 留空(默认)使用 compare/llm_diff.py 内置的 _DIFF_SYSTEM_PROMPT 核心规则。
+    # 在设置页可自定义;自定义文本仍需保留"严格输出 JSON / hunks 结构"等输出契约。
+    llm_direct_diff_prompt: str = ""
+
     # —— 向量引擎选择:mock | qwen | bge ——
     # 默认 qwen;若未配置 embed_api_base/model,get_embed_engine 会自动回退 mock。
     embed_backend: str = "qwen"
@@ -293,6 +298,7 @@ _LLM_CONFIG_FIELDS = (
     "judge_api_key",
     "judge_model",
     "judge_timeout",
+    "llm_direct_diff_prompt",
     "embed_backend",
     "embed_api_base",
     "embed_api_key",
@@ -337,6 +343,10 @@ _LLM_DEFAULTS: dict = {
     "judge_api_key": "",
     "judge_model": "",
     "judge_timeout": 300,
+    # 提示词默认留空 → 消费端回退 compare/llm_diff.py 的内置 _DIFF_SYSTEM_PROMPT。
+    # 这里给空串兜底,使 load_llm_overrides 总能返回该 key,从而 apply_llm_overrides
+    # 在用户清空(空串 PUT,被 save 剔除)后也能把 settings 立即置空(即时回退默认)。
+    "llm_direct_diff_prompt": "",
     "embed_backend": "qwen",
     "embed_api_base": "",
     "embed_api_key": "",
@@ -458,6 +468,9 @@ def apply_llm_overrides() -> None:
         settings.judge_model = cfg["judge_model"]
     if "judge_timeout" in cfg:
         settings.judge_timeout = float(cfg["judge_timeout"])
+    if "llm_direct_diff_prompt" in cfg:
+        # 提示词为纯文本,允许任意非空字符串;消费端对空值回退内置默认。
+        settings.llm_direct_diff_prompt = str(cfg["llm_direct_diff_prompt"])
     if "embed_backend" in cfg:
         settings.embed_backend = cfg["embed_backend"]
     if "embed_api_base" in cfg:

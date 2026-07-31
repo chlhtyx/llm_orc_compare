@@ -125,7 +125,9 @@ def llm_text_diff(
             "无标注版 LLM 比对未配置:请在设置页填写 judge_api_base / judge_model"
         )
 
-    system_prompt = _DIFF_SYSTEM_PROMPT + (_CHAR_DIFF_INSTRUCTION if char_level else "")
+    system_prompt = (settings.llm_direct_diff_prompt or _DIFF_SYSTEM_PROMPT) + (
+        _CHAR_DIFF_INSTRUCTION if char_level else ""
+    )
     user_content = f"【原文】\n{word_text}\n\n【待核件】\n{pdf_text}\n\n请比对并输出 JSON。"
 
     content = _post_judge_chat(system_prompt, user_content)

@@ -18,10 +18,15 @@ const form = reactive({
   external_enable_risk_assessment: false,
   external_enable_llm_direct_diff: false,
   external_truncate_to_original_pages: false,
+  // —— LLM 直接比对系统提示词(留空=内置默认)——
+  llm_direct_diff_prompt: '',
 })
 
 const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWith('.docx'))
 const targetValid = computed(() => !!targetFile.value?.name.toLowerCase().endsWith('.pdf'))
+// LLM 直接比对与标准管线(对齐/辅助说明)互斥:开启直接比对时这两个选项被忽略,
+// UI 联动禁用 + 保存时强制写 false,与「辅助说明依赖风险评估」的处理保持一致。
+const directDiffBlocksStandard = computed(() => form.external_enable_llm_direct_diff)
 const endpoint = computed(() => {
   const base = (configStore.config?.external_public_base_url || '').trim().replace(/\/$/, '')
   return `${base || 'https://compare.example.com'}/api/v1/external/contractCompare`
@@ -34,6 +39,7 @@ function syncFromConfig(config: LlmConfig | null): void {
   form.external_enable_risk_assessment = config.external_enable_risk_assessment ?? false
   form.external_enable_llm_direct_diff = config.external_enable_llm_direct_diff ?? false
   form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
+  form.llm_direct_diff_prompt = config.llm_direct_diff_prompt || ''
 }
 
 onMounted(async () => {
@@ -47,13 +53,20 @@ watch(() => configStore.config, (config) => syncFromConfig(config))
 async function onSave(): Promise<void> {
   saved.value = false
   saveError.value = null
+  // LLM 直接比对分支会早返回,标准管线的对齐/辅助说明不执行:
+  // 开启直接比对时强制把这两个选项写 false,避免「以为在跑」的误解。
+  const directDiffOn = form.external_enable_llm_direct_diff
   const ok = await configStore.save({
     external_enable_llm_judge:
-      form.external_enable_risk_assessment && form.external_enable_llm_judge,
-    external_enable_llm_alignment: form.external_enable_llm_alignment,
+      !directDiffOn &&
+      form.external_enable_risk_assessment &&
+      form.external_enable_llm_judge,
+    external_enable_llm_alignment: !directDiffOn && form.external_enable_llm_alignment,
     external_enable_risk_assessment: form.external_enable_risk_assessment,
     external_enable_llm_direct_diff: form.external_enable_llm_direct_diff,
     external_truncate_to_original_pages: form.external_truncate_to_original_pages,
+    // 每次都提交:空串=回退内置默认(用户清空文本框即清除自定义)。
+    llm_direct_diff_prompt: form.llm_direct_diff_prompt.trim(),
   })
   if (!ok) {
     saveError.value = configStore.error
@@ -122,15 +135,16 @@ async function onReset(): Promise<void> {
               role="switch"
             />
           </label>
-         <label class="toggle-row">
+         <label class="toggle-row" :class="{ disabled: directDiffBlocksStandard }">
            <span>
              <strong>LLM 联合分段对齐</strong>
-              <small>直接对齐 DOCX 段落与 PDF OCR 块；失败时回退规则，不会决定是否发生篡改。</small>
+              <small>与 LLM 直接比对互斥；直接对齐 DOCX 段落与 PDF OCR 块，失败时回退规则，不会决定是否发生篡改。</small>
             </span>
             <input
               v-model="form.external_enable_llm_alignment"
               type="checkbox"
               role="switch"
+              :disabled="directDiffBlocksStandard"
             />
           </label>
           <label class="toggle-row">
@@ -140,16 +154,19 @@ async function onReset(): Promise<void> {
             </span>
             <input v-model="form.external_enable_risk_assessment" type="checkbox" role="switch" />
           </label>
-          <label class="toggle-row" :class="{ disabled: !form.external_enable_risk_assessment }">
+          <label
+            class="toggle-row"
+            :class="{ disabled: !form.external_enable_risk_assessment || directDiffBlocksStandard }"
+          >
             <span>
               <strong>LLM 辅助说明</strong>
-              <small>依赖风险评估；只补充解释，不会撤销确定变化。</small>
+              <small>依赖风险评估，与 LLM 直接比对互斥；只补充解释，不会撤销确定变化。</small>
             </span>
             <input
               v-model="form.external_enable_llm_judge"
               type="checkbox"
               role="switch"
-              :disabled="!form.external_enable_risk_assessment"
+              :disabled="!form.external_enable_risk_assessment || directDiffBlocksStandard"
             />
           </label>
           <label class="toggle-row">
@@ -166,6 +183,30 @@ async function onReset(): Promise<void> {
             />
           </label>
         </div>
+      </div>
+
+      <div v-if="form.external_enable_llm_direct_diff" class="prompt-panel">
+        <div class="prompt-copy">
+          <h3>LLM 直接比对提示词 <span>可选</span></h3>
+          <p>
+            自定义交给 LLM 的系统提示词(复用设置页 judge_* 纯文本模型)。<b>留空</b>使用内置默认规则;
+            自定义时<b>必须保留</b>「严格输出 JSON」「hunks / similarity 结构」等输出契约,否则解析失败会报错。
+          </p>
+        </div>
+        <textarea
+          v-model="form.llm_direct_diff_prompt"
+          class="input prompt-textarea"
+          rows="12"
+          spellcheck="false"
+          placeholder="留空使用内置默认规则。内置规则要求 LLM 忽略 OCR 排版噪声,只报出金额/日期/主体/账号等关键要素的实质性改动,并严格输出 {hunks:[...], similarity:0~1} 的 JSON。"
+        ></textarea>
+        <span class="hint">
+          <template v-if="configStore.config?.llm_direct_diff_prompt">
+            当前:自定义提示词({{ configStore.config.llm_direct_diff_prompt.length }} 字)
+          </template>
+          <template v-else>当前:内置默认规则</template>
+          · 清空文本框并保存即回退内置默认
+        </span>
       </div>
 
       <div class="config-actions">
@@ -404,6 +445,35 @@ async function onReset(): Promise<void> {
   margin: 5px 0 0;
   color: var(--text-muted);
   font-size: 12px;
+}
+.prompt-panel {
+  margin-top: 18px;
+  padding: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.prompt-copy h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.prompt-copy h3 span {
+  margin-left: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.prompt-copy p {
+  margin: 5px 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.prompt-textarea {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 180px;
 }
 .config-link {
   display: inline-block;
