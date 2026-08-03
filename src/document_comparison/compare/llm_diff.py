@@ -106,6 +106,10 @@ _CHAR_DIFF_INSTRUCTION = (
     "其余片段(多行 replace / delete / insert)不要输出 char_segments。"
 )
 
+# 导出别名:供 API 层在「查看内置默认规则」UI 上只读展示(settings.llm_direct_diff_prompt
+# 为空时实际生效的 system prompt 前半段;char_level 额外追加的部分与用户自定义无关)。
+DEFAULT_DIFF_SYSTEM_PROMPT = _DIFF_SYSTEM_PROMPT
+
 
 def llm_text_diff(
     word_text: str,

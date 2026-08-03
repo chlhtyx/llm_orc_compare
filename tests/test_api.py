@@ -542,6 +542,29 @@ def test_llm_config_rejects_non_string_llm_direct_diff_prompt(client):
     assert "llm_direct_diff_prompt" in r.json()["message"]
 
 
+def test_llm_config_exposes_readonly_default_prompt(client):
+    """GET/PUT 响应应返回内置默认提示词全文(只读),且 PUT 回传该字段应被拒。"""
+    from document_comparison.compare.llm_diff import DEFAULT_DIFF_SYSTEM_PROMPT
+
+    # GET 返回默认提示词全文
+    fetched = client.get("/api/v1/config/llm").json()
+    assert fetched["llm_direct_diff_default_prompt"] == DEFAULT_DIFF_SYSTEM_PROMPT
+    assert "你是合同关键差异比对助手" in fetched["llm_direct_diff_default_prompt"]
+
+    # PUT 响应也带该字段(与 GET 同源)
+    r = client.put("/api/v1/config/llm", json={"judge_timeout": settings.judge_timeout})
+    assert r.status_code == 200
+    assert r.json()["config"]["llm_direct_diff_default_prompt"] == DEFAULT_DIFF_SYSTEM_PROMPT
+
+    # 只读:前端误回传应被白名单挡掉(不写入 settings)
+    r2 = client.put(
+        "/api/v1/config/llm",
+        json={"llm_direct_diff_default_prompt": "试图覆盖默认"},
+    )
+    assert r2.status_code == 400
+    assert "llm_direct_diff_default_prompt" in r2.json()["message"]
+
+
 def test_llm_config_persists_paddleocr_api_mode(client):
     from document_comparison.db import repository as db_repo
 

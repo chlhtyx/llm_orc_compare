@@ -27,6 +27,8 @@ const targetValid = computed(() => !!targetFile.value?.name.toLowerCase().endsWi
 // LLM 直接比对与标准管线(对齐/辅助说明)互斥:开启直接比对时这两个选项被忽略,
 // UI 联动禁用 + 保存时强制写 false,与「辅助说明依赖风险评估」的处理保持一致。
 const directDiffBlocksStandard = computed(() => form.external_enable_llm_direct_diff)
+// 内置默认提示词只读展示开关(折叠面板)
+const showDefaultPrompt = ref(false)
 const endpoint = computed(() => {
   const base = (configStore.config?.external_public_base_url || '').trim().replace(/\/$/, '')
   return `${base || 'https://compare.example.com'}/api/v1/external/contractCompare`
@@ -200,6 +202,15 @@ async function onReset(): Promise<void> {
           spellcheck="false"
           placeholder="留空使用内置默认规则。内置规则要求 LLM 忽略 OCR 排版噪声,只报出金额/日期/主体/账号等关键要素的实质性改动,并严格输出 {hunks:[...], similarity:0~1} 的 JSON。"
         ></textarea>
+        <button
+          type="button"
+          class="default-prompt-toggle"
+          :aria-expanded="showDefaultPrompt"
+          @click="showDefaultPrompt = !showDefaultPrompt"
+        >
+          {{ showDefaultPrompt ? '▼' : '▸' }} 查看内置默认规则
+        </button>
+        <pre v-if="showDefaultPrompt" class="default-prompt-view">{{ configStore.config?.llm_direct_diff_default_prompt }}</pre>
         <span class="hint">
           <template v-if="configStore.config?.llm_direct_diff_prompt">
             当前:自定义提示词({{ configStore.config.llm_direct_diff_prompt.length }} 字)
@@ -474,6 +485,34 @@ async function onReset(): Promise<void> {
   line-height: 1.5;
   resize: vertical;
   min-height: 180px;
+}
+.default-prompt-toggle {
+  align-self: flex-start;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.default-prompt-toggle:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.default-prompt-view {
+  max-height: 340px;
+  margin: 8px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 12px/1.55 var(--mono);
+  white-space: pre-wrap;
+  overflow: auto;
 }
 .config-link {
   display: inline-block;

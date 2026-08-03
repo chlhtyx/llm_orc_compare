@@ -36,6 +36,8 @@ export interface LlmConfig {
   judge_timeout: number
   /** 合同 LLM 直接比对系统提示词;留空(空串)使用内置默认规则 */
   llm_direct_diff_prompt: string
+  /** 只读:内置默认提示词全文(llm_direct_diff_prompt 为空时生效的前半段),供 UI 展示 */
+  llm_direct_diff_default_prompt: string
   // —— 语义向量引擎 ——
   embed_backend: string // mock | qwen | bge
   embed_api_base: string

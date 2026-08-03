@@ -53,6 +53,7 @@ from ..storage import (
     save_upload,
 )
 from ..report.builder import burn_pdf
+from ..compare.llm_diff import DEFAULT_DIFF_SYSTEM_PROMPT
 from .. import webhook
 from ..external_api import (
     build_external_result,
@@ -525,6 +526,9 @@ def create_app() -> FastAPI:
             "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
             "external_enabled": external_config_enabled(),
             "persisted": _safe_persisted_config(),
+            # 只读:内置默认提示词(settings.llm_direct_diff_prompt 为空时生效的前半段),
+            # 供 UI「查看内置默认规则」展示;不在 PUT 白名单内,前端回传会被挡。
+            "llm_direct_diff_default_prompt": DEFAULT_DIFF_SYSTEM_PROMPT,
         }
 
     @app.put("/api/v1/config/llm")
@@ -767,6 +771,7 @@ def create_app() -> FastAPI:
                 "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
                 "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
                 "external_enabled": external_config_enabled(),
+                "llm_direct_diff_default_prompt": DEFAULT_DIFF_SYSTEM_PROMPT,
             },
         }
 
