@@ -30,6 +30,8 @@ const form = reactive({
   judge_api_key: '',
   judge_model: '',
   judge_timeout: 120,
+  // —— 比对思考模式 ——
+  llm_diff_no_think_enabled: true,
   // —— 语义向量引擎 ——
   embed_backend: 'mock',
   embed_api_base: '',
@@ -72,6 +74,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.judge_api_key = c.judge_api_key || ''
   form.judge_model = c.judge_model || ''
   form.judge_timeout = c.judge_timeout ?? 120
+  form.llm_diff_no_think_enabled = c.llm_diff_no_think_enabled ?? true
   form.embed_backend = c.embed_backend || 'mock'
   form.embed_api_base = c.embed_api_base || ''
   form.embed_api_key = c.embed_api_key || ''
@@ -150,6 +153,7 @@ async function onSave(): Promise<void> {
     pdf_render_dpi: Number(form.pdf_render_dpi),
     max_pdf_pages: Number(form.max_pdf_pages),
     embed_backend: form.embed_backend,
+    llm_diff_no_think_enabled: form.llm_diff_no_think_enabled,
   }
 
   // LLM 辅助说明服务(独立于 OCR,填了才提交)
@@ -460,6 +464,21 @@ async function onReset(): Promise<void> {
           <input v-model.number="form.judge_timeout" class="input" type="number" min="10" max="600" />
           <span class="hint">单条条款复核的超时上限</span>
         </div>
+
+        <label class="thinking-toggle span-2">
+          <span>
+            <strong>关闭思考模式 (/no_think)</strong>
+            <small>
+              关闭 GLM-4.5/4.6 的 &lt;think&gt; 思考链，降低合同比对和风险复核的响应延迟；
+              与 Qwen3 的 enable_thinking=False 并存，非兼容模型会忽略该指令。
+            </small>
+          </span>
+          <input
+            v-model="form.llm_diff_no_think_enabled"
+            type="checkbox"
+            role="switch"
+          />
+        </label>
       </div>
     </section>
 
@@ -586,6 +605,30 @@ async function onReset(): Promise<void> {
 }
 .radio input {
   cursor: pointer;
+}
+.thinking-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  cursor: pointer;
+}
+.thinking-toggle span,
+.thinking-toggle strong,
+.thinking-toggle small {
+  display: block;
+}
+.thinking-toggle strong {
+  font-size: 13px;
+}
+.thinking-toggle small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.thinking-toggle input {
+  width: 36px;
+  height: 20px;
+  accent-color: var(--primary);
 }
 .ok {
   color: var(--risk-clean);

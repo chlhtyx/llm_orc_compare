@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import unquote
 
 
@@ -66,6 +67,8 @@ def scan_probe_reason(*, method: str, raw_path: str) -> str | None:
         return "blocked_method"
 
     path = _decode_path(raw_path)
+    if path.startswith("//"):
+        return "absolute_path"
     if "\x00" in path or ".." in path.split("/"):
         return "path_traversal"
 
@@ -77,6 +80,24 @@ def scan_probe_reason(*, method: str, raw_path: str) -> str | None:
     if segments and segments[-1] in _SCANNER_FILENAMES:
         return "scanner_endpoint"
     return None
+
+
+def safe_static_file_path(static_dir: Path, requested_path: str) -> Path | None:
+    """Resolve an SPA asset only when it remains below ``static_dir``.
+
+    A request path beginning with a second slash can otherwise become an
+    absolute ``Path`` when joined to the static directory.  Resolving before
+    the containment check also prevents a symlink inside the static tree from
+    exposing a file outside it.
+    """
+    root = static_dir.resolve()
+    relative_path = requested_path.replace("\\", "/").lstrip("/")
+    candidate = (root / relative_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
 
 
 def apply_security_headers(headers) -> None:

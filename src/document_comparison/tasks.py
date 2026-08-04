@@ -292,19 +292,23 @@ class TaskManager:
                 # OCR 内部 threading.Thread 经 _BoundedConcurrency.ctx.run 再传到孙线程,
                 # 所有对话型 LLM 调用记录 append 到同一个 list,任务结束批量入库。
                 with llm_call_collector() as llm_calls:
-                    report = await asyncio.to_thread(
-                        run_pipeline, word_path, pdf_path, settings,
-                        on_progress=self._make_progress_cb(task),
-                        enable_llm_judge=enable_llm_judge,
-                        enable_llm_alignment=enable_llm_alignment,
-                        ocr_backend=ocr_backend,
-                        enable_risk_assessment=enable_risk_assessment,
-                        enable_llm_direct_diff=enable_llm_direct_diff,
-                        truncate_to_original_pages=truncate_to_original_pages,
-                        original_page_count=original_page_count,
-                        truncated_pdf_output_path=compared_pdf_path(task_id),
-                    )
-                await self._save_llm_calls(task_id, llm_calls)
+                    try:
+                        report = await asyncio.to_thread(
+                            run_pipeline, word_path, pdf_path, settings,
+                            on_progress=self._make_progress_cb(task),
+                            enable_llm_judge=enable_llm_judge,
+                            enable_llm_alignment=enable_llm_alignment,
+                            ocr_backend=ocr_backend,
+                            enable_risk_assessment=enable_risk_assessment,
+                            enable_llm_direct_diff=enable_llm_direct_diff,
+                            truncate_to_original_pages=truncate_to_original_pages,
+                            original_page_count=original_page_count,
+                            truncated_pdf_output_path=compared_pdf_path(task_id),
+                        )
+                    finally:
+                        # 模型超时/解析异常会让 pipeline 抛错;仍要落库已收集的
+                        # request/failure attempt,否则历史页看不到模型/OCR记录。
+                        await self._save_llm_calls(task_id, llm_calls)
             task.report = report
             await self._db_thread(
                 db_repo.save_compare_report, task_id, report
@@ -398,13 +402,15 @@ class TaskManager:
             async with self._acquire_sem():
                 task.info.status = "running"
                 with llm_call_collector() as llm_calls:
-                    report = await asyncio.to_thread(
-                        run_raw_pipeline, word_path, pdf_path,
-                        on_progress=self._make_progress_cb(task),
-                        char_level=char_level,
-                        ocr_backend=ocr_backend,
-                    )
-                await self._save_llm_calls(task_id, llm_calls)
+                    try:
+                        report = await asyncio.to_thread(
+                            run_raw_pipeline, word_path, pdf_path,
+                            on_progress=self._make_progress_cb(task),
+                            char_level=char_level,
+                            ocr_backend=ocr_backend,
+                        )
+                    finally:
+                        await self._save_llm_calls(task_id, llm_calls)
             task.raw_report = report
             task.info.status = "done"
             task.push_event("done", 1.0)
@@ -472,14 +478,16 @@ class TaskManager:
             async with self._acquire_sem():
                 task.info.status = "running"
                 with llm_call_collector() as llm_calls:
-                    report = await asyncio.to_thread(
-                        run_statement_pipeline, pdf_paths, file_names,
-                        on_progress=self._make_progress_cb(task),
-                        ocr_backend=ocr_backend,
-                        amount_column_keywords=amount_column_keywords,
-                        enable_llm_column_detection=enable_llm_column_detection,
-                    )
-                await self._save_llm_calls(task_id, llm_calls)
+                    try:
+                        report = await asyncio.to_thread(
+                            run_statement_pipeline, pdf_paths, file_names,
+                            on_progress=self._make_progress_cb(task),
+                            ocr_backend=ocr_backend,
+                            amount_column_keywords=amount_column_keywords,
+                            enable_llm_column_detection=enable_llm_column_detection,
+                        )
+                    finally:
+                        await self._save_llm_calls(task_id, llm_calls)
             task.statement_report = report
             task.info.status = "done"
             task.push_event("done", 1.0)

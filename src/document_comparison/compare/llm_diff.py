@@ -106,8 +106,15 @@ _CHAR_DIFF_INSTRUCTION = (
     "其余片段(多行 replace / delete / insert)不要输出 char_segments。"
 )
 
+# /no_think:GLM-4.5/4.6 关闭 <think> 思考链的指令(等价于 Qwen3 的 enable_thinking=False,
+# 但 GLM 系列需写入 prompt 文本而非 payload 字段)。judge / llm-diff 两个比对调用统一
+# 追加此后缀,便于集中维护;非 GLM 模型按普通文本忽略,不报错。
+_NO_THINK_SUFFIX = "/no_think"
+
 # 导出别名:供 API 层在「查看内置默认规则」UI 上只读展示(settings.llm_direct_diff_prompt
 # 为空时实际生效的 system prompt 前半段;char_level 额外追加的部分与用户自定义无关)。
+# 注意:此处仅导出 _DIFF_SYSTEM_PROMPT 原义,不含运行时追加的 /no_think 后缀——
+# 该后缀是模型行为控制指令,不属于「规则」语义,不应在只读默认规则面板中展示。
 DEFAULT_DIFF_SYSTEM_PROMPT = _DIFF_SYSTEM_PROMPT
 
 
@@ -129,9 +136,10 @@ def llm_text_diff(
             "无标注版 LLM 比对未配置:请在设置页填写 judge_api_base / judge_model"
         )
 
-    system_prompt = (settings.llm_direct_diff_prompt or _DIFF_SYSTEM_PROMPT) + (
-        _CHAR_DIFF_INSTRUCTION if char_level else ""
-    )
+    no_think = _NO_THINK_SUFFIX if settings.llm_diff_no_think_enabled else ""
+    system_prompt = (
+        settings.llm_direct_diff_prompt or _DIFF_SYSTEM_PROMPT
+    ) + (_CHAR_DIFF_INSTRUCTION if char_level else "") + no_think
     user_content = f"【原文】\n{word_text}\n\n【待核件】\n{pdf_text}\n\n请比对并输出 JSON。"
 
     content = _post_judge_chat(system_prompt, user_content)
@@ -175,10 +183,11 @@ def _post_judge_chat(system_prompt: str, user_content: str) -> str:
         # 不带 response_format=json_object:部分推理服务(SiliconFlow 等)在
         # json_object 约束解码 + 长输入下会触发服务端 500/超时。改为纯 prompt
         # 约束 + 后端 _extract_json 容错(支持 markdown 围栏 / 夹杂文本)。
-        # enable_thinking=False:Qwen3 系列默认输出 <think> 思考链,这些 token
-        # 不进结果但严重拖慢生成(逐行比对是确定性任务,无需思考)。Qwen3 原生支持
-        # 该参数;非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
-        "enable_thinking": False,
+        # chat_template_kwargs.enable_thinking=False:Qwen3 系列默认输出 <think> 思考链,
+        # 这些 token 不进结果但严重拖慢生成(逐行比对是确定性任务,无需思考)。必须嵌进
+        # chat_template_kwargs 才会被 vLLM 应用到 chat template;顶层 enable_thinking
+        # 字段在多数 vLLM 版本被忽略(见 vllm#35574)。非 Qwen3 模型按兼容约定忽略。
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     headers = {"Authorization": f"Bearer {settings.judge_api_key}"}
     timeout = httpx.Timeout(settings.judge_timeout, connect=10.0)

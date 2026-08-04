@@ -319,6 +319,51 @@ async def test_semaphore_acquire_timeout_marks_task_failed(monkeypatch):
     assert pipeline_called == []  # 流水线未执行
 
 
+async def test_model_timeout_persists_collected_llm_call(monkeypatch):
+    """流水线因模型超时失败时,已收集的失败 attempt 仍应落库。"""
+    import logging
+
+    from document_comparison import tasks as tasks_module
+    from document_comparison.observability import (
+        log_model_failure,
+        log_model_request,
+    )
+    from document_comparison.tasks import TaskManager
+
+    persisted: list[list] = []
+
+    def _pipeline(*_args, **_kwargs):
+        logger = logging.getLogger("test_tasks.model_timeout")
+        started = log_model_request(
+            logger, "ocr", "http://model/v1/chat/completions",
+            {"model": "vision-model"}, 1,
+        )
+        log_model_failure(logger, "ocr", started, "ReadTimeout: model request timed out")
+        raise TimeoutError("model request timed out")
+
+    monkeypatch.setattr(tasks_module, "run_pipeline", _pipeline)
+    monkeypatch.setattr(
+        tasks_module.db_repo,
+        "save_llm_calls_batch",
+        lambda _task_id, records: persisted.append(list(records)),
+    )
+    for name in ("create_task", "update_task_status", "save_milestone_event"):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    manager = TaskManager()
+    task_id = manager.create("compare")
+
+    await manager.run(task_id, "source.docx", "target.pdf")
+
+    task = manager.get(task_id)
+    assert task is not None
+    assert task.info.status == "failed"
+    assert len(persisted) == 1
+    assert len(persisted[0]) == 1
+    assert persisted[0][0].kind == "ocr"
+    assert persisted[0][0].error == "ReadTimeout: model request timed out"
+
+
 async def test_sync_mode_schedules_callback_without_blocking(monkeypatch):
     """sync_mode=True 时 webhook 应后台发送,_fire_callback 不阻塞 run 返回。
 

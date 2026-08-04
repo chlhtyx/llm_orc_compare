@@ -38,6 +38,12 @@ export interface LlmConfig {
   llm_direct_diff_prompt: string
   /** 只读:内置默认提示词全文(llm_direct_diff_prompt 为空时生效的前半段),供 UI 展示 */
   llm_direct_diff_default_prompt: string
+  /**
+   * /no_think 指令开关:True 时在比对调用系统提示词末尾追加 /no_think,
+   * 关闭 GLM-4.5/4.6 的 <think> 思考链(与 Qwen3 的 enable_thinking=False 并存)。
+   * 影响 LLM 直接比对与风险复核两条通道;非 GLM 模型自动忽略。默认 True。
+   */
+  llm_diff_no_think_enabled: boolean
   // —— 语义向量引擎 ——
   embed_backend: string // mock | qwen | bge
   embed_api_base: string
@@ -96,6 +102,8 @@ export interface LlmConfigUpdate {
   judge_timeout?: number
   /** 合同 LLM 直接比对系统提示词;传空串=回退内置默认(清除自定义) */
   llm_direct_diff_prompt?: string
+  /** /no_think 指令开关(见 LlmConfig.llm_diff_no_think_enabled 说明) */
+  llm_diff_no_think_enabled?: boolean
   // —— 语义向量引擎 ——
   embed_backend?: string
   embed_api_base?: string

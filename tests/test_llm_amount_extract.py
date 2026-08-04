@@ -171,7 +171,7 @@ def test_request_kind_and_temperature(monkeypatch):
     )
     assert captured["kind"] == "statement-amount"
     assert captured["payload"]["temperature"] == 0
-    assert captured["payload"]["enable_thinking"] is False
+    assert captured["payload"]["chat_template_kwargs"]["enable_thinking"] is False
     assert "model" in captured["payload"]
 
 

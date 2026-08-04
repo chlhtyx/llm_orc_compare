@@ -20,6 +20,8 @@ const form = reactive({
   external_truncate_to_original_pages: false,
   // —— LLM 直接比对系统提示词(留空=内置默认)——
   llm_direct_diff_prompt: '',
+  // —— /no_think 指令开关(GLM-4.5/4.6 关闭思考链;默认 True=保持当前行为)——
+  llm_diff_no_think_enabled: true,
 })
 
 const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWith('.docx'))
@@ -42,6 +44,7 @@ function syncFromConfig(config: LlmConfig | null): void {
   form.external_enable_llm_direct_diff = config.external_enable_llm_direct_diff ?? false
   form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
   form.llm_direct_diff_prompt = config.llm_direct_diff_prompt || ''
+  form.llm_diff_no_think_enabled = config.llm_diff_no_think_enabled ?? true
 }
 
 onMounted(async () => {
@@ -69,6 +72,7 @@ async function onSave(): Promise<void> {
     external_truncate_to_original_pages: form.external_truncate_to_original_pages,
     // 每次都提交:空串=回退内置默认(用户清空文本框即清除自定义)。
     llm_direct_diff_prompt: form.llm_direct_diff_prompt.trim(),
+    llm_diff_no_think_enabled: form.llm_diff_no_think_enabled,
   })
   if (!ok) {
     saveError.value = configStore.error
@@ -180,6 +184,21 @@ async function onReset(): Promise<void> {
             </span>
             <input
               v-model="form.external_truncate_to_original_pages"
+              type="checkbox"
+              role="switch"
+            />
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>关闭 GLM 思考链 (/no_think)</strong>
+              <small>
+                比对调用系统提示词末尾追加 /no_think，关闭 GLM-4.5/4.6 的 &lt;think&gt; 思考链 token
+                （与 Qwen3 的 enable_thinking=False 并存）。影响 LLM 直接比对与风险复核两条通道；
+                非 GLM 模型自动忽略。
+              </small>
+            </span>
+            <input
+              v-model="form.llm_diff_no_think_enabled"
               type="checkbox"
               role="switch"
             />

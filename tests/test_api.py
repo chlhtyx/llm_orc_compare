@@ -36,6 +36,9 @@ def test_scan_protection_rejects_sensitive_path_and_adds_security_headers(client
     blocked = client.get("/.env")
     assert blocked.status_code == 404
     assert blocked.json() == {"code": 404, "message": "not found"}
+    absolute_path = client.request("GET", "//etc/passwd")
+    assert absolute_path.status_code == 404
+    assert "root:x:0:0" not in absolute_path.text
     assert blocked.headers["x-content-type-options"] == "nosniff"
     assert blocked.headers["x-frame-options"] == "DENY"
 

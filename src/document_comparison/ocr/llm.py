@@ -214,10 +214,12 @@ class LLMOCREngine:
             # 结构化输出:降低温度,要求 JSON
             "temperature": 0,
             "response_format": {"type": "json_object"},
-            # enable_thinking=False:关闭 Qwen3 系列默认输出的 <think> 思考链 token
-            # (OCR 识别是确定性任务,这些 token 不进结果但严重拖慢生成)。Qwen3 原生
-            # 支持该参数;非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
-            "enable_thinking": False,
+            # chat_template_kwargs.enable_thinking=False:关闭 Qwen3 系列默认输出的
+            # <think> 思考链 token(OCR 识别是确定性任务,这些 token 不进结果但严重拖慢
+            # 生成)。必须嵌进 chat_template_kwargs 才会被 vLLM 应用到 chat template;
+            # 顶层 enable_thinking 字段在多数 vLLM 版本被忽略(见 vllm#35574)。
+            # 非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         return self._post_chat(payload, kind="ocr", client=client)
 
@@ -250,10 +252,12 @@ class LLMOCREngine:
                 },
             ],
             "temperature": 0,
-            # enable_thinking=False:关闭 Qwen3 系列默认输出的 <think> 思考链 token
-            # (整篇纯文本 OCR 是确定性任务,这些 token 不进结果但严重拖慢生成)。
-            # Qwen3 原生支持该参数;非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
-            "enable_thinking": False,
+            # chat_template_kwargs.enable_thinking=False:关闭 Qwen3 系列默认输出的
+            # <think> 思考链 token(整篇纯文本 OCR 是确定性任务,这些 token 不进结果但
+            # 严重拖慢生成)。必须嵌进 chat_template_kwargs 才会被 vLLM 应用到 chat
+            # template;顶层 enable_thinking 字段在多数 vLLM 版本被忽略(见 vllm#35574)。
+            # 非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         return self._post_chat(payload, kind="ocr-whole", client=client)
 

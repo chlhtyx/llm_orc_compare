@@ -27,6 +27,7 @@ from ..observability import (
     log_model_response,
     log_value_summary,
 )
+from .llm_diff import _NO_THINK_SUFFIX
 
 logger = logging.getLogger(__name__)
 
@@ -108,15 +109,21 @@ def llm_judge_diff(
     payload: dict[str, Any] = {
         "model": settings.judge_model,
         "messages": [
-            {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": _JUDGE_SYSTEM_PROMPT
+                + (_NO_THINK_SUFFIX if settings.llm_diff_no_think_enabled else ""),
+            },
             {"role": "user", "content": user_content},
         ],
         "temperature": 0,
         "response_format": {"type": "json_object"},
-        # enable_thinking=False:关闭 Qwen3 系列默认输出的 <think> 思考链 token
-        # (风险复核是确定性判断,这些 token 不进结果但严重拖慢生成)。Qwen3 原生
-        # 支持该参数;非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
-        "enable_thinking": False,
+        # chat_template_kwargs.enable_thinking=False:关闭 Qwen3 系列默认输出的
+        # <think> 思考链 token(风险复核是确定性判断,这些 token 不进结果但严重拖慢
+        # 生成)。必须嵌进 chat_template_kwargs 才会被 vLLM 应用到 chat template;
+        # 顶层 enable_thinking 字段在多数 vLLM 版本被忽略(见 vllm#35574)。
+        # 非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     headers = {"Authorization": f"Bearer {settings.judge_api_key}"}
     timeout = httpx.Timeout(settings.judge_timeout, connect=10.0)

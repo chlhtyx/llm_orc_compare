@@ -7,7 +7,10 @@ TamperReport,使任务/历史/外部 API/报告页链路无感复用。
 这里 mock 掉底层 LLM 调用(`llm_text_diff`),保证测试稳定可复现、不依赖外部服务。
 """
 import io
+import json
 from pathlib import Path
+
+import httpx
 
 from docx import Document  # type: ignore[import-untyped]
 
@@ -31,6 +34,7 @@ from document_comparison.compare.llm_diff import text_diff_to_tamper_report
 
 import document_comparison.ocr.whole_doc as whole_doc_mod
 import document_comparison.compare.llm_diff as llm_diff_mod
+import document_comparison.compare.judge as judge_mod
 from document_comparison.ocr.native import NativePDFEngine
 
 
@@ -197,13 +201,135 @@ def test_llm_text_diff_uses_custom_prompt_when_configured(monkeypatch):
     llm_diff_mod.llm_text_diff("原文A", "待核A", char_level=True)
     assert captured["system_prompt"].startswith(custom)
     assert llm_diff_mod._CHAR_DIFF_INSTRUCTION in captured["system_prompt"]
+    # 末尾统一追加 /no_think(GLM-4.5/4.6 关闭思考链指令)
+    assert captured["system_prompt"].endswith(llm_diff_mod._NO_THINK_SUFFIX)
     assert "原文A" in captured["user_content"] and "待核A" in captured["user_content"]
 
-    # ② 留空:回退内置默认提示词
+    # ② 留空:回退内置默认提示词(同样以 /no_think 结尾)
     monkeypatch.setattr(settings, "llm_direct_diff_prompt", "")
     llm_diff_mod.llm_text_diff("原文B", "待核B", char_level=False)
-    assert captured["system_prompt"] == llm_diff_mod._DIFF_SYSTEM_PROMPT
+    assert (
+        captured["system_prompt"]
+        == llm_diff_mod._DIFF_SYSTEM_PROMPT + llm_diff_mod._NO_THINK_SUFFIX
+    )
     assert llm_diff_mod._CHAR_DIFF_INSTRUCTION not in captured["system_prompt"]
+
+
+def test_judge_and_llm_diff_system_prompts_carry_no_think(monkeypatch):
+    """两条比对通道(judge 风险复核 + llm-diff 直接比对)的出站 system 消息必须以
+    /no_think 结尾(GLM-4.5/4.6 关闭 <think> 思考链指令),且与
+    chat_template_kwargs.enable_thinking=False(Qwen3 侧等价控制)并存于同一 payload。
+
+    在 HTTP 层 mock httpx.Client,验证真正发出的 payload 而非 mock 出的入参。
+    """
+    from document_comparison.config import settings
+
+    _setup_judge(monkeypatch)
+    monkeypatch.setattr(settings, "llm_max_retries", 0)
+
+    captured: dict = {}
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.setdefault("system_contents", []).append(
+            body["messages"][0]["content"]
+        )
+        # enable_thinking 嵌在 chat_template_kwargs 里(vLLM 应用到 chat template 的
+        # 正确位置),不在顶层。
+        captured.setdefault("enable_thinking", []).append(
+            body.get("chat_template_kwargs", {}).get("enable_thinking")
+        )
+        # judge 期望 JSON;llm-diff 走纯 prompt 约束,也回 JSON 兼容两条路径
+        content = '{"risk_level": "low", "reason": "措辞差异"}'
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    original_client = httpx.Client
+    for mod_path in (
+        "document_comparison.compare.llm_diff.httpx.Client",
+        "document_comparison.compare.judge.httpx.Client",
+    ):
+        monkeypatch.setattr(
+            mod_path,
+            lambda **kwargs: original_client(
+                transport=httpx.MockTransport(_respond), **kwargs
+            ),
+        )
+
+    # ① llm-diff 直接比对
+    llm_diff_mod.llm_text_diff("原文", "待核")
+
+    # ② judge 风险复核
+    judge_mod.llm_judge_diff(
+        word_text="金额100万元",
+        pdf_text="金额200万元",
+        segments=[
+            judge_mod.DiffSegment(op="delete", text="100"),
+            judge_mod.DiffSegment(op="insert", text="200"),
+        ],
+        rule_risk="high",
+    )
+
+    assert len(captured["system_contents"]) == 2
+    for sys_content in captured["system_contents"]:
+        assert sys_content.endswith("/no_think")
+    # /no_think 是运行时追加的指令,内置默认规则常量本身不混入该后缀
+    assert not llm_diff_mod._DIFF_SYSTEM_PROMPT.endswith("/no_think")
+    assert not judge_mod._JUDGE_SYSTEM_PROMPT.endswith("/no_think")
+    # 两条通道同时保留 chat_template_kwargs.enable_thinking=False
+    # (Qwen3 侧的等价控制,嵌进 chat_template_kwargs 才会被 vLLM 应用),与 /no_think 并存
+    assert captured["enable_thinking"] == [False, False]
+
+
+def test_judge_and_llm_diff_omit_no_think_when_disabled(monkeypatch):
+    """关闭 llm_diff_no_think_enabled 开关后,两条比对通道的系统提示词都不再追加 /no_think。
+
+    验证开关真正作用于运行时拼装的 system 消息,而非常量。
+    """
+    from document_comparison.config import settings
+
+    _setup_judge(monkeypatch)
+    monkeypatch.setattr(settings, "llm_max_retries", 0)
+    monkeypatch.setattr(settings, "llm_diff_no_think_enabled", False)
+
+    captured: dict = {}
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.setdefault("system_contents", []).append(body["messages"][0]["content"])
+        content = '{"risk_level": "low", "reason": "措辞差异"}'
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    original_client = httpx.Client
+    for mod_path in (
+        "document_comparison.compare.llm_diff.httpx.Client",
+        "document_comparison.compare.judge.httpx.Client",
+    ):
+        monkeypatch.setattr(
+            mod_path,
+            lambda **kwargs: original_client(
+                transport=httpx.MockTransport(_respond), **kwargs
+            ),
+        )
+
+    llm_diff_mod.llm_text_diff("原文", "待核")
+    judge_mod.llm_judge_diff(
+        word_text="金额100万元",
+        pdf_text="金额200万元",
+        segments=[judge_mod.DiffSegment(op="delete", text="100")],
+        rule_risk="high",
+    )
+
+    assert len(captured["system_contents"]) == 2
+    for sys_content in captured["system_contents"]:
+        assert "/no_think" not in sys_content
 
 
 def test_pipeline_llm_direct_diff_branch_produces_tamper_report(tmp_path, monkeypatch):

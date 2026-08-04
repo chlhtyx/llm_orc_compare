@@ -36,7 +36,11 @@ from .. import db as db_pkg
 from ..db import repository as db_repo
 from ..logging_config import setup_logging
 from ..observability import log_context
-from ..http_security import apply_security_headers, scan_probe_reason
+from ..http_security import (
+    apply_security_headers,
+    safe_static_file_path,
+    scan_probe_reason,
+)
 from ..models import (
     CompareOptions,
     RawCompareOptions,
@@ -505,6 +509,7 @@ def create_app() -> FastAPI:
             "judge_model": settings.judge_model,
             "judge_timeout": settings.judge_timeout,
             "llm_direct_diff_prompt": settings.llm_direct_diff_prompt,
+            "llm_diff_no_think_enabled": settings.llm_diff_no_think_enabled,
             "embed_backend": settings.embed_backend,
             "embed_api_base": settings.embed_api_base,
             "embed_api_key": _mask_key(settings.embed_api_key),
@@ -562,6 +567,7 @@ def create_app() -> FastAPI:
             "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
             "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
             "llm_direct_diff_prompt",
+            "llm_diff_no_think_enabled",
             "embed_backend", "embed_api_base", "embed_api_key",
             "embed_model", "embed_timeout", "pdf_render_dpi", "max_pdf_pages",
             "external_api_key", "external_public_base_url",
@@ -638,6 +644,9 @@ def create_app() -> FastAPI:
             and not isinstance(body["llm_direct_diff_prompt"], str)
         ):
             raise HTTPException(400, "llm_direct_diff_prompt 必须为字符串")
+        if "llm_diff_no_think_enabled" in body:
+            if not isinstance(body["llm_diff_no_think_enabled"], bool):
+                raise HTTPException(400, "llm_diff_no_think_enabled 必须为布尔值")
         if "embed_backend" in body and body["embed_backend"] not in ("mock", "bge", "qwen"):
             raise HTTPException(400, "embed_backend 仅支持 mock | bge | qwen")
         if "embed_timeout" in body and body["embed_timeout"] is not None:
@@ -772,6 +781,7 @@ def create_app() -> FastAPI:
                 "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
                 "external_enabled": external_config_enabled(),
                 "llm_direct_diff_default_prompt": DEFAULT_DIFF_SYSTEM_PROMPT,
+                "llm_diff_no_think_enabled": settings.llm_diff_no_think_enabled,
             },
         }
 
@@ -1996,8 +2006,9 @@ def create_app() -> FastAPI:
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。
     if settings.static_dir and settings.static_dir.is_dir():
-        index_html = settings.static_dir / "index.html"
-        assets_dir = settings.static_dir / "assets"
+        static_root = settings.static_dir.resolve()
+        index_html = static_root / "index.html"
+        assets_dir = static_root / "assets"
 
         if assets_dir.is_dir():
             app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
@@ -2005,8 +2016,8 @@ def create_app() -> FastAPI:
         @app.get("/{full_path:path}")
         async def spa_fallback(full_path: str):
             """非 API / 非静态资源的请求回退到 index.html,供 Vue Router history 模式。"""
-            candidate = settings.static_dir / full_path  # type: ignore[arg-type]
-            if full_path and candidate.is_file():
+            candidate = safe_static_file_path(static_root, full_path)
+            if full_path and candidate is not None and candidate.is_file():
                 return FileResponse(candidate)
             return FileResponse(index_html)
 

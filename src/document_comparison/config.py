@@ -127,6 +127,15 @@ class Settings:
     # 在设置页可自定义;自定义文本仍需保留"严格输出 JSON / hunks 结构"等输出契约。
     llm_direct_diff_prompt: str = ""
 
+    # —— /no_think 指令开关(GLM-4.5/4.6 关闭 <think> 思考链)——
+    # True 时在比对调用的系统提示词末尾追加 /no_think(等价于 Qwen3 的
+    # enable_thinking=False,但 GLM 需写入 prompt 文本);同时影响 judge 风险复核
+    # 与 llm-diff 直接比对两条通道。非 GLM 模型按普通文本忽略。默认 True=保持原行为。
+    llm_diff_no_think_enabled: bool = field(
+        default_factory=lambda: _env("DC_LLM_DIFF_NO_THINK_ENABLED", "1").lower()
+        not in ("0", "false", "no")
+    )
+
     # —— 向量引擎选择:mock | qwen | bge ——
     # 默认 qwen;若未配置 embed_api_base/model,get_embed_engine 会自动回退 mock。
     embed_backend: str = "qwen"
@@ -299,6 +308,7 @@ _LLM_CONFIG_FIELDS = (
     "judge_model",
     "judge_timeout",
     "llm_direct_diff_prompt",
+    "llm_diff_no_think_enabled",
     "embed_backend",
     "embed_api_base",
     "embed_api_key",
@@ -347,6 +357,7 @@ _LLM_DEFAULTS: dict = {
     # 这里给空串兜底,使 load_llm_overrides 总能返回该 key,从而 apply_llm_overrides
     # 在用户清空(空串 PUT,被 save 剔除)后也能把 settings 立即置空(即时回退默认)。
     "llm_direct_diff_prompt": "",
+    "llm_diff_no_think_enabled": settings.llm_diff_no_think_enabled,
     "embed_backend": "qwen",
     "embed_api_base": "",
     "embed_api_key": "",
@@ -471,6 +482,8 @@ def apply_llm_overrides() -> None:
     if "llm_direct_diff_prompt" in cfg:
         # 提示词为纯文本,允许任意非空字符串;消费端对空值回退内置默认。
         settings.llm_direct_diff_prompt = str(cfg["llm_direct_diff_prompt"])
+    if "llm_diff_no_think_enabled" in cfg:
+        settings.llm_diff_no_think_enabled = bool(cfg["llm_diff_no_think_enabled"])
     if "embed_backend" in cfg:
         settings.embed_backend = cfg["embed_backend"]
     if "embed_api_base" in cfg:

@@ -105,8 +105,10 @@ def llm_extract_amounts(
             },
         ],
         "temperature": 0,
-        # 关闭 Qwen3 思考链 token(确定性抽取,避免拖慢;非 Qwen3 按兼容约定忽略)
-        "enable_thinking": False,
+        # 关闭 Qwen3 思考链 token(确定性抽取,避免拖慢)。必须嵌进 chat_template_kwargs
+        # 才会被 vLLM 应用到 chat template;顶层 enable_thinking 在多数 vLLM 版本被忽略
+        # (见 vllm#35574)。非 Qwen3 模型按兼容约定忽略未知参数。
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
     trace = {
