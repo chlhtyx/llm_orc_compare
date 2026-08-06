@@ -27,6 +27,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 版本号在构建期烧入镜像(与 image tag 同源),保证其它机器拉镜像后无需再配 .env
+      # 即可显示正确版本。构建后镜像已自带版本,运行期不再用 .env 覆盖。
+      args:
+        DC_VERSION: ${DC_VERSION}
     image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:${DC_VERSION}
     container_name: llm-ocr-compare
     platform: linux/amd64
@@ -40,9 +44,8 @@ services:
     environment:
       # DATABASE_URL 内部走服务名 + 容器内端口 5432(不是宿主映射端口)。
       DATABASE_URL: postgresql+psycopg://dc:${POSTGRES_PASSWORD:-dcpass}@postgres:5432/doc_compare
-      # 应用版本号(与镜像 tag ${DC_VERSION} 同源,供 /api/v1/version 与前端页脚显示)。
-      # 宿主机 .env 的 DC_VERSION 在此处被 compose 解析后注入容器进程。
-      DC_VERSION: ${DC_VERSION}
+      # 版本号已构建期烧入镜像(Dockerfile ENV DC_VERSION);此处不再注入,
+      # 避免部署机 .env 的 DC_VERSION 缺失/过期时覆盖镜像自带的正确版本。
       # Postgres 连接池与迁移(可选透传;未设置时用代码默认:pool 5 / overflow 10 / timeout 30s / 自动迁移开)。
       # 启用多 worker 时注意:N workers × (pool+overflow) 需 ≤ PG max_connections(默认 100)。
       DC_DB_AUTO_MIGRATE: ${DC_DB_AUTO_MIGRATE:-1}

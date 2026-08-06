@@ -72,11 +72,18 @@ COPY --from=frontend-build /build/dist ./static
 RUN mkdir -p /app/.dc_data
 VOLUME ["/app/.dc_data"]
 
+# 应用版本号:构建期烧入镜像 ARG → ENV,使任意机器拉取镜像后无需再传 DC_VERSION 即可自报
+# 正确版本(版本是镜像的固有属性,不应由部署环境的 .env 决定或覆盖)。
+# docker compose 通过 build.args 传入(取自构建机 .env 的 DC_VERSION,与镜像 tag 同源);
+# 未传时为空 → 运行时回退到 package __version__(__init__.py)。
+ARG DC_VERSION=""
+
 ENV DC_HOST=0.0.0.0 \
     DC_PORT=8000 \
     DC_STORAGE_DIR=/app/.dc_data \
     DC_STATIC_DIR=/app/static \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    DC_VERSION=${DC_VERSION}
 
 EXPOSE 8000
 
