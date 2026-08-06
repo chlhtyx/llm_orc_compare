@@ -17,6 +17,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -215,6 +216,179 @@ def _parse_content_length(raw: str | None) -> int | None:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+# —— 入站 API access log ——
+# 只对 /api/ 与 /health 前缀生效,记录 method/path/status/耗时,并按上限记录完整请求体
+# 与响应体(合同原文、金额等业务内容会进入本地滚动日志 storage_dir/logs/app.log)。
+# multipart 文件上传、SSE 流、文件下载按摘要跳过 body;JSON 内容对鉴权类字段脱敏。
+
+# 命中即脱敏的 key(小写包含匹配),避免 API Key / 密码进入 access log。
+_SENSITIVE_KEY_FRAGMENTS = ("password", "api_key", "apikey", "token", "secret", "authorization")
+
+
+def _mask_sensitive(value: Any) -> Any:
+    """递归把 dict 中敏感 key 的值替换为 ``***``(不处理合同正文/金额等业务字段)。
+
+    list / dict 递归;其它类型原样返回。仅作用于 JSON 解析成功的内容。
+    """
+    if isinstance(value, dict):
+        masked: dict[str, Any] = {}
+        for key, val in value.items():
+            key_lower = str(key).lower()
+            if any(frag in key_lower for frag in _SENSITIVE_KEY_FRAGMENTS):
+                masked[key] = "***"
+            else:
+                masked[key] = _mask_sensitive(val)
+        return masked
+    if isinstance(value, list):
+        return [_mask_sensitive(item) for item in value]
+    return value
+
+
+def _coerce_log_body(raw: bytes | None, content_type: str | None, *, max_chars: int) -> str:
+    """把请求/响应字节渲染成可在日志中展示的字符串。
+
+    - application/json:解析后脱敏再序列化(失败回退为文本)。
+    - 其它 text/* 或 JSON 解析失败:UTF-8 解码(errors=replace)。
+    - 空体:``<empty>``。
+    超过 ``max_chars`` 截断并加 ``…(truncated)``。
+    """
+    if not raw:
+        return "<empty>"
+    ct = (content_type or "").lower()
+    if "json" in ct:
+        try:
+            parsed = json.loads(raw)
+            text = json.dumps(_mask_sensitive(parsed), ensure_ascii=False)
+        except (ValueError, TypeError):
+            text = raw.decode("utf-8", errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    if len(text) > max_chars:
+        return text[:max_chars] + "…(truncated)"
+    return text
+
+
+class ApiAccessLogMiddleware:
+    """纯 ASGI 入站请求/响应日志中间件(access log)。
+
+    为什么不用 ``@app.middleware("http")``(BaseHTTPMiddleware):Starlette 1.x 的
+    BaseHTTPMiddleware 会把所有下游响应(包括普通 dict handler)重包成
+    ``_StreamingResponse``,其 ``body`` 在中间件返回时不可读,无法捕获响应体。
+    纯 ASGI 中间件直接拦截 ``receive``/``send`` 通道,能可靠抓取请求体与响应体块。
+
+    仅对 ``/api/`` 与 ``/health`` 前缀生效;记录 method/path/query/status/耗时,并按
+    ``DC_API_LOG_MAX_BODY`` 记录完整请求体与响应体(鉴权类敏感字段脱敏)。边界:
+    multipart 文件上传只记摘要;SSE(text/event-stream)与文件下载不缓存响应体。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not settings.api_request_logging:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        # 只覆盖业务前缀;静态资源、SPA fallback、探测路径零开销透传。
+        if not (path.startswith("/api/") or path == "/health"):
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "")
+        query = scope.get("query_string", b"").decode("latin-1", errors="replace")
+        headers = _headers_to_dict(scope)
+        ct = (headers.get("content-type") or "").lower()
+        max_body = settings.api_log_max_body
+        request_id = (headers.get("x-request-id") or "-")
+        is_multipart = "multipart/form-data" in ct
+
+        # —— 请求体:tee receive,记录后原样转发给下游 ——
+        request_chunks: list[bytes] = []
+
+        async def receive_tee():
+            message = await receive()
+            if message["type"] == "http.request" and not is_multipart:
+                body = message.get("body", b"")
+                if body:
+                    request_chunks.append(body)
+            return message
+
+        start = time.perf_counter()
+        status_code = 500
+        resp_ct = ""
+        resp_body_buf: list[bytes] = []
+        skip_resp_body = False
+
+        async def send_tee(message):
+            nonlocal status_code, resp_ct, skip_resp_body
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 500)
+                resp_headers = _headers_to_dict(message.get("headers", []))
+                resp_ct = (resp_headers.get("content-type") or "").lower()
+                # SSE 流与文件响应不缓存 body(前者会消费殆尽,后者可能很大)。
+                if "text/event-stream" in resp_ct:
+                    skip_resp_body = True
+            elif message["type"] == "http.response.body":
+                if not skip_resp_body:
+                    chunk = message.get("body", b"")
+                    if chunk:
+                        resp_body_buf.append(chunk)
+            await send(message)
+
+        try:
+            await self.app(scope, receive_tee, send_tee)
+        finally:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            # —— 请求体日志 ——
+            if is_multipart:
+                request_body = (
+                    f"<multipart, content_length={_parse_content_length(headers.get('content-length'))}>"
+                )
+            else:
+                request_body = _coerce_log_body(b"".join(request_chunks), ct, max_chars=max_body)
+            logger.info(
+                "api request method=%s path=%s query=%s request_id=%s body=%s",
+                method, path, query or "-", request_id, request_body,
+            )
+            # —— 响应体日志 ——
+            if skip_resp_body:
+                resp_body = "<sse stream, skipped>"
+            elif not resp_ct or (
+                "json" not in resp_ct and not resp_ct.startswith("text/")
+            ):
+                resp_body = f"<binary, content_type={resp_ct or 'unknown'}>"
+            else:
+                resp_body = _coerce_log_body(b"".join(resp_body_buf), resp_ct, max_chars=max_body)
+            logger.info(
+                "api response method=%s path=%s status=%s elapsed_ms=%s request_id=%s body=%s",
+                method, path, status_code, elapsed_ms, request_id, resp_body,
+            )
+
+
+def _headers_to_dict(scope_or_raw) -> dict[str, str]:
+    """从 ASGI scope/message 的 raw headers(小写键)构造普通 dict。
+
+    入参可以是 scope/message dict(取其 ``headers``),也可以直接是 raw headers 列表
+    (list[(bytes, bytes)]),两者都兼容。
+    """
+    if isinstance(scope_or_raw, dict):
+        raw = scope_or_raw.get("headers")
+    else:
+        raw = scope_or_raw
+    if not raw:
+        return {}
+    out: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        key = item[0].decode("latin-1", errors="replace").lower()
+        val = item[1].decode("latin-1", errors="replace")
+        if key:
+            out[key] = val
+    return out
 
 
 def _task_record_to_task_info_dict(rec, *, kind: str) -> dict:
@@ -427,6 +601,10 @@ def create_app() -> FastAPI:
         if settings.security_headers_enabled:
             apply_security_headers(response.headers)
         return response
+
+    # access log 必须作为最外层之一:在 scan_protection/外部审计之前看到原始请求体,
+    # 并能捕获异常处理器产出的响应。add_middleware 后注册=最外层。
+    app.add_middleware(ApiAccessLogMiddleware)
 
     @app.exception_handler(HTTPException)
     async def _http_exc_handler(request, exc: HTTPException):

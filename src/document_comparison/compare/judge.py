@@ -10,22 +10,20 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import random
-import re
 import time
 from typing import Any
 
 import httpx
 
+from .._llm_json import extract_llm_json
 from ..config import settings
 from ..models import DiffSegment, RiskLevel
 from ..observability import (
     log_model_failure,
     log_model_request,
     log_model_response,
-    log_value_summary,
 )
 from .llm_diff import _NO_THINK_SUFFIX
 
@@ -58,26 +56,6 @@ def _format_segments(segments: list[DiffSegment]) -> str:
         elif seg.op == "insert":
             parts.append(f"[+{seg.text}+]")
     return "".join(parts)
-
-
-def _extract_json(text: str) -> Any:
-    """从可能混杂文本/代码块的回复中提取首个 JSON 对象。"""
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    logger.warning("llm judge json parse failed; response_summary=%s", log_value_summary(text))
-    return {}
 
 
 def llm_judge_diff(
@@ -160,7 +138,7 @@ def llm_judge_diff(
                     data = resp.json()
                     log_model_response(logger, "judge", resp.status_code, data, request_started)
                     content = data["choices"][0]["message"]["content"]
-                    parsed = _extract_json(content)
+                    parsed = extract_llm_json(content)
                     risk = parsed.get("risk_level", "").strip().lower()
                     reason = (parsed.get("reason") or "").strip()
                     if risk not in _VALID_RISK_LEVELS:

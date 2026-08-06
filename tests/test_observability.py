@@ -383,3 +383,72 @@ def test_collector_resets_after_context_exit(quiet_logger):
     t = log_model_request(quiet_logger, "ocr", "http://x/v1", {"model": "m"}, 1)
     log_model_response(quiet_logger, "ocr", 200, {"ok": True}, t)
     assert len(recs) == 1, "退出后不应再 append"
+
+
+# —— DEBUG 级完整请求/响应体日志 ——
+
+
+def _msg_text(records):
+    return " ".join(r.getMessage() for r in records)
+
+
+def test_debug_logs_full_request_body(quiet_logger, caplog):
+    """DEBUG 级别下,log_model_request 额外输出完整脱敏请求体(含提示词文本)。"""
+    with caplog.at_level(logging.DEBUG, logger="test_observability"):
+        log_model_request(
+            quiet_logger, "ocr", "http://x/v1/chat/completions",
+            {"model": "m", "messages": [{"content": "原始合同条款原文"}]}, 1,
+        )
+    body_lines = [r for r in caplog.records if r.getMessage().startswith("model request body")]
+    assert body_lines, "DEBUG 级应输出 model request body 行"
+    assert "原始合同条款原文" in body_lines[0].getMessage()
+
+
+def test_info_level_omits_full_request_body(quiet_logger, caplog):
+    """INFO 级别下不输出完整请求体(只输出摘要),避免合同原文进入默认日志。"""
+    with caplog.at_level(logging.INFO, logger="test_observability"):
+        log_model_request(
+            quiet_logger, "ocr", "http://x/v1", {"messages": [{"content": "SECRET_TEXT"}]}, 1,
+        )
+    text = _msg_text(caplog.records)
+    assert "model request kind=ocr" in text  # 摘要行仍在
+    assert "SECRET_TEXT" not in text          # 完整 body 不进 INFO 日志
+
+
+def test_debug_logs_full_response_body(quiet_logger, caplog):
+    """DEBUG 级别下,log_model_response 输出完整响应体。"""
+    with caplog.at_level(logging.DEBUG, logger="test_observability"):
+        t = log_model_request(quiet_logger, "judge", "http://x/v1", {"model": "m"}, 1)
+        log_model_response(
+            quiet_logger, "judge", 200,
+            {"choices": [{"message": {"content": "风险结论: high"}}]}, t,
+        )
+    body_lines = [r for r in caplog.records if r.getMessage().startswith("model response body")]
+    assert body_lines
+    assert "风险结论: high" in body_lines[0].getMessage()
+
+
+def test_debug_skips_embedding_response_body(quiet_logger, caplog):
+    """embedding 响应是纯向量数组,DEBUG 级也不输出完整 body(体积大、无可读性)。"""
+    with caplog.at_level(logging.DEBUG, logger="test_observability"):
+        t = log_model_request(quiet_logger, "embedding", "http://x/v1", {"model": "m"}, 1)
+        log_model_response(
+            quiet_logger, "embedding", 200,
+            {"data": [{"embedding": [0.1, 0.2, 0.3]}]}, t,
+        )
+    text = _msg_text(caplog.records)
+    assert "model response body kind=embedding" not in text
+    assert "[0.1" not in text
+
+
+def test_debug_logs_failure_response_body(quiet_logger, caplog):
+    """DEBUG 级别下,log_model_failure 也输出完整响应体(embedding 仍跳过)。"""
+    with caplog.at_level(logging.DEBUG, logger="test_observability"):
+        t = log_model_request(quiet_logger, "statement-column", "http://x/v1", {"model": "m"}, 1)
+        log_model_failure(
+            quiet_logger, "statement-column", t, "HTTP 400", status_code=400,
+            response={"error": {"message": "invalid column"}},
+        )
+    body_lines = [r for r in caplog.records if r.getMessage().startswith("model failure body")]
+    assert body_lines
+    assert "invalid column" in body_lines[0].getMessage()

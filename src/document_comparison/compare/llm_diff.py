@@ -12,19 +12,21 @@
   前端与存储无感。
 - 行级统计(equal/replaced/inserted/deleted)由后端从 hunks 聚合补全,不依赖模型
   数行数,避免计数不一致。
-- 失败策略:解析失败/字段非法/调用失败 → 直接 raise(由 task 层标记 failed)。
+- 失败策略:**HTTP 调用失败/字段非法 → 直接 raise**(由 task 层标记 failed);
+  **LLM 返回彻底无法解析为 JSON 对象时(纯叙述/乱码)→ 降级为空 hunks +
+  recognition_status="needs_review"**,任务继续跑完,不中断(与 judge/ocr 等模块的
+  优雅降级惯例一致)。调用失败仍 raise(配置/网络错误属不可降级)。
 """
 from __future__ import annotations
 
-import json
 import logging
 import random
-import re
 import time
 from typing import Any
 
 import httpx
 
+from .._llm_json import LLMJsonParseError, extract_llm_json_strict
 from ..config import settings
 from ..models import (
     Diff,
@@ -143,9 +145,16 @@ def llm_text_diff(
     user_content = f"【原文】\n{word_text}\n\n【待核件】\n{pdf_text}\n\n请比对并输出 JSON。"
 
     content = _post_judge_chat(system_prompt, user_content)
-    parsed = _extract_json(content)
-    if not isinstance(parsed, dict):
-        raise ValueError(f"LLM 比对返回非 JSON 对象: {log_value_summary(content)}")
+    try:
+        parsed = extract_llm_json_strict(content)
+    except LLMJsonParseError:
+        # 解析彻底失败(纯叙述/乱码/裸数组):降级为待人工复核,不中断任务。
+        # (extract_llm_json_strict 已记 warning;这里补一条业务级日志。)
+        logger.warning(
+            "llm diff 返回非 JSON 对象,降级 needs_review; summary=%s",
+            log_value_summary(content),
+        )
+        return _needs_review_report(word_text, pdf_text, source=source, target=target)
 
     hunks = _build_hunks(parsed.get("hunks"), char_level=char_level)
     similarity = _coerce_similarity(parsed.get("similarity"))
@@ -357,24 +366,37 @@ def _aggregate_stats(
     }
 
 
-def _extract_json(text: str) -> Any:
-    """从可能混杂文本/代码块的回复中提取首个 JSON 对象。"""
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    logger.warning("llm diff json parse failed; response_summary=%s", log_value_summary(text))
-    return text
+def _needs_review_report(
+    word_text: str, pdf_text: str, *, source: str = "", target: str = ""
+) -> TextDiffReport:
+    """LLM 解析彻底失败时的降级产物:空 hunks + needs_review 标记。
+
+    与 raw_pipeline.py 后续 ``if not diagnostic.reliable: recognition_status = needs_review``
+    叠加逻辑兼容(这里已置 needs_review,raw_pipeline 再设同值无副作用)。
+    不抛异常,任务继续跑完,用户在报告页看到「待人工复核」而非「任务失败」。
+    """
+    word_total = len([ln for ln in word_text.splitlines() if ln]) or 1
+    pdf_total = len([ln for ln in pdf_text.splitlines() if ln]) or 1
+    return TextDiffReport(
+        source=source,
+        target=target,
+        word_text=word_text,
+        pdf_text=pdf_text,
+        hunks=[],
+        stats={
+            "similarity": 0.0,
+            "equal_lines": 0,
+            "replaced": 0,
+            "deleted": 0,
+            "inserted": 0,
+            "word_total_lines": word_total,
+            "pdf_total_lines": pdf_total,
+            "engine": "llm",
+            # 前端/审计标记:本次结果因 LLM 解析失败而降级,非真实「无差异」。
+            "llm_parse_failed": True,
+        },
+        recognition_status="needs_review",
+    )
 
 
 def text_diff_to_tamper_report(

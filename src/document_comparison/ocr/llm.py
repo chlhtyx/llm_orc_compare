@@ -32,13 +32,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+from .._llm_json import extract_llm_json
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
 from ..observability import (
     log_model_failure,
     log_model_request,
     log_model_response,
-    log_value_summary,
 )
 from ..parsing.pdf import render_pages
 from .base import ProgressCb
@@ -448,29 +448,12 @@ def _to_pt_bbox(
 
 
 def _extract_json(text: str) -> Any:
-    """从可能混杂文本/代码块的回复中提取首个 JSON 对象或数组。"""
-    text = text.strip()
-    # 去 markdown 代码围栏
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # 兜底:取首个 {...} 或 [...]
-    for pat in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
-        m = re.search(pat, text)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                continue
-    logger.warning(
-        "ocr json parse failed, treating as empty; response_summary=%s",
-        log_value_summary(text),
-    )
-    return {}
+    """从可能混杂文本/代码块的回复中提取首个 JSON 对象或数组。
+
+    委托给共享 helper ``_llm_json.extract_llm_json``,保留薄封装以维持本模块内的
+    既有调用点签名(允许返回 dict 或 list,供 ``_parse_blocks`` 分支处理)。
+    """
+    return extract_llm_json(text, expect=(dict, list))
 
 
 class _BoundedConcurrency:

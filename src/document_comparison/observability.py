@@ -459,6 +459,9 @@ def log_model_request(
 
     若当前 context 设了收集器且 kind 属于对话型白名单,同时 append 一条
     LlmCallRecord(此时只填了 kind/attempt/payload/created_at,待 response/failure 补全)。
+
+    常规 INFO 行只写安全摘要(sha256+字符数,不含原文);额外在 DEBUG 级输出完整脱敏
+    请求体(含提示词/识别文本),需排查模型输入原文时设 ``DC_LOG_LEVEL=DEBUG``。
     """
     safe_payload = _safe_model_value(payload)
     logger.info(
@@ -468,6 +471,14 @@ def log_model_request(
         url,
         json.dumps(_model_log_summary(safe_payload), ensure_ascii=False, separators=(",", ":")),
     )
+    # DEBUG 级:输出完整脱敏请求体(图片 base64 仍按 sha256 摘要),便于排查模型输入。
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "model request body kind=%s attempt=%s payload=%s",
+            kind,
+            attempt,
+            json.dumps(safe_payload, ensure_ascii=False, default=str),
+        )
     collector = current_llm_collector.get()
     if collector is not None and kind in _COLLECTED_KINDS:
         # URL 和业务定位信息不是发给模型的参数，但与脱敏请求体一起持久化，便于
@@ -505,6 +516,15 @@ def log_model_response(
         elapsed,
         json.dumps(_model_log_summary(safe_value), ensure_ascii=False, separators=(",", ":")),
     )
+    # DEBUG 级:输出完整脱敏响应体。embedding 响应(纯向量数组)体积巨大且无可读业务
+    # 语义,跳过——向量数值无排查价值,且单条可超数百 KB 会撑爆日志。
+    if logger.isEnabledFor(logging.DEBUG) and kind != "embedding":
+        logger.debug(
+            "model response body kind=%s status=%s response=%s",
+            kind,
+            status_code,
+            json.dumps(safe_value, ensure_ascii=False, default=str),
+        )
     _finalize_record(kind, status_code=status_code, elapsed_s=elapsed,
                      response=_truncate(safe_value, _MAX_RESPONSE_CHARS), error=None)
 
@@ -533,6 +553,14 @@ def log_model_failure(
         error[:_MAX_ERROR_CHARS],
         json.dumps(_model_log_summary(safe_response), ensure_ascii=False, separators=(",", ":")),
     )
+    # DEBUG 级:输出完整脱敏响应体(embedding 同样跳过)。
+    if logger.isEnabledFor(logging.DEBUG) and kind != "embedding" and response is not None:
+        logger.debug(
+            "model failure body kind=%s status=%s response=%s",
+            kind,
+            status_code,
+            json.dumps(safe_response, ensure_ascii=False, default=str),
+        )
     _finalize_record(kind, status_code=status_code, elapsed_s=elapsed,
                      response=_truncate(safe_response, _MAX_RESPONSE_CHARS),
                      error=error[:_MAX_ERROR_CHARS])

@@ -52,6 +52,18 @@ class Settings:
         default_factory=lambda: _env("DC_SECURITY_HEADERS_ENABLED", "1").lower()
         not in ("0", "false", "no")
     )
+    # —— 入站 API 请求/响应日志(access log)——
+    # 开启后,中间件对 /api/ 与 /health 入站请求记录 method/path/status/耗时,
+    # 并按 DC_API_LOG_MAX_BODY 上限记录完整请求体与响应体(合同原文、金额等业务
+    # 内容会进入本地滚动日志 storage_dir/logs/app.log)。关闭置 0。
+    api_request_logging: bool = field(
+        default_factory=lambda: _env("DC_API_REQUEST_LOGGING", "1").lower()
+        not in ("0", "false", "no")
+    )
+    # 单条请求体/响应体在 access log 中的字符截断上限(超出加 …(truncated))。
+    api_log_max_body: int = field(
+        default_factory=lambda: int(_env("DC_API_LOG_MAX_BODY", "65536"))
+    )
 
     # —— 应用版本号(单一真相源 = .env 的 DC_VERSION;与镜像 tag 同源)——
     # 未配置时回退到 package __version__(__init__.py),避免本地/单测无 .env 时为空。

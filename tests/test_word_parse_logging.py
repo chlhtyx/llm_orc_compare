@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import logging
+import tempfile
+import zipfile
 from pathlib import Path
 
 from docx import Document
@@ -119,3 +121,136 @@ def test_word_page_break_is_preserved_as_deleted_location_hint(tmp_path):
     assert [item.page_index for item in items] == [0, 1]
     assert clauses[1].number == "10.4"
     assert clauses[1].source_page_index == 1
+
+
+# —— 修订痕迹(track changes)处理:带修订的 docx 应按「接受修订」视图解析 ——
+
+
+def _inject_revisions_into_docx(path: Path) -> Path:
+    """在已保存的 docx 内注入 OOXML 修订标记,返回新文件路径。
+
+    python-docx 无添加修订的 API,这里直接改写 ``word/document.xml``(zipfile 重打包)。
+    注入内容:
+    - 段落「合同金额为100万元」→「合同金额为」+ del(100万元) + ins(200万元)
+      (接受视图应为「合同金额为200万元」)
+    - 表格单元格「100」→ del(100) + ins(200)(接受视图应为「200」)
+    """
+    src = path
+    with zipfile.ZipFile(src) as z:
+        doc_xml = z.read("word/document.xml").decode("utf-8")
+
+    # 段落修订:删除「100万元」、插入「200万元」
+    doc_xml = doc_xml.replace(
+        "<w:t>合同金额为100万元</w:t>",
+        "<w:r><w:t>合同金额为</w:t></w:r>"
+        '<w:del w:id="100" w:author="alice" w:date="2024-01-01T00:00:00Z">'
+        "<w:r><w:delText>100万元</w:delText></w:r></w:del>"
+        '<w:ins w:id="101" w:author="alice" w:date="2024-01-01T00:00:00Z">'
+        "<w:r><w:t>200万元</w:t></w:r></w:ins>",
+        1,
+    )
+    # 表格单元格修订:删除「100」、插入「200」
+    doc_xml = doc_xml.replace(
+        "<w:t>100</w:t>",
+        '<w:del w:id="200" w:author="alice" w:date="2024-01-01T00:00:00Z">'
+        "<w:r><w:delText>100</w:delText></w:r></w:del>"
+        '<w:ins w:id="201" w:author="alice" w:date="2024-01-01T00:00:00Z">'
+        "<w:r><w:t>200</w:t></w:r></w:ins>",
+        1,
+    )
+
+    out = src.with_suffix(".revised.docx")
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(
+        out, "w", zipfile.ZIP_DEFLATED
+    ) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                data = doc_xml.encode("utf-8")
+            zout.writestr(item, data)
+    return out
+
+
+def _make_docx_with_revisions(path: Path) -> Path:
+    """构造一份带未接受修订痕迹的 docx,返回落盘路径(含修订版)。
+
+    结构:
+      - 段落「合同金额为100万元」(会被改写为含 del/ins 的修订段)
+      - 表格 1×2:表头「项目|金额」,数据行「货款|100」(单元格 100 被改写为修订)
+    """
+    doc = Document()
+    doc.add_paragraph("合同金额为100万元")
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "项目"
+    t.cell(0, 1).text = "金额"
+    t.cell(1, 0).text = "货款"
+    t.cell(1, 1).text = "100"
+    base = path.with_suffix(".docx")
+    doc.save(str(base))
+    return _inject_revisions_into_docx(base)
+
+
+def test_parse_word_accepts_revisions_in_paragraph(tmp_path):
+    """回归 #1:带修订的段落应产出「接受修订」视图,而非空串。
+
+    历史 bug:python-docx ``paragraph.text`` 只取段落直接 ``<w:r>`` 子元素,
+    被 ``<w:ins>``/``<w:del>`` 包裹的 run 不可见 → 带修订段落被整段丢弃成 ``''``,
+    Word 侧基准文本凭空消失,与 PDF 比对产生伪差异/漏检。
+    修复后:删除痕迹(``<w:delText>``)丢弃,插入痕迹(``<w:ins>`` 内 ``<w:t>``)并入。
+    """
+    revised = _make_docx_with_revisions(tmp_path / "revised")
+    items = parse_word(str(revised))
+
+    para_texts = [it.text for it in items if it.kind == "paragraph"]
+    # 接受视图:「合同金额为」+「200万元」(插入),「100万元」(删除)被丢弃
+    assert "合同金额为200万元" in para_texts
+    # 删除痕迹文本不应出现
+    assert all("100万元" not in t for t in para_texts)
+    # 关键:不再因修订丢成空串
+    assert para_texts == ["合同金额为200万元"]
+
+
+def test_parse_word_accepts_revisions_in_table_cell(tmp_path):
+    """回归 #2:含修订的表格单元格应产出「接受修订」视图。
+
+    单元格「100」被改写为 del(100)+ins(200);接受视图应为「200」。
+    """
+    revised = _make_docx_with_revisions(tmp_path / "revised")
+    items = parse_word(str(revised))
+
+    table_item = next(it for it in items if it.kind == "table")
+    assert table_item.table is not None
+    # 数据行「货款 | 200」(100 被删除痕迹丢弃,200 被插入痕迹并入)
+    flat = " | ".join(table_item.table.headers) + " | " + " | ".join(
+        c for row in table_item.table.rows for c in row
+    )
+    assert "200" in flat
+    assert "100" not in flat  # 删除痕迹文本不应残留
+
+
+def test_parse_word_no_revision_unchanged(tmp_path):
+    """回归:无修订的普通 docx 文本与新逻辑一致(确保 _accepted_text 不破坏既有行为)。"""
+    docx_path = tmp_path / "plain.docx"
+    _make_rich_docx(docx_path)
+    items = parse_word(str(docx_path))
+
+    # 与既有测试同构:2 标题 + 2 段落 + 1 表格
+    assert len(items) == 5
+    para_texts = [it.text for it in items if it.kind == "paragraph"]
+    assert "甲方:买方公司" in para_texts
+    assert "乙方:卖方公司" in para_texts
+
+
+def test_parse_summary_logs_revision_count(tmp_path, caplog):
+    """带修订的 docx 解析摘要日志应含 revisions=N(N>0),便于运维识别。"""
+    revised = _make_docx_with_revisions(tmp_path / "revised")
+    with caplog.at_level(logging.INFO, logger="document_comparison.parsing.word"):
+        parse_word(str(revised))
+
+    summary = next(
+        (r for r in caplog.records if r.message.startswith("word parsed")), None
+    )
+    assert summary is not None
+    # 注入了 4 处修订标记(2 段 del/ins + 2 单元格 del/ins)
+    assert "revisions=4" in summary.message
+

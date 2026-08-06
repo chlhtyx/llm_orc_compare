@@ -33,6 +33,61 @@ def _heading_level(style_name: str) -> int:
     return int(m.group(1)) if m else 1
 
 
+def _accepted_text(element) -> str:
+    """返回 oxml 元素(``<w:p>`` 段落或 ``<w:tc>`` 单元格)「接受所有修订」的文本视图。
+
+    python-docx 的 ``paragraph.text`` / ``cell.text`` 只取段落**直接** ``<w:r>``
+    子元素的文本;被修订标记(``<w:ins>``/``<w:del>``)包裹的 run 不在
+    ``paragraph.runs`` 中,于是带修订的段落会被整段丢弃成空串(实测 python-docx 1.2.0)。
+
+    OOXML 中普通文本与删除痕迹用**不同标签**:``<w:t>``(普通 + 插入痕迹)vs
+    ``<w:delText>``(删除痕迹)。因此遍历 ``<w:p>`` 内的 ``<w:t>`` 与 ``<w:br>`` 后代、
+    按文档顺序拼接(``<w:br>`` 产出 ``\\n``,``<w:delText>`` 天然被排除),即得到
+    「接受修订」视图——删除痕迹丢弃,插入痕迹(在 ``<w:ins>`` 内的 ``<w:t>``)并入,
+    普通文本与单元格内换行保留。分页符(``<w:br w:type="page"/>``)不计入文本
+    (由 ``_paragraph_page_break_count`` 单独处理页序)。
+
+    单元格(``<w:tc>``)可含多个段落,段落间用 ``\\n`` 分隔,与 python-docx ``cell.text``
+    对称(下游 ``_table_rows`` 再把 ``\\n`` 拍平为空格)。
+    """
+    from docx.oxml.ns import qn  # type: ignore[import-untyped]
+
+    w_p = qn("w:p")
+    w_t = qn("w:t")
+    w_br = qn("w:br")
+
+    def _para_text(p) -> str:
+        parts: list[str] = []
+        for el in p.iter():
+            if el.tag == w_t:
+                parts.append(el.text or "")
+            elif el.tag == w_br and el.get(qn("w:type")) != "page":
+                parts.append("\n")
+        return "".join(parts)
+
+    if element.tag == w_p:
+        return _para_text(element)
+    # 容器(如 <w:tc>):按直接子 <w:p> 顺序拼接,段间插换行
+    paras = [c for c in element.iterchildren() if c.tag == w_p]
+    if not paras:
+        # 兜底:无直接子段落(异常结构),退化到全量遍历
+        return _para_text(element)
+    return "\n".join(_para_text(p) for p in paras)
+
+
+def _count_revisions(doc: _Doc) -> int:
+    """统计文档体中未接受的修订标记数(``<w:ins>`` + ``<w:del>``),用于摘要日志。
+
+    仅计数,不影响解析;>0 提示运维「这份 docx 带修订,文本已按接受视图产出」。
+    """
+    from docx.oxml.ns import qn  # type: ignore[import-untyped]
+
+    body = doc.element.body
+    return sum(1 for _ in body.iter(qn("w:ins"))) + sum(
+        1 for _ in body.iter(qn("w:del"))
+    )
+
+
 def _iter_block_items(doc: _Doc):
     """按文档流顺序产出段落与表格(python-docx 默认不混序遍历)。"""
     from docx.oxml.ns import qn  # type: ignore[import-untyped]
@@ -80,7 +135,9 @@ def _table_rows(table: Table) -> list[list[str]]:
             if tc_id in seen_tc:
                 continue  # 跳过水平合并(gridSpan)的后续物理格
             seen_tc.add(tc_id)
-            cells.append(c.text.replace("\n", " ").replace("\r", " ").strip())
+            cells.append(
+                _accepted_text(c._tc).replace("\n", " ").replace("\r", " ").strip()
+            )
         rows.append(cells)
     return rows
 
@@ -173,7 +230,7 @@ def parse_word(path: str | Path) -> list[RawItem]:
     page_index = 0
     for block in _iter_block_items(doc):
         if isinstance(block, Paragraph):
-            text = block.text.strip()
+            text = _accepted_text(block._p).strip()
             if not text:
                 skipped_empty += 1
             else:
@@ -233,10 +290,13 @@ def _log_parse_summary(
     n_tables = kind_counts.get("table", 0)
     doc_paragraphs = len(doc.paragraphs)
     doc_tables = len(doc.tables)
+    # 修订痕迹计数(<w:ins>/<w:del>):>0 说明这份 docx 带未接受修订,已按「接受修订」
+    # 视图解析(删除痕迹丢弃、插入痕迹并入)。便于排查「解析文本为何与原始 docx 截图不同」。
+    revision_count = _count_revisions(doc)
     logger.info(
         "word parsed path=%s items=%s paragraphs=%s tables=%s headings=%s "
         "heading_levels=%s table_dims=%s total_chars=%s skipped_empty=%s "
-        "elapsed=%.3fs",
+        "revisions=%s elapsed=%.3fs",
         Path(path).name,
         len(items),
         doc_paragraphs,
@@ -246,6 +306,7 @@ def _log_parse_summary(
         ",".join(table_dims) if table_dims else "-",
         total_chars,
         skipped_empty,
+        revision_count,
         time.perf_counter() - started_at,
     )
     if doc_tables and n_tables == 0:

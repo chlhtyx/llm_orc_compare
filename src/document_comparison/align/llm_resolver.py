@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +16,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from .._llm_json import extract_llm_json
 from ..config import settings
 from ..models import RawAlignmentBlock, RawAlignmentPlan
 from ..observability import log_model_failure, log_model_request, log_model_response
@@ -72,24 +72,6 @@ class AlignmentDecision:
 
 def _bounded(value: str, limit: int = 600) -> str:
     return value if len(value) <= limit else f"{value[:limit]}…"
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    value = text.strip()
-    if value.startswith("```"):
-        value = re.sub(r"^```(?:json)?\s*", "", value)
-        value = re.sub(r"\s*```$", "", value)
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", value)
-        if not match:
-            return {}
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _candidate_payload(candidate: AlignmentCandidate) -> dict[str, Any]:
@@ -187,7 +169,7 @@ def _request_alignment_json(
                     log_model_response(
                         logger, "alignment", response.status_code, data, started
                     )
-                    return _extract_json(str(content))
+                    return extract_llm_json(str(content))
             if attempt < max_retries:
                 time.sleep(min(2 ** attempt, 8) + random.random())
 

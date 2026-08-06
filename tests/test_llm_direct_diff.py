@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from docx import Document  # type: ignore[import-untyped]
 
@@ -742,3 +743,151 @@ def test_locate_all_blocks_without_bbox_yields_empty():
 
     regions = locate_hunk_regions(hunks, blocks, pmeta)
     assert regions == [[]]
+
+
+# —— LLM 比对 JSON 解析容错与降级(_llm_json 共享 helper + llm_text_diff 降级)——
+
+
+def test_llm_text_diff_accepts_clean_object(monkeypatch):
+    """回归:标准 JSON 对象仍正常解析出 hunks,不触发降级。"""
+    _setup_judge(monkeypatch)
+    good = (
+        '{"hunks": [{"tag": "replace", "word_lines": ["100"], "pdf_lines": ["200"], '
+        '"context_before": ["金额"], "context_after": []}], "similarity": 0.5}'
+    )
+    monkeypatch.setattr(llm_diff_mod, "_post_judge_chat", lambda *a, **k: good)
+    report = llm_diff_mod.llm_text_diff("原文", "待核")
+    assert report.recognition_status == "reliable"
+    assert len(report.hunks) == 1
+    assert report.hunks[0].tag == "replace"
+    assert report.stats.get("llm_parse_failed") is None  # 未降级
+
+
+def test_llm_text_diff_accepts_markdown_fenced_json(monkeypatch):
+    """LLM 用 ```json 围栏包裹输出时仍能正确解析(共享 helper 去围栏)。"""
+    _setup_judge(monkeypatch)
+    fenced = (
+        "```json\n"
+        '{"hunks": [{"tag": "delete", "word_lines": ["违约金条款"], '
+        '"pdf_lines": [], "context_before": [], "context_after": []}], '
+        '"similarity": 0.9}\n'
+        "```"
+    )
+    monkeypatch.setattr(llm_diff_mod, "_post_judge_chat", lambda *a, **k: fenced)
+    report = llm_diff_mod.llm_text_diff("原文", "待核")
+    assert report.recognition_status == "reliable"
+    assert len(report.hunks) == 1
+    assert report.hunks[0].tag == "delete"
+
+
+def test_llm_text_diff_degrades_on_bare_json_array(monkeypatch):
+    """回归 #1:LLM 返回裸数组 [{...}] 时不再 raise,降级为 needs_review。
+
+    历史 bug:旧 `_extract_json` 直接 `json.loads` 返回 list,正则兜底不触发,
+    `isinstance(parsed, dict)` 为 False → raise ValueError「LLM 比对返回非 JSON 对象」,
+    整个任务标记 failed。修复后降级为空 hunks + needs_review。
+    """
+    _setup_judge(monkeypatch)
+    bare_array = '[{"tag": "replace", "word_lines": ["100"], "pdf_lines": ["200"]}]'
+    monkeypatch.setattr(llm_diff_mod, "_post_judge_chat", lambda *a, **k: bare_array)
+    report = llm_diff_mod.llm_text_diff("原文", "待核")
+    assert report.recognition_status == "needs_review"
+    assert report.hunks == []
+    assert report.stats.get("llm_parse_failed") is True
+    # 降级产物仍是合法 TextDiffReport,可被 text_diff_to_tamper_report 适配
+    tamper = llm_diff_mod.text_diff_to_tamper_report(report)
+    assert tamper.change_status == "clean"  # 无 hunks → clean,但 recognition 标记保留
+
+
+def test_llm_text_diff_degrades_on_plain_text(monkeypatch):
+    """回归 #2:LLM 返回纯叙述文本(无法解析)时降级为 needs_review,不中断任务。"""
+    _setup_judge(monkeypatch)
+    prose = "抱歉,这两段文本太长,我无法完成比对。请缩短后重试。"
+    monkeypatch.setattr(llm_diff_mod, "_post_judge_chat", lambda *a, **k: prose)
+    report = llm_diff_mod.llm_text_diff("原文", "待核")
+    assert report.recognition_status == "needs_review"
+    assert report.hunks == []
+    assert report.stats.get("llm_parse_failed") is True
+
+
+def test_llm_text_diff_degrades_on_json_with_surrounding_prose(monkeypatch):
+    """JSON 前后带解释文本时,共享 helper 正则兜底应能提取出对象(不降级)。
+
+    覆盖 LLM「结果如下:{...}。以上是分析」这种常见输出。
+    """
+    _setup_judge(monkeypatch)
+    mixed = (
+        "比对结果如下:\n"
+        '{"hunks": [{"tag": "insert", "word_lines": [], "pdf_lines": ["新增条款"], '
+        '"context_before": [], "context_after": []}], "similarity": 0.8}\n'
+        "以上为分析。"
+    )
+    monkeypatch.setattr(llm_diff_mod, "_post_judge_chat", lambda *a, **k: mixed)
+    report = llm_diff_mod.llm_text_diff("原文", "待核")
+    assert report.recognition_status == "reliable"
+    assert len(report.hunks) == 1
+    assert report.hunks[0].tag == "insert"
+
+
+def test_extract_llm_json_unit():
+    """共享 helper 单元测试:围栏去除 / 裸对象 / 裸数组归一 / 失败返回 {}。"""
+    from document_comparison._llm_json import (
+        LLMJsonParseError,
+        extract_llm_json,
+        extract_llm_json_strict,
+    )
+
+    # ① 干净对象
+    assert extract_llm_json('{"a": 1}') == {"a": 1}
+    # ② markdown 围栏(带或不带 json 标记)
+    assert extract_llm_json("```json\n{\"a\": 1}\n```") == {"a": 1}
+    assert extract_llm_json("```\n{\"a\": 1}\n```") == {"a": 1}
+    # ③ 裸数组:expect=dict 归一为 {}(llm_diff/judge 契约);expect=(dict,list) 保留
+    assert extract_llm_json("[1, 2, 3]") == {}
+    assert extract_llm_json("[1, 2, 3]", expect=(dict, list)) == [1, 2, 3]
+    # ④ JSON 前后带叙述 → 正则兜底
+    assert extract_llm_json('结果: {"risk_level": "high"} 以上。') == {"risk_level": "high"}
+    # ⑤ 纯文本 → {}(优雅),strict 抛 LLMJsonParseError
+    assert extract_llm_json("无法解析的纯文本") == {}
+    with pytest.raises(LLMJsonParseError):
+        extract_llm_json_strict("无法解析的纯文本")
+    # ⑥ 顶层非对象/非数组(裸数字)→ expect=dict 归一 {}
+    assert extract_llm_json("42") == {}
+    # ⑦ 非字符串输入 → {}
+    assert extract_llm_json(None) == {}  # type: ignore[arg-type]
+
+
+def test_judge_uses_shared_helper_on_invalid_json(monkeypatch):
+    """judge.py 迁移到共享 helper 后,无效 JSON 仍优雅降级为空 dict → 沿用规则结论。
+
+    通过 mock httpx.Client 让 LLM「返回」纯叙述文本(非 JSON),验证 judge 的降级路径:
+    extract_llm_json 返回 {} → risk 为空 → 不在合法级 → 沿用 rule_risk 并附降级说明。
+    """
+    _setup_judge(monkeypatch)
+    from document_comparison.config import settings
+    monkeypatch.setattr(settings, "llm_max_retries", 0)
+
+    def _respond(request):
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": "这不是 JSON,只是一句话。"}}]},
+        )
+
+    original_client = httpx.Client
+    monkeypatch.setattr(
+        judge_mod.httpx,
+        "Client",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(_respond), **kwargs),
+    )
+
+    risk, reasons = judge_mod.llm_judge_diff(
+        word_text="金额100万元",
+        pdf_text="金额200万元",
+        segments=[DiffSegment(op="delete", text="100"), DiffSegment(op="insert", text="200")],
+        rule_risk="high",
+    )
+    # 无效输出应沿用规则结论 high,并给出降级说明
+    assert risk == "high"
+    assert reasons  # 非空,含「沿用规则」类提示
+
