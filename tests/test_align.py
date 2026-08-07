@@ -220,8 +220,8 @@ def test_unmatched_reason_identifies_threshold_and_text_changes():
     for alignment in alignments:
         assert "0.840" in alignment.alignment_reason
         assert "0.850" in alignment.alignment_reason
-        assert "Word 独有“合同必读”" in alignment.alignment_reason
-        assert "PDF 独有“0”" in alignment.alignment_reason
+        assert "原始合同独有“合同必读”" in alignment.alignment_reason
+        assert "回收件独有“0”" in alignment.alignment_reason
 
 
 def test_semantic_alignment_embeds_both_sides_in_one_batch():

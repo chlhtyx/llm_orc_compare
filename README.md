@@ -1,6 +1,6 @@
 # 文档比对系统（llm_orc_compare）
 
-基于多模态 LLM API 的合同篡改检测系统。以原始 Word 合同为基准，比对回收的 PDF（文本 PDF 或扫描件），识别金额、日期、违约责任、管辖法院等条款是否发生变化，并生成可追溯的差异报告。
+基于多模态 LLM API 的合同篡改检测系统。以原始合同（Word `.docx` 或 PDF `.pdf`）为基准，比对回收的 PDF（文本 PDF 或扫描件），识别金额、日期、违约责任、管辖法院等条款是否发生变化，并生成可追溯的差异报告。原始合同为 PDF 时，复用原生文本层优先 + OCR 兜底解析通道（与回收件同路径）。
 
 ## 主要能力
 
@@ -41,7 +41,7 @@ curl http://localhost:8000/health
 1. 打开页面右上角的“设置”。
 2. 配置 OCR 服务的 API Base、API Key 和模型名。
 3. 按需配置语义向量服务，以及条款对齐/差异说明共用的纯文本 LLM 服务。
-4. 返回提交页，上传原始 `.docx` 和待核验 `.pdf`。
+4. 返回提交页，上传原始合同（`.docx` 或 `.pdf`）和待核验 `.pdf`。
 5. 等待任务完成后查看差异，并下载高亮 Word、PDF 或 JSON 报告。
 
 配置通过 UI 写入同栈 Postgres(`llm_config` 表)，上传文件与日志保存在 `./data/`，**任务记录、完整报告 JSONB 与 LLM/OCR 模型配置只写入同栈 Postgres**(数据在 `./data/pg/`),容器重启后不会丢失。不要提交包含真实 API Key 的旧 `llm_config.json` 备份文件。
@@ -119,7 +119,7 @@ tail -f data/logs/app.log
 
 ## 工作流程
 
-1. **Word 解析**：使用 `python-docx` 提取正文和结构化表格。
+1. **原始合同解析**：Word（`.docx`）用 `python-docx` 提取正文和结构化表格；PDF（`.pdf`）复用原生文本层优先 + OCR 兜底通道（与回收件同路径）。
 2. **可信 PDF 读取**：文本 PDF 使用 PyMuPDF 原生解析；扫描页降级到多模态 LLM 或 PaddleOCR-VL。
 3. **联合分段与对齐**：默认使用编号/字段锚点和语义相似度；可选 LLM 直接输出原始 block 字符区间分组，不依赖预先固定的 Clause 边界。
 4. **差异检测**：先统一全半角、引号字形、中文排版空格和 canonical 事实，再由字符级及表格单元格 diff 决定是否变化；语义相似度仅用于条款对齐。
@@ -227,6 +227,7 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `POST` | `/api/v1/external/contractCompare` | 外部系统提交标准合同比对(`X-API-Key`);默认异步,`sync=true` 同步返回结果 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
+| `GET` | `/api/v1/external/contractCompare/{task_id}/report.html` | 下载自包含 HTML 比对报告(`X-API-Key`;`result_url` 指向此处,文件名 `【单据号】对比+时间.html`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
 | `POST` | `/api/v1/statement` | 提交金额统计(支持多文件,`target` 字段同键多值) |
 | `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
@@ -248,8 +249,8 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `source` | 与 `source_url` 二选一 | 原始合同 `.docx`(文件) |
-| `source_url` | 与 `source` 二选一 | 原始合同 URL(`http`/`https` `.docx`);服务端下载后比对,大小限制同 `source` |
+| `source` | 与 `source_url` 二选一 | 原始合同 `.docx`/`.pdf`(文件) |
+| `source_url` | 与 `source` 二选一 | 原始合同 URL(`http`/`https` `.docx`/`.pdf`);服务端下载后比对,大小限制同 `source` |
 | `target` | 与 `target_url` 二选一 | 回收件 `.pdf`(文件) |
 | `target_url` | 与 `target` 二选一 | 回收件 URL(`http`/`https` `.pdf`);服务端下载后比对,大小限制同 `target` |
 | `document_no` | 是 | 外部单据号(≤255 字符) |
@@ -319,7 +320,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/1",
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/2"
   ],
-  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6"
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.html"
 }
 // 任务失败时 status="failed"、error 为失败原因,其余结果字段缺省。
 ```
@@ -348,7 +349,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/1",
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/2"
   ],
-  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6"
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.html"
 }
 ```
 

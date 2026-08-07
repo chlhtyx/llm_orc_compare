@@ -288,7 +288,7 @@ def _align_semantic_segment(
             Alignment(
                 pdf_clause_id=clause.clause_id,
                 match_type="unmatched",
-                alignment_reason="Word 侧没有可供配对的条款",
+                alignment_reason="原始合同侧没有可供配对的条款",
             )
             for clause in pdf_clauses
         ]
@@ -421,9 +421,9 @@ def _text_difference_hint(word_text: str, pdf_text: str) -> str:
 
     hints: list[str] = []
     if word_only:
-        hints.append(f"Word 独有“{_bounded_snippets(word_only)}”")
+        hints.append(f"原始合同独有“{_bounded_snippets(word_only)}”")
     if pdf_only:
-        hints.append(f"PDF 独有“{_bounded_snippets(pdf_only)}”")
+        hints.append(f"回收件独有“{_bounded_snippets(pdf_only)}”")
     return "；".join(hints)
 
 

@@ -1,0 +1,185 @@
+"""合同比对 HTML 报告渲染:自包含单文件,内联样式,可直接浏览器打开。
+
+与 ``external_api.build_result_text`` 口径一致(同一套文案映射与差异文本规则),
+渲染为带样式的结构化 HTML,供外部系统下载归档。
+"""
+from __future__ import annotations
+
+import html
+from datetime import datetime
+
+from ..models import Diff, DiffSegment, TamperReport
+
+# —— 文案映射(与 external_api.build_result_text 保持一致)——
+_CONCLUSION = {
+    "changed": "发现确认内容变化",
+    "needs_review": "存在待人工复核内容",
+    "clean": "未发现内容变化",
+}
+_RECOGNITION = {"reliable": "可靠", "needs_review": "待人工复核"}
+_LOCATION = {"complete": "完整", "partial": "部分缺失", "missing": "缺失"}
+_STATUS_NAMES = {
+    "modified": "修改",
+    "added": "新增",
+    "deleted": "删除",
+    "identical": "一致",
+}
+
+
+def _diff_texts(diff: Diff) -> tuple[str, str]:
+    """与 external_api._diff_texts 同款:equal+delete=原始,equal+insert=回收。"""
+    original = "".join(
+        segment.text for segment in diff.segments if segment.op in {"equal", "delete"}
+    )
+    recovered = "".join(
+        segment.text for segment in diff.segments if segment.op in {"equal", "insert"}
+    )
+    return original, recovered
+
+
+def _render_segmented(original_html: list[str], recovered_html: list[str], diff: Diff) -> None:
+    """对 modified 差异,按 segment op 着色高亮(delete 红/insert 绿)。
+
+    非修改状态(added/deleted/identical)直接用拼接纯文本,不着色。
+    original/ecovered 列表就地追加,调用方再 join。
+    """
+    if diff.status != "modified":
+        original, recovered = _diff_texts(diff)
+        original_html.append(html.escape(original))
+        recovered_html.append(html.escape(recovered))
+        return
+    for seg in diff.segments:
+        text = html.escape(seg.text)
+        if seg.op == "delete":
+            original_html.append(f'<span class="del">{text}</span>')
+        elif seg.op == "insert":
+            recovered_html.append(f'<span class="ins">{text}</span>')
+        else:  # equal
+            original_html.append(text)
+            recovered_html.append(text)
+    # 若某侧无着色片段(modified 但 segments 退化),退化为纯文本,避免空列。
+    if not original_html:
+        original, _ = _diff_texts(diff)
+        original_html.append(html.escape(original))
+    if not recovered_html:
+        _, recovered = _diff_texts(diff)
+        recovered_html.append(html.escape(recovered))
+
+
+def _label(diff: Diff) -> str:
+    value = " ".join(v for v in (diff.number, diff.title) if v).strip()
+    return value or diff.alignment_id
+
+
+_CSS = """
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:980px;margin:24px auto;padding:0 20px;color:#222;background:#f7f7f9}
+h1{font-size:20px;border-bottom:2px solid #2c7be5;padding-bottom:8px;margin-bottom:4px}
+.meta{display:flex;flex-wrap:wrap;gap:8px 24px;margin:14px 0;font-size:14px}
+.meta b{color:#444}
+.badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;color:#fff}
+.badge-modified{background:#e8590c}.badge-added{background:#1971c2}.badge-deleted{background:#e03131}.badge-identical{background:#868e96}
+table{width:100%;border-collapse:collapse;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:13px}
+th,td{border:1px solid #e3e3e5;padding:8px 10px;vertical-align:top;text-align:left}
+th{background:#f1f3f5;white-space:nowrap}
+.idx{width:36px;color:#888;text-align:center}
+.col-status{width:64px}
+.del{background:#ffe3e3;text-decoration:line-through;border-radius:2px;padding:0 1px}
+.ins{background:#d3f9d3;border-radius:2px;padding:0 1px}
+.empty{color:#adb5bd}
+.summary{margin:10px 0 6px;color:#555;font-size:13px}
+footer{margin-top:20px;color:#adb5bd;font-size:12px;text-align:center}
+.pages-title{font-size:16px;margin:24px 0 10px;border-left:4px solid #2c7be5;padding-left:8px}
+.pages{display:flex;flex-direction:column;gap:16px}
+.pages figure{margin:0;background:#fff;border:1px solid #e3e3e5;border-radius:4px;padding:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.pages figcaption{font-size:12px;color:#868e96;margin-bottom:6px}
+.pages img{display:block;width:100%;height:auto;border:1px solid #f1f3f5}
+@media print{body{background:#fff}table{box-shadow:none}.pages figure{box-shadow:none;break-inside:avoid}}
+"""
+
+
+def render_html_report(
+    document_no: str,
+    report: TamperReport,
+    generated_at: datetime,
+    highlight_images: list[str] | None = None,
+) -> str:
+    """生成自包含 HTML 报告字符串。
+
+    ``generated_at`` 用于头部「生成时间」展示(调用方负责转北京时间)。
+    ``highlight_images`` 为可选的每页高亮标注图 data URI(或可访问 URL)列表,
+    非空时在差异表格下方按页内嵌(已标注差异的回收件页面)。
+    """
+    diffs = [*report.diffs, *report.unmatched_clauses]
+    conclusion = _CONCLUSION.get(report.change_status, report.change_status)
+    recognition = _RECOGNITION.get(report.recognition_status, report.recognition_status)
+    location = _LOCATION.get(report.location_status, report.location_status)
+    stamp = generated_at.strftime("%Y-%m-%d %H:%M")
+
+    rows: list[str] = []
+    empty_cell = '<span class="empty">（无）</span>'
+    for index, diff in enumerate(diffs, start=1):
+        original_parts: list[str] = []
+        recovered_parts: list[str] = []
+        _render_segmented(original_parts, recovered_parts, diff)
+        status_zh = _STATUS_NAMES.get(diff.status, diff.status)
+        original_cell = "".join(original_parts) or empty_cell
+        recovered_cell = "".join(recovered_parts) or empty_cell
+        label_cell = html.escape(_label(diff))
+        status_cls = html.escape(diff.status)
+        status_text = html.escape(status_zh)
+        rows.append(
+            "<tr>"
+            f'<td class="idx">{index}</td>'
+            f'<td class="col-status"><span class="badge badge-{status_cls}">{status_text}</span></td>'
+            f"<td>{label_cell}</td>"
+            f"<td>{original_cell}</td>"
+            f"<td>{recovered_cell}</td>"
+            "</tr>"
+        )
+
+    rows_html = "\n".join(rows) if rows else (
+        '<tr><td colspan="5" class="empty" style="text-align:center">未发现内容变化</td></tr>'
+    )
+
+    # 高亮标注图区:每页一张(烧录差异后的回收件页面)。data URI 内嵌保证单文件自包含。
+    images_html = ""
+    if highlight_images:
+        figures = "\n".join(
+            f'<figure><figcaption>第 {idx} 页 / 共 {len(highlight_images)} 页</figcaption>'
+            f'<img alt="高亮标注 第{idx}页" src="{src}"></figure>'
+            for idx, src in enumerate(highlight_images, start=1)
+        )
+        images_html = (
+            '<h2 class="pages-title">高亮标注图(回收件)</h2>'
+            f'<div class="pages">{figures}</div>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合同比对报告 · {html.escape(document_no)}</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<h1>合同比对报告</h1>
+<div class="meta">
+  <div><b>单据号:</b>{html.escape(document_no)}</div>
+  <div><b>结论:</b>{html.escape(conclusion)}</div>
+  <div><b>识别状态:</b>{html.escape(recognition)}</div>
+  <div><b>高亮定位:</b>{html.escape(location)}</div>
+  <div><b>差异数量:</b>{len(diffs)}</div>
+  <div><b>生成时间:</b>{html.escape(stamp)}</div>
+</div>
+<table>
+<thead><tr><th class="idx">#</th><th class="col-status">状态</th><th>条款</th><th>原始合同</th><th>回收件</th></tr></thead>
+<tbody>
+{rows_html}
+</tbody>
+</table>
+{images_html}
+<footer>本报告由合同篡改检测系统自动生成</footer>
+</body>
+</html>
+"""

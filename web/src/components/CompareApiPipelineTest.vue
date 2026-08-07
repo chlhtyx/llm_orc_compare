@@ -22,7 +22,10 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 
-const sourceValid = computed(() => !!props.sourceFile?.name.toLowerCase().endsWith('.docx'))
+const sourceValid = computed(() => {
+  const name = props.sourceFile?.name.toLowerCase() ?? ''
+  return name.endsWith('.docx') || name.endsWith('.pdf')
+})
 const targetValid = computed(() => !!props.targetFile?.name.toLowerCase().endsWith('.pdf'))
 const running = computed(() => info.value?.status === 'pending' || info.value?.status === 'running')
 const canSubmit = computed(

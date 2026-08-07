@@ -83,8 +83,9 @@ def describe_table_change(
     """返回首个确定性的表格结构/单元格差异说明。"""
     if len(word_tables) != len(pdf_tables):
         if len(word_tables) > len(pdf_tables):
-            return "PDF 缺失 DOCX 中的表格"
-        return "PDF 新增表格"
+            # word/pdf 在此仅代表 source/target 两侧,source 可为 Word 或 PDF。
+            return "回收件缺失原始合同中的表格"
+        return "回收件新增表格"
 
     for table_index, (word_table, pdf_table) in enumerate(zip(word_tables, pdf_tables)):
         if [_table_cell_key(cell) for cell in word_table.headers] != [

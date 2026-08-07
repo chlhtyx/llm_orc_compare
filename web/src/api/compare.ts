@@ -9,7 +9,7 @@ import type {
 import { ApiError, apiUrl, openEventStream, request } from './client'
 
 export interface SubmitArgs {
-  source: File // .docx
+  source: File // .docx 或 .pdf
   target: File // .pdf
   options?: CompareOptions
   callbackUrl?: string

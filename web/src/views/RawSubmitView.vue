@@ -15,7 +15,10 @@ const ocrBackend = ref<'llm' | 'paddleocr'>('paddleocr')
 const submitting = ref(false)
 const submitError = ref<string | null>(null)
 
-const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWith('.docx'))
+const sourceValid = computed(() => {
+  const name = sourceFile.value?.name.toLowerCase() ?? ''
+  return name.endsWith('.docx') || name.endsWith('.pdf')
+})
 const targetValid = computed(() => !!targetFile.value?.name.toLowerCase().endsWith('.pdf'))
 const canSubmit = computed(
   () => sourceValid.value && targetValid.value && !submitting.value,
@@ -51,14 +54,14 @@ async function onSubmit(): Promise<void> {
 
       <div class="grid-2">
         <div class="field">
-          <label>原始合同(Word)</label>
+          <label>原始合同(Word / PDF)</label>
           <FileDrop
             v-model="sourceFile"
-            accept=".docx"
-            label="选择 .docx 文件"
+            accept=".docx,.pdf"
+            label="选择 .docx 或 .pdf 文件"
             hint="提取为纯文本(保留段落结构)"
           />
-          <span v-if="sourceFile && !sourceValid" class="err">文件必须是 .docx 格式</span>
+          <span v-if="sourceFile && !sourceValid" class="err">文件必须是 .docx 或 .pdf 格式</span>
         </div>
         <div class="field">
           <label>回收件(PDF 扫描件)</label>

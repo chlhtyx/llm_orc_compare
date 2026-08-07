@@ -67,7 +67,7 @@ def test_version_endpoint_follows_dc_version(client, monkeypatch):
     assert r.json()["version"] == "9.9.9"
 
 
-def test_compare_rejects_non_docx_source(client):
+def test_compare_rejects_non_docx_non_pdf_source(client):
     import io
 
     r = client.post(
@@ -78,7 +78,23 @@ def test_compare_rejects_non_docx_source(client):
         },
     )
     assert r.status_code == 400
-    assert "docx" in r.json()["message"]
+    msg = r.json()["message"]
+    assert "docx" in msg and "pdf" in msg
+
+
+def test_compare_accepts_pdf_source(client):
+    """原始合同允许 PDF(.pdf)上传(与 .docx 并列)。"""
+    import io
+
+    r = client.post(
+        "/api/v1/compare",
+        files={
+            "source": ("contract.pdf", io.BytesIO(_make_pdf_bytes(1)), "application/pdf"),
+            "target": ("scan.pdf", io.BytesIO(_make_pdf_bytes(1)), "application/pdf"),
+        },
+    )
+    assert r.status_code == 200
+    assert "task_id" in r.json()
 
 
 def test_compare_accepts_valid_files(client):
@@ -344,8 +360,8 @@ def test_raw_compare_accepts_valid_files(client):
     assert "task_id" in r.json()
 
 
-def test_raw_compare_rejects_non_docx(client):
-    """无标注版 source 非 docx 应返回 400。"""
+def test_raw_compare_rejects_non_docx_non_pdf(client):
+    """无标注版 source 非 docx/pdf 应返回 400。"""
     import io
 
     r = client.post(
@@ -356,7 +372,8 @@ def test_raw_compare_rejects_non_docx(client):
         },
     )
     assert r.status_code == 400
-    assert "docx" in r.json()["message"]
+    msg = r.json()["message"]
+    assert "docx" in msg and "pdf" in msg
 
 
 def test_raw_task_not_found_404(client):

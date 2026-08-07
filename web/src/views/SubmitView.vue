@@ -24,7 +24,10 @@ const form = reactive({
   llm_diff_no_think_enabled: true,
 })
 
-const sourceValid = computed(() => !!sourceFile.value?.name.toLowerCase().endsWith('.docx'))
+const sourceValid = computed(() => {
+  const name = sourceFile.value?.name.toLowerCase() ?? ''
+  return name.endsWith('.docx') || name.endsWith('.pdf')
+})
 const targetValid = computed(() => !!targetFile.value?.name.toLowerCase().endsWith('.pdf'))
 // LLM 直接比对与标准管线(对齐/辅助说明)互斥:开启直接比对时这两个选项被忽略,
 // UI 联动禁用 + 保存时强制写 false,与「辅助说明依赖风险评估」的处理保持一致。
@@ -262,14 +265,14 @@ async function onReset(): Promise<void> {
 
       <div class="file-grid">
         <div class="field">
-          <label>原始合同（Word）</label>
+          <label>原始合同（Word / PDF）</label>
           <FileDrop
             v-model="sourceFile"
-            accept=".docx"
-            label="选择 .docx 文件"
+            accept=".docx,.pdf"
+            label="选择 .docx 或 .pdf 文件"
             hint="作为比对基准的原始合同"
           />
-          <span v-if="sourceFile && !sourceValid" class="err">文件必须是 .docx 格式</span>
+          <span v-if="sourceFile && !sourceValid" class="err">文件必须是 .docx 或 .pdf 格式</span>
         </div>
         <div class="field">
           <label>回收件（PDF）</label>

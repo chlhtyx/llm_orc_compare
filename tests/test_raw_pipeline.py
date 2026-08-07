@@ -143,6 +143,29 @@ def test_raw_identical(tmp_path, monkeypatch):
     assert report.stats["similarity"] >= 0.99
 
 
+def test_raw_pdf_source_uses_native_text_layer(tmp_path, monkeypatch):
+    """原始合同为 PDF(.pdf)时,source 走原生文本层抽取(与 target 同路径),管线正常产出报告。"""
+    # 文本需 >= 16 字符以通过原生文本层可靠性阈值(见 whole_doc._MIN_NATIVE_CHARS)。
+    pdf_buf = _make_pdf_from_lines(["本合同金额为人民币100万元整，签字之日起生效。"])
+    spath = tmp_path / "source.pdf"
+    tpath = tmp_path / "target.pdf"
+    spath.write_bytes(pdf_buf.getvalue())
+    tpath.write_bytes(pdf_buf.getvalue())
+
+    captured = {}
+
+    def fake_llm(word_text, pdf_text, **kw):
+        captured["word_text"] = word_text
+        return _mock_llm_report([], similarity=1.0)
+
+    monkeypatch.setattr(raw_pipeline_mod, "llm_text_diff", fake_llm)
+    report = run_raw_pipeline(spath, tpath)
+
+    # source 文本应来自 PDF 原生文字层(包含「100万元」)
+    assert "100万元" in captured["word_text"]
+    assert len(report.hunks) == 0
+
+
 def test_raw_amount_change(tmp_path, monkeypatch):
     """Word 100万 vs PDF 200万:LLM 返回 replace hunk + 字符级 segments。"""
     parts = [("p", "金额为100万元。")]

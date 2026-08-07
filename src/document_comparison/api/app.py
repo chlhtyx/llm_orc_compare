@@ -64,7 +64,9 @@ from ..external_api import (
     build_external_result,
     build_external_statement_result,
     external_config_enabled,
+    external_html_report_path,
     external_image_path,
+    external_report_filename,
     require_external_api_key,
     validate_callback_url,
     validate_public_base_url,
@@ -965,14 +967,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/compare/api-test", status_code=202)
     async def submit_external_pipeline_test(
-        source: UploadFile = File(..., description="测试用原始合同 Word(.docx)"),
+        source: UploadFile = File(..., description="测试用原始合同 Word(.docx)或 PDF(.pdf)"),
         target: UploadFile = File(..., description="测试用回收件 PDF(.pdf)"),
     ):
         """合同比对页 API 管线测试：复用外部任务产物流程，但不发送真实回调。"""
         if not external_config_enabled():
             raise HTTPException(400, "请先保存完整的外部系统 API 配置")
-        if not (source.filename or "").lower().endswith(".docx"):
-            raise HTTPException(400, "source 必须为 .docx")
+        if Path(source.filename or "").suffix.lower() not in {".docx", ".pdf"}:
+            raise HTTPException(400, "source 必须为 .docx 或 .pdf")
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
@@ -1058,10 +1060,13 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/external/contractCompare", status_code=202)
     async def external_compare(
         request: Request,
-        source: UploadFile | None = File(default=None, description="原始合同 Word(.docx)"),
+        source: UploadFile | None = File(
+            default=None, description="原始合同 Word(.docx)或 PDF(.pdf)"
+        ),
         target: UploadFile | None = File(default=None, description="回收件 PDF(.pdf)"),
         source_url: str | None = Form(
-            default=None, description="原始合同 URL(http/https .docx);与 source 二选一"
+            default=None,
+            description="原始合同 URL(http/https .docx/.pdf);与 source 二选一",
         ),
         target_url: str | None = Form(
             default=None, description="回收件 URL(http/https .pdf);与 target 二选一"
@@ -1147,8 +1152,9 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, str(exc)) from exc
 
             # 文件名后缀校验(文件名来源:UploadFile 或下载推断)
-            if not source_filename.lower().endswith(".docx"):
-                raise HTTPException(400, "source 必须为 .docx")
+            # source 允许 .docx/.pdf(原始合同可为 Word 或 PDF);target 固定 .pdf(回收件)。
+            if Path(source_filename).suffix.lower() not in {".docx", ".pdf"}:
+                raise HTTPException(400, "source 必须为 .docx 或 .pdf")
             if not target_filename.lower().endswith(".pdf"):
                 raise HTTPException(400, "target 必须为 .pdf")
 
@@ -1282,6 +1288,48 @@ def create_app() -> FastAPI:
             headers={
                 "Content-Disposition": (
                     f'inline; filename="{task_id}-page-{page_number:04d}.png"'
+                )
+            },
+        )
+
+    @app.get("/api/v1/external/contractCompare/{task_id}/report.html")
+    async def download_external_html_report(
+        request: Request,
+        task_id: str,
+        _auth: None = Depends(require_external_api_key),
+    ):
+        """下载自包含 HTML 比对报告(attachment;文件名=【单据号】对比+北京时间)。"""
+        from urllib.parse import quote
+
+        # 审计中间件读取:报告下载关联 task_id
+        request.state.audit_endpoint = "contractCompare.report"
+        request.state.audit_task_id = task_id
+        request.state.audit_document_no = None
+        document_no = ""
+        finished_at = None
+        task = task_manager.get(task_id)
+        if task is not None:
+            is_external = task.external_request
+            document_no = task.document_no or ""
+        else:
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            is_external = bool(rec and rec.external_request)
+            if rec is not None:
+                document_no = rec.document_no or ""
+                finished_at = rec.finished_at or rec.created_at
+        if not is_external:
+            raise HTTPException(404, "task not found")
+        path = external_html_report_path(task_id)
+        if not path.is_file():
+            raise HTTPException(404, "report not ready")
+        filename = external_report_filename(document_no, finished_at)
+        return FileResponse(
+            path,
+            media_type="text/html; charset=utf-8",
+            headers={
+                # RFC 5987:中文文件名用 filename*=UTF-8'' 编码,兼容主流浏览器。
+                "Content-Disposition": (
+                    f"attachment; filename*=UTF-8''{quote(filename)}"
                 )
             },
         )
@@ -1475,14 +1523,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/compare")
     async def compare(
-        source: UploadFile = File(..., description="原始 Word(.docx)"),
+        source: UploadFile = File(..., description="原始 Word(.docx)或 PDF(.pdf)"),
         target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
         options: str | None = Form(default=None),
         callback_url: str | None = Form(default=None),
     ):
         # 基本类型校验
-        if not (source.filename or "").lower().endswith(".docx"):
-            raise HTTPException(400, "source 必须为 .docx")
+        if Path(source.filename or "").suffix.lower() not in {".docx", ".pdf"}:
+            raise HTTPException(400, "source 必须为 .docx 或 .pdf")
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 
@@ -1656,13 +1704,13 @@ def create_app() -> FastAPI:
     # —— 无标注版(纯文本 difflib 比对)端点:与 /api/v1/compare 完全独立 ——
     @app.post("/api/v1/raw-compare")
     async def raw_compare(
-        source: UploadFile = File(..., description="原始 Word(.docx)"),
+        source: UploadFile = File(..., description="原始 Word(.docx)或 PDF(.pdf)"),
         target: UploadFile = File(..., description="PDF 扫描件(.pdf)"),
         options: str | None = Form(default=None),
         callback_url: str | None = Form(default=None),
     ):
-        if not (source.filename or "").lower().endswith(".docx"):
-            raise HTTPException(400, "source 必须为 .docx")
+        if Path(source.filename or "").suffix.lower() not in {".docx", ".pdf"}:
+            raise HTTPException(400, "source 必须为 .docx 或 .pdf")
         if not (target.filename or "").lower().endswith(".pdf"):
             raise HTTPException(400, "target 必须为 .pdf")
 

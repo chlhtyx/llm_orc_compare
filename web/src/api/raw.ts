@@ -11,7 +11,7 @@ import { ApiError, openEventStream, request } from './client'
 export { ApiError }
 
 export interface RawSubmitArgs {
-  source: File // .docx
+  source: File // .docx 或 .pdf
   target: File // .pdf
   options?: RawCompareOptions
   callbackUrl?: string

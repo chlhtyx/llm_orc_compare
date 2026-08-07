@@ -29,6 +29,7 @@ from .external_api import (
     build_external_result,
     build_external_statement_result,
     render_external_highlight_images,
+    write_external_html_report,
 )
 from .storage import compared_pdf_path, effective_target_path
 from . import webhook
@@ -322,6 +323,19 @@ class TaskManager:
                 await asyncio.to_thread(
                     render_external_highlight_images, task_id, effective_pdf_path, report
                 )
+                # 外部产物同步生成自包含 HTML 报告(供 result_url 下载);
+                # 渲染失败只记日志,不阻断任务主流程(done 状态与回调照常)。
+                try:
+                    await asyncio.to_thread(
+                        write_external_html_report,
+                        task_id,
+                        task.document_no or "",
+                        report,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "external html report generation failed task=%s", task_id, exc_info=True
+                    )
             task.info.overall_risk = report.overall_risk
             task.info.status = "done"
             task.push_event("done", 1.0)

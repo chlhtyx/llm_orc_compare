@@ -51,12 +51,24 @@ def run_raw_pipeline(
         if on_progress:
             on_progress(stage, frac)
 
-    # —— ① Word → 纯文本 ——
+    # —— ① source → 纯文本(.docx 解析展平;.pdf 走原生文本层优先/整体 OCR)——
     _progress("word_parsing", 0.02)
     with timed_stage(logger, "raw_word_parse"):
-        word_raw = parse_word(word_path)
-        word_text = "\n".join(item.text for item in word_raw if item.text)
-    logger.info("word flattened items=%s chars=%s", len(word_raw), len(word_text))
+        if Path(word_path).suffix.lower() == ".pdf":
+            from .ocr.whole_doc import extract_native_full_text, ocr_whole_document
+
+            word_native = extract_native_full_text(word_path)
+            if word_native.reliable:
+                word_text = word_native.text
+            else:
+                # 扫描件型 PDF source:逐页整体 OCR 拼接纯文本(与 target 同路径)。
+                word_text = ocr_whole_document(word_path, text_ocr, on_progress=_progress).text
+            word_raw_len = len(word_text)
+        else:
+            word_raw = parse_word(word_path)
+            word_text = "\n".join(item.text for item in word_raw if item.text)
+            word_raw_len = len(word_raw)
+    logger.info("source flattened items/chars=%s chars=%s", word_raw_len, len(word_text))
     _progress("word_done", 0.10)
 
     # —— ② PDF → 纯文本(整篇原生优先,扫描件长图整体 OCR)——

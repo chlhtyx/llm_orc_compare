@@ -20,8 +20,8 @@ Base  {external_public_base_url}/api/v1/external
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `source` | file | 与 `source_url` 二选一 | 原始合同文件,**后缀 `.docx`** |
-| `source_url` | string | 与 `source` 二选一 | 原始合同 URL(`http`/`https` `.docx`);服务端下载后比对,大小/后缀限制同 `source` |
+| `source` | file | 与 `source_url` 二选一 | 原始合同文件,**后缀 `.docx` 或 `.pdf`** |
+| `source_url` | string | 与 `source` 二选一 | 原始合同 URL(`http`/`https` `.docx`/`.pdf`);服务端下载后比对,大小/后缀限制同 `source` |
 | `target` | file | 与 `target_url` 二选一 | 回收件文件,**后缀 `.pdf`** |
 | `target_url` | string | 与 `target` 二选一 | 回收件 URL(`http`/`https` `.pdf`);服务端下载后比对,大小/后缀限制同 `target` |
 | `document_no` | string | ✅ | 单据号,非空,≤ 255 字符 |
@@ -29,7 +29,7 @@ Base  {external_public_base_url}/api/v1/external
 | `callback_url` | string | 异步必填 | http(s) 回调地址,禁止带账号密码 |
 | `original_page_count` | int | ❌ | ≥ 1;仅服务端开启「页数截取」时生效 |
 
-> 每个角色文件与链接**二选一**;同时传或都不传 → 400。URL 模式下文件名取 `Content-Disposition: filename=` 或 URL 末段,**后缀仍必须** `.docx`/`.pdf`,下载失败(非 2xx / 超时 / 超限)→ 400。
+> 每个角色文件与链接**二选一**;同时传或都不传 → 400。URL 模式下文件名取 `Content-Disposition: filename=` 或 URL 末段,**source 后缀必须 `.docx`/`.pdf`、target 后缀必须 `.pdf`**,下载失败(非 2xx / 超时 / 超限)→ 400。
 
 **同步模式** `sync=true`:HTTP 一直阻塞到完成,响应体直接返回完整结果(状态码恒为 200,成败看 body 的 `status`)。客户端超时建议 ≥ 5 分钟。
 
@@ -82,7 +82,7 @@ curl -X POST {BASE}/contractCompare \
   "change_status": "changed", // changed | needs_review | clean
   "result_text": "...",
   "highlight_images": [".../images/1", ".../images/2"],
-  "result_url": "..."
+  "result_url": ".../contractCompare/{task_id}/report.html"  // HTML 报告下载地址
 }
 ```
 
@@ -97,6 +97,18 @@ curl -X POST {BASE}/contractCompare \
 - `page` **从 1 开始**。
 - 越界 / 未生成 / task 不存在 → 404。
 - 仅 `done` 后才有图。
+
+---
+
+## 下载 HTML 报告
+
+`GET /api/v1/external/contractCompare/{task_id}/report.html` → 200 `text/html`
+
+- 即 `result_url` 指向的地址;`Content-Disposition: attachment`,浏览器直接下载。
+- 文件名:`【单据号】对比YYYYMMDD-HHMM.html`(时间为任务完成时刻的北京时间,到分钟)。
+- 内容:结构化差异表格(逐条「原始合同 vs 回收件」,修改项红绿高亮)+ 内嵌高亮标注图(回收件每页 PNG 以 base64 内嵌,单文件离线可看)。
+- 鉴权:同其他外部端点,需 `X-API-Key`(未配置 Key 时免鉴权)。
+- 仅 `done` 后才有文件;未生成 / 已清理 / 非对外任务 → 404。
 
 ---
 
@@ -134,7 +146,7 @@ pending → running → done
 { "event_id":"...", "task_id":"...", "status":"done",
   "event_type":"contract.compare.completed",
   "document_no":"...", "change_status":"changed",
-  "result_text":"...", "highlight_images":[], "result_url":"..." }
+  "result_text":"...", "highlight_images":[], "result_url":".../contractCompare/{task_id}/report.html" }
 
 // 失败
 { "event_id":"...", "task_id":"...", "status":"failed",

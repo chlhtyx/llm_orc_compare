@@ -18,7 +18,7 @@ from .align.llm_resolver import (
 from .align.raw_plan import align_raw_items
 from .config import Settings, settings
 from .embed import get_embed_engine, is_mock_engine
-from .models import Block, TamperReport, TruncationRecord
+from .models import Block, DocType, RawItem, TamperReport, TruncationRecord
 from .ocr import get_ocr_engine
 from .ocr.quality import apply_recognition_gate
 from .observability import record_ocr_result, timed_stage
@@ -59,6 +59,34 @@ def _enforce_ocr_page_indexes(pages_blocks: list[list[Block]]) -> list[list[Bloc
             sorted(corrected_pages),
         )
     return normalized
+
+
+def _parse_source(
+    path: str | Path,
+    ocr,
+    cfg: Settings,
+    on_progress: ProgressCb | None = None,
+) -> tuple[list[RawItem], DocType]:
+    """解析原始合同(source),按后缀分发。
+
+    `.docx` → ``parse_word``(结构化,带 Word 标题层级);
+    `.pdf`  → 复用 OCR 通道(原生文本层优先,失败兜底视觉 OCR)→ ``blocks_to_raw``。
+
+    返回 (RawItem 列表, doc_type)。调用方据此 ``build_clauses(raw, doc_type)``。
+    PDF source 与 target 走同一解析路径,失去 Word 标题层级,仅靠编号模式推断层级。
+    """
+    src_path = Path(path)
+    if src_path.suffix.lower() == ".pdf":
+        page_metas = get_page_metas(src_path, cfg.pdf_render_dpi)
+        pages_blocks = ocr.recognize(src_path, page_metas, on_progress=on_progress)
+        pages_blocks = _enforce_ocr_page_indexes(pages_blocks)
+        logger.info(
+            "source pdf parsed via ocr pages=%s blocks=%s",
+            len(page_metas), sum(len(b) for b in pages_blocks),
+        )
+        return blocks_to_raw(pages_blocks), "pdf"
+    # 默认 .docx(API 层已保证后缀合法性)
+    return parse_word(src_path), "word"
 
 
 def run_pipeline(
@@ -111,7 +139,12 @@ def run_pipeline(
         orig_pages = (
             original_page_count
             if original_page_count is not None
-            else estimate_page_count(word_path)
+            # .docx 用 OOXML 估算;PDF source 直接读页数(PDF 无需估算)。
+            else (
+                count_pages(word_path)
+                if Path(word_path).suffix.lower() == ".pdf"
+                else estimate_page_count(word_path)
+            )
         )
         try:
             pdf_pages = count_pages(pdf_path)
@@ -156,10 +189,10 @@ def run_pipeline(
             word_path, pdf_path, ocr_backend,
         )
 
-        # —— Word → 纯文本 ——
+        # —— source → 纯文本(.docx 解析展平;.pdf 走 OCR blocks 展平)——
         _progress("word_parsing", 0.02)
         with timed_stage(logger, "raw_word_parse"):
-            word_raw = parse_word(word_path)
+            word_raw, _word_doc_type = _parse_source(word_path, ocr, cfg, on_progress=None)
             word_text = "\n".join(item.text for item in word_raw if item.text)
         _progress("word_done", 0.10)
 
@@ -263,13 +296,13 @@ def run_pipeline(
         )
         return report
 
-    # —— ① Word 解析 + ③ 切分 ——
+    # —— ① Word/PDF 解析(source)+ ③ 切分 ——
     _progress("word_parsing", 0.02)
     with timed_stage(logger, "word_parse_and_structure"):
-        word_raw = parse_word(word_path)
+        word_raw, word_doc_type = _parse_source(word_path, ocr, cfg, on_progress=None)
         # RawSpan 联合对齐成功时不应依赖 Clause 切分；仅在关闭或失败回退时构建。
         word_clauses = (
-            None if enable_llm_alignment else build_clauses(word_raw, "word")
+            None if enable_llm_alignment else build_clauses(word_raw, word_doc_type)
         )
     logger.info(
         "word structured items=%s clauses=%s",
@@ -346,7 +379,7 @@ def run_pipeline(
             )
         else:
             if word_clauses is None:
-                word_clauses = build_clauses(word_raw, "word")
+                word_clauses = build_clauses(word_raw, word_doc_type)
             if pdf_clauses is None:
                 pdf_clauses = build_clauses(pdf_raw, "pdf")
             alignments = align_clauses(

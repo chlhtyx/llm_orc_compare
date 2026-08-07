@@ -19,7 +19,7 @@ from document_comparison.models import (
 )
 from document_comparison.observability import llm_call_collector
 from document_comparison.parsing.pdf import count_pages, extract_text_blocks
-from document_comparison.pipeline import run_pipeline
+from document_comparison.pipeline import _parse_source, run_pipeline
 from document_comparison.report.builder import burn_pdf
 
 
@@ -174,6 +174,38 @@ def _to_files(word_buf, pdf_buf, tmp_path):
     ppath.write_bytes(pdf_buf.getvalue())
     word_buf.seek(0)
     return wpath, ppath
+
+
+def test_parse_source_dispatches_by_extension(tmp_path):
+    """_parse_source 按后缀分发:.docx 走 parse_word(word);.pdf 走 OCR→blocks_to_raw(pdf)。"""
+    from document_comparison.config import settings
+
+    # .docx → doc_type="word"
+    wpath = tmp_path / "c.docx"
+    wpath.write_bytes(_make_word([("h1", "第一条 标的")]).getvalue())
+    raw, doc_type = _parse_source(wpath, _TextLayerOCR(), settings, on_progress=None)
+    assert doc_type == "word"
+    assert any("标的" in item.text for item in raw)
+
+    # .pdf → doc_type="pdf",经 OCR 文本层抽取得到 RawItem
+    ppath = tmp_path / "c.pdf"
+    ppath.write_bytes(_make_pdf_from_lines(["第一条 标的"]).getvalue())
+    raw, doc_type = _parse_source(ppath, _TextLayerOCR(), settings, on_progress=None)
+    assert doc_type == "pdf"
+    assert any("标的" in item.text for item in raw)
+
+
+def test_pipeline_accepts_pdf_source(tmp_path):
+    """原始合同为 PDF 时,端到端走 OCR 解析分支并完成比对。"""
+    # source 与 target 均为带文本层的 PDF,内容一致 → change_status=clean。
+    pdf_buf = _make_pdf_from_lines(["第一条 合同标的", "本合同自签字之日起生效。"])
+    spath = tmp_path / "source.pdf"
+    tpath = tmp_path / "target.pdf"
+    spath.write_bytes(pdf_buf.getvalue())
+    tpath.write_bytes(pdf_buf.getvalue())
+    report = run_pipeline(spath, tpath, ocr=_TextLayerOCR(), embed=MockEmbedding())
+    assert isinstance(report, TamperReport)
+    assert report.change_status == "clean"
 
 
 def test_pipeline_identical(tmp_path):
