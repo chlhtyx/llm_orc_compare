@@ -172,8 +172,8 @@ def test_unmatched_plain_clause_is_low_risk():
     assert risk == "low"
 
 
-def test_group_alignment_report_compares_all_text_and_pdf_regions():
-    """1↔2 对齐必须合并两条 PDF 的文本与坐标后再做确定性差异检测。"""
+def test_group_alignment_report_compares_all_text_and_highlights_changed_region():
+    """1↔2 对齐比较全部文本，但只标实际变化所在的 PDF 块。"""
     word = Clause(
         clause_id="w1",
         doc_type="word",
@@ -244,7 +244,8 @@ def test_group_alignment_report_compares_all_text_and_pdf_regions():
         segment.op == "insert" and "1" in segment.text
         for segment in report.diffs[0].segments
     )
-    assert len(report.diffs[0].page_regions) == 2
+    assert len(report.diffs[0].page_regions) == 1
+    assert report.diffs[0].page_regions[0].bbox == [0.05, 0.2, 0.6, 0.3]
 
 
 class _AlmostIdenticalEmbedding:

@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -55,7 +55,9 @@ from ..storage import (
     download_to_upload,
     effective_target_path,
     finalize_temp_file,
+    rendered_source_pdf_path,
     save_upload,
+    upload_path,
 )
 from ..report.builder import burn_pdf
 from ..compare.llm_diff import DEFAULT_DIFF_SYSTEM_PROMPT
@@ -1057,6 +1059,23 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "image not found")
         return FileResponse(path, media_type="image/png")
 
+    @app.get("/api/v1/compare/api-test/{task_id}/source-images/{page_number}")
+    async def get_external_pipeline_test_source_image(task_id: str, page_number: int):
+        if page_number < 1:
+            raise HTTPException(404, "image not found")
+        task = task_manager.get(task_id)
+        if task is not None:
+            document_no = task.document_no or ""
+        else:
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            document_no = rec.document_no if rec else ""
+        if not str(document_no).startswith("API-TEST-"):
+            raise HTTPException(404, "test task not found")
+        path = external_image_path(task_id, page_number, side="source")
+        if not path.is_file():
+            raise HTTPException(404, "image not found")
+        return FileResponse(path, media_type="image/png")
+
     @app.post("/api/v1/external/contractCompare", status_code=202)
     async def external_compare(
         request: Request,
@@ -1288,6 +1307,39 @@ def create_app() -> FastAPI:
             headers={
                 "Content-Disposition": (
                     f'inline; filename="{task_id}-page-{page_number:04d}.png"'
+                )
+            },
+        )
+
+    @app.get("/api/v1/external/contractCompare/{task_id}/source-images/{page_number}")
+    async def get_external_source_highlight_image(
+        request: Request,
+        task_id: str,
+        page_number: int,
+        _auth: None = Depends(require_external_api_key),
+    ):
+        request.state.audit_endpoint = "contractCompare.sourceImage"
+        request.state.audit_task_id = task_id
+        request.state.audit_document_no = None
+        if page_number < 1:
+            raise HTTPException(404, "image not found")
+        task = task_manager.get(task_id)
+        if task is not None:
+            is_external = task.external_request
+        else:
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            is_external = bool(rec and rec.external_request)
+        if not is_external:
+            raise HTTPException(404, "task not found")
+        path = external_image_path(task_id, page_number, side="source")
+        if not path.is_file():
+            raise HTTPException(404, "image not found")
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                "Content-Disposition": (
+                    f'inline; filename="{task_id}-source-page-{page_number:04d}.png"'
                 )
             },
         )
@@ -1657,7 +1709,11 @@ def create_app() -> FastAPI:
     @app.get(
         "/api/v1/compare/{task_id}/report",
     )
-    async def download_report(task_id: str, format: str = "json"):
+    async def download_report(
+        task_id: str,
+        format: str = "json",
+        side: Literal["target", "source"] = "target",
+    ):
         task = task_manager.get(task_id)
         report = task.report if task else None
         if report is None:
@@ -1671,16 +1727,31 @@ def create_app() -> FastAPI:
         if format == "json":
             return JSONResponse(content=report.model_dump())
         if format == "pdf":
-            target_path = effective_target_path(task_id)
-            if target_path is None:
-                raise HTTPException(404, "源 PDF 文件已过期,无法生成标注报告")
-            out = settings.reports_dir / f"{task_id}_annotated.pdf"
-            burn_pdf(target_path, report, out)
+            if side == "source":
+                source_path = upload_path(task_id, "source")
+                if source_path is None:
+                    raise HTTPException(404, "原件 PDF 文件已过期,无法生成标注报告")
+                rendered_source = rendered_source_pdf_path(task_id)
+                pdf_path = (
+                    source_path if source_path.suffix.lower() == ".pdf" else rendered_source
+                )
+                if not pdf_path.is_file() or report.source_annotation_status == "unavailable":
+                    raise HTTPException(
+                        409,
+                        report.source_annotation_reason or "原件侧版面标注不可用",
+                    )
+                out = settings.reports_dir / f"{task_id}_source_annotated.pdf"
+            else:
+                pdf_path = effective_target_path(task_id)
+                if pdf_path is None:
+                    raise HTTPException(404, "回收件 PDF 文件已过期,无法生成标注报告")
+                out = settings.reports_dir / f"{task_id}_annotated.pdf"
+            burn_pdf(pdf_path, report, out, side=side)
             return FileResponse(
                 out,
                 media_type="application/pdf",
                 headers={
-                    "Content-Disposition": f'attachment; filename="report-{task_id}.pdf"'
+                    "Content-Disposition": f'attachment; filename="report-{side}-{task_id}.pdf"'
                 },
             )
 
@@ -1699,6 +1770,25 @@ def create_app() -> FastAPI:
             path,
             media_type="application/pdf",
             headers={"Content-Disposition": f'inline; filename="{task_id}-target.pdf"'},
+        )
+
+    @app.get("/api/v1/compare/{task_id}/original-pdf")
+    async def get_original_pdf(task_id: str):
+        """返回原件 PDF 或 DOCX 派生的可视化 PDF 预览。"""
+        source_path = upload_path(task_id, "source")
+        if source_path is None:
+            raise HTTPException(404, "原件文件已过期,无法预览")
+        pdf_path = (
+            source_path
+            if source_path.suffix.lower() == ".pdf"
+            else rendered_source_pdf_path(task_id)
+        )
+        if not pdf_path.is_file():
+            raise HTTPException(409, "原件 DOCX 尚未生成可用的渲染 PDF")
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{task_id}-source.pdf"'},
         )
 
     # —— 无标注版(纯文本 difflib 比对)端点:与 /api/v1/compare 完全独立 ——

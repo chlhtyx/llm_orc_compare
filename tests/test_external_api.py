@@ -87,6 +87,17 @@ def _changed_report(page_count: int = 2) -> TamperReport:
     )
 
 
+def _with_source_highlights(report: TamperReport) -> TamperReport:
+    value = report.model_copy(deep=True)
+    value.source = "source.pdf"
+    value.source_page_meta = list(value.page_meta)
+    value.source_annotation_status = "available"
+    value.diffs[0].source_page_regions = [
+        PageRegion(page_index=0, bbox=[0.1, 0.1, 0.6, 0.2])
+    ]
+    return value
+
+
 @pytest.fixture()
 def external_client(db_isolated, monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
@@ -618,6 +629,29 @@ def test_result_text_and_all_page_images(monkeypatch, tmp_path):
     assert result["highlight_images"] == [
         "https://dc.example.test/api/v1/external/contractCompare/task-1/images/1",
         "https://dc.example.test/api/v1/external/contractCompare/task-1/images/2",
+    ]
+
+
+def test_external_renders_and_exposes_source_highlight_images(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    monkeypatch.setattr(settings, "external_image_dpi", 72)
+    monkeypatch.setattr(settings, "external_public_base_url", "https://dc.example.test")
+    report = _with_source_highlights(_changed_report(page_count=1))
+    target_pdf = tmp_path / "target.pdf"
+    source_pdf = tmp_path / "source.pdf"
+    target_pdf.write_bytes(_pdf_bytes().getvalue())
+    source_pdf.write_bytes(_pdf_bytes().getvalue())
+
+    target_images = render_external_highlight_images(
+        "task-source", target_pdf, report, source_pdf,
+    )
+
+    assert len(target_images) == 1
+    from document_comparison.external_api import external_image_path
+    assert external_image_path("task-source", 1, side="source").is_file()
+    result = build_external_result("task-source", "BILL-SOURCE", report)
+    assert result["source_highlight_images"] == [
+        "https://dc.example.test/api/v1/external/contractCompare/task-source/source-images/1"
     ]
 
 

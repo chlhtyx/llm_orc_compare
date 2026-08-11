@@ -22,7 +22,15 @@ from .models import Block, DocType, RawItem, TamperReport, TruncationRecord
 from .ocr import get_ocr_engine
 from .ocr.quality import apply_recognition_gate
 from .observability import record_ocr_result, timed_stage
-from .parsing import count_pages, estimate_page_count, get_page_metas, parse_word, slice_pdf
+from .parsing import (
+    attach_docx_layout,
+    count_pages,
+    estimate_page_count,
+    extract_text_blocks,
+    get_page_metas,
+    parse_word,
+    slice_pdf,
+)
 from .report import build_report
 from .structure import blocks_to_raw, build_clauses
 
@@ -89,6 +97,67 @@ def _parse_source(
     return parse_word(src_path), "word"
 
 
+def _source_visual_layout(
+    source_path: str | Path,
+    source_doc_type: DocType,
+    source_annotation_pdf_path: str | Path | None,
+    ocr,
+    cfg: Settings,
+) -> tuple[list, list[list[Block]]]:
+    """读取原件侧可视化 PDF 的页信息和真实文本块。
+
+    PDF 原件直接使用上传文件；DOCX 仅接受任务层已经由 LibreOffice 生成的派生
+    PDF。优先取 PDF 原生文本层，只有文本层为空才走 OCR，避免把原件标注变成额外
+    的远端模型调用。无坐标/歧义由后续映射留空，不根据 Word 页序补造位置。
+    """
+    visual_path: Path | None
+    if source_doc_type == "pdf":
+        visual_path = Path(source_path)
+    elif source_annotation_pdf_path is not None:
+        candidate = Path(source_annotation_pdf_path)
+        visual_path = candidate if candidate.is_file() else None
+    else:
+        visual_path = None
+    if visual_path is None:
+        return [], []
+    try:
+        page_metas = get_page_metas(visual_path, cfg.pdf_render_dpi)
+        pages_blocks = extract_text_blocks(visual_path)
+        if not any(pages_blocks):
+            pages_blocks = ocr.recognize(visual_path, page_metas, on_progress=None)
+            pages_blocks = _enforce_ocr_page_indexes(pages_blocks)
+            logger.info("source visual PDF used OCR fallback pages=%s", len(page_metas))
+        else:
+            logger.info("source visual PDF used native text blocks pages=%s", len(page_metas))
+        return page_metas, pages_blocks
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("source visual PDF layout unavailable: %s", exc)
+        return [], []
+
+
+def _apply_docx_annotation_state(report: TamperReport, source_doc_type: DocType) -> None:
+    """为 DOCX 派生 PDF 写入可视化标注状态，而不影响比对结论。"""
+    if source_doc_type != "word":
+        return
+    if not report.source_page_meta:
+        report.source_annotation_status = "unavailable"
+        report.source_annotation_reason = "原始 DOCX 未能渲染为可用 PDF，无法生成版面标注"
+        return
+    source_side_diffs = [
+        diff for diff in [*report.diffs, *report.unmatched_clauses]
+        if diff.status != "added"
+    ]
+    missing = [diff for diff in source_side_diffs if not diff.source_page_regions]
+    if missing:
+        report.source_annotation_status = "partial"
+        report.source_annotation_reason = (
+            "原始 DOCX 已渲染为 PDF；部分差异未能在渲染版面中唯一定位，未标注"
+        )
+    else:
+        report.source_annotation_status = "available"
+        report.source_annotation_reason = ""
+
+
 def run_pipeline(
     word_path: str | Path,
     pdf_path: str | Path,
@@ -104,6 +173,7 @@ def run_pipeline(
     truncate_to_original_pages: bool = False,
     original_page_count: int | None = None,
     truncated_pdf_output_path: str | Path | None = None,
+    source_annotation_pdf_path: str | Path | None = None,
 ) -> TamperReport:
     cfg = cfg or settings
     # 标准管线需要 PDF 标注：PaddleOCR 内容无坐标时追加 Spotting 调用。
@@ -270,6 +340,22 @@ def run_pipeline(
             "llm direct diff located %s/%s hunks (bbox blocks=%s)",
             located, len(raw_report.hunks), with_bbox,
         )
+        source_page_metas, source_pages_blocks = _source_visual_layout(
+            word_path, _word_doc_type, source_annotation_pdf_path, ocr, cfg
+        )
+        source_hunk_regions: list[list] = []
+        if source_page_metas:
+            try:
+                with timed_stage(logger, "llm_direct_source_locate"):
+                    source_hunk_regions = locate_hunk_regions(
+                        raw_report.hunks,
+                        source_pages_blocks,
+                        {m.page_index: m for m in source_page_metas},
+                        side="source",
+                        require_unique_page=_word_doc_type == "word",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("llm direct diff source locate failed: %s", exc)
 
         _progress("compare", 0.90)
         with timed_stage(logger, "compare_and_report"):
@@ -280,12 +366,15 @@ def run_pipeline(
                 truncation=truncation,
                 page_regions=hunk_regions,
                 page_metas=direct_page_metas,
+                source_page_regions=source_hunk_regions,
+                source_page_metas=source_page_metas,
             )
             apply_recognition_gate(
                 report,
                 diagnostics,
                 enable_risk_assessment=enable_risk_assessment,
             )
+            _apply_docx_annotation_state(report, _word_doc_type)
         _progress("compare_done", 1.0)
         logger.info(
             "llm direct diff report diffs=%s similarity=%s status=%s located=%s",
@@ -300,6 +389,11 @@ def run_pipeline(
     _progress("word_parsing", 0.02)
     with timed_stage(logger, "word_parse_and_structure"):
         word_raw, word_doc_type = _parse_source(word_path, ocr, cfg, on_progress=None)
+        source_page_metas, source_pages_blocks = _source_visual_layout(
+            word_path, word_doc_type, source_annotation_pdf_path, ocr, cfg
+        )
+        if word_doc_type == "word" and source_pages_blocks:
+            word_raw, _mapped_items = attach_docx_layout(word_raw, source_pages_blocks)
         # RawSpan 联合对齐成功时不应依赖 Clause 切分；仅在关闭或失败回退时构建。
         word_clauses = (
             None if enable_llm_alignment else build_clauses(word_raw, word_doc_type)
@@ -410,6 +504,7 @@ def run_pipeline(
             pdf_by=pdf_by,
             embed=embed,
             page_metas=page_metas,
+            source_page_metas=source_page_metas,
             thresholds=thresholds,
             source=str(word_path),
             target=str(pdf_path),
@@ -420,6 +515,7 @@ def run_pipeline(
         apply_recognition_gate(
             report, diagnostics, enable_risk_assessment=enable_risk_assessment,
         )
+        _apply_docx_annotation_state(report, word_doc_type)
     _progress("compare_done", 1.0)
 
     return report

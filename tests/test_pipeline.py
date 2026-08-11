@@ -19,6 +19,7 @@ from document_comparison.models import (
 )
 from document_comparison.observability import llm_call_collector
 from document_comparison.parsing.pdf import count_pages, extract_text_blocks
+from document_comparison.parsing.word_render import render_docx_to_pdf
 from document_comparison.pipeline import _parse_source, run_pipeline
 from document_comparison.report.builder import burn_pdf
 
@@ -102,6 +103,151 @@ def test_burn_pdf_renders_deleted_placeholder_as_dashed_rect(tmp_path: Path):
         assert len(rect_drawings) >= 1, "应有 draw_rect 绘制的虚线框"
     finally:
         annotated.close()
+
+
+def test_burn_pdf_marks_source_regions_separately(tmp_path: Path):
+    """原件侧只读取 source_page_regions，不复用回收件坐标。"""
+    source_pdf = tmp_path / "source.pdf"
+    target_pdf = tmp_path / "target.pdf"
+    for path in (source_pdf, target_pdf):
+        doc = fitz.open()
+        doc.new_page(width=595, height=842)
+        doc.save(path)
+        doc.close()
+    report = TamperReport(
+        source=str(source_pdf),
+        target=str(target_pdf),
+        overall_risk="changed",
+        change_status="changed",
+        page_meta=[PageMeta(page_index=0, width_px=1654, height_px=2339, pdf_width_pt=595, pdf_height_pt=842)],
+        source_page_meta=[PageMeta(page_index=0, width_px=1654, height_px=2339, pdf_width_pt=595, pdf_height_pt=842)],
+        source_annotation_status="available",
+        diffs=[Diff(
+            alignment_id="al-source",
+            status="modified",
+            # target 坐标故意落在 source PDF 不存在的第 2 页；若错误复用会没有标注。
+            page_regions=[PageRegion(page_index=1, bbox=[0.6, 0.6, 0.8, 0.7])],
+            source_page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.3, 0.2])],
+        )],
+    )
+
+    out = tmp_path / "source-annotated.pdf"
+    burn_pdf(source_pdf, report, out, side="source")
+
+    with fitz.open(out) as annotated:
+        annots = list(annotated[0].annots() or [])
+        assert len(annots) == 1
+
+
+def test_pipeline_pdf_source_keeps_bidirectional_regions(tmp_path: Path):
+    """PDF 原件经同源 OCR 取得 bbox 后，可为修改同时生成两侧标注。"""
+    source_pdf = tmp_path / "source.pdf"
+    target_pdf = tmp_path / "target.pdf"
+    for path, text in ((source_pdf, "第一条 金额100元"), (target_pdf, "第一条 金额900元")):
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 100), text, fontname="china-s", fontsize=16)
+        doc.save(path)
+        doc.close()
+
+    report = run_pipeline(
+        source_pdf, target_pdf, ocr=_TextLayerOCR(), embed=MockEmbedding(),
+    )
+
+    assert report.source_annotation_status == "available"
+    assert report.source_page_meta
+    changed = next(diff for diff in report.diffs if diff.status == "modified")
+    assert changed.page_regions
+    assert changed.source_page_regions
+
+
+def test_pipeline_docx_source_uses_rendered_pdf_for_real_source_regions(tmp_path: Path):
+    """DOCX 仍按结构解析，比对完成后仅以派生 PDF 的真实 bbox 标注原件。"""
+    word_path = tmp_path / "source.docx"
+    word_path.write_bytes(_make_word([
+        ("h1", "第一条 合同金额"),
+        ("p", "金额为100万元。"),
+    ]).getvalue())
+    rendered_source = tmp_path / "source-rendered.pdf"
+    target_pdf = tmp_path / "target.pdf"
+    rendered_source.write_bytes(_make_pdf_from_lines([
+        "第一条 合同金额",
+        "金额为100万元。",
+    ]).getvalue())
+    target_pdf.write_bytes(_make_pdf_from_lines([
+        "第一条 合同金额",
+        "金额为900万元。",
+    ]).getvalue())
+
+    report = run_pipeline(
+        word_path,
+        target_pdf,
+        source_annotation_pdf_path=rendered_source,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+    )
+
+    assert report.source_annotation_status == "available"
+    assert report.source_page_meta
+    changed = next(diff for diff in report.diffs if diff.status == "modified")
+    assert changed.source_page_regions
+
+
+def test_pipeline_highlights_only_changed_paragraph_block(tmp_path: Path):
+    """同一条款仅末段有差异时，两侧都不能高亮标题和未修改段落。"""
+    word_path = tmp_path / "source.docx"
+    word_path.write_bytes(_make_word([
+        ("h1", "第一条 付款方式"),
+        ("p", "第一款 付款日期为2026年1月1日。"),
+        ("p", "第二款 付款金额为100万元。"),
+    ]).getvalue())
+    rendered_source = tmp_path / "source-rendered.pdf"
+    target_pdf = tmp_path / "target.pdf"
+    rendered_source.write_bytes(_make_pdf_from_lines([
+        "第一条 付款方式",
+        "第一款 付款日期为2026年1月1日。",
+        "第二款 付款金额为100万元。",
+    ]).getvalue())
+    target_pdf.write_bytes(_make_pdf_from_lines([
+        "第一条 付款方式",
+        "第一款 付款日期为2026年1月1日。",
+        "第二款 付款金额为900万元。",
+    ]).getvalue())
+
+    report = run_pipeline(
+        word_path,
+        target_pdf,
+        source_annotation_pdf_path=rendered_source,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+    )
+
+    changed = next(diff for diff in report.diffs if diff.status == "modified")
+    assert len(changed.source_page_regions) == 1
+    assert len(changed.page_regions) == 1
+    # 第三行的真实 bbox；若错误包含标题/第一款，顶部会落在 0.12 之前。
+    assert changed.source_page_regions[0].bbox[1] > 0.11
+    assert changed.page_regions[0].bbox[1] > 0.11
+
+
+def test_render_docx_to_pdf_runs_headless_libreoffice(monkeypatch, tmp_path: Path):
+    """渲染器只产生派生 PDF，且调用固定的 LibreOffice Writer 导出参数。"""
+    import subprocess
+
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"not parsed by mocked libreoffice")
+    output = tmp_path / "reports" / "source-rendered.pdf"
+
+    def _fake_run(command, **kwargs):
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / "source.pdf").write_bytes(b"%PDF-1.4 mocked")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("document_comparison.parsing.word_render.subprocess.run", _fake_run)
+    actual = render_docx_to_pdf(source, output, executable="soffice-test", timeout_seconds=12)
+
+    assert actual == output
+    assert output.read_bytes().startswith(b"%PDF")
 
 
 class _TextLayerOCR:

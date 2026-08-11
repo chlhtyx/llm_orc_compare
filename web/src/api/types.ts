@@ -47,6 +47,8 @@ export interface Diff {
   confidence: EvidenceConfidence
   judged_by: 'rule' | 'llm'
   page_regions: PageRegion[]
+  /** 原件 PDF 或 DOCX 派生 PDF 中经真实文本块验证的高亮区域。 */
+  source_page_regions: PageRegion[]
   alignment_reason: string
   number: string
   title: string
@@ -102,6 +104,9 @@ export interface TamperReport {
   key_elements: KeyElement[]
   unmatched_clauses: Diff[]
   page_meta: PageMeta[]
+  source_page_meta: PageMeta[]
+  source_annotation_status: 'available' | 'partial' | 'unavailable'
+  source_annotation_reason: string
   /** 回收件页数截取记录;null/undefined 表示未发生截断 */
   truncation: TruncationRecord | null
   recognition_status: RecognitionStatus

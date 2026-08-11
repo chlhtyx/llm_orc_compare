@@ -13,11 +13,13 @@
   超时或不完整计划自动回退确定性 Clause 对齐，不再发起第二轮 LLM。
 - 对金额、日期、主体、账号、责任等高风险要素进行 canonical 强校验，并可启用纯文本 LLM 辅助说明。
 - **合同比对默认仅列举差异**(字符级 / 表格单元格级),不做风险判别;在提交选项里传 `enable_risk_assessment=true` 可恢复完整风险分级 + 高风险要素校验 + LLM 辅助说明。
-- **LLM 直接比对**:`options.enable_llm_direct_diff=true`(或外部 API 默认配置 `external_enable_llm_direct_diff`)开启后,跳过条款切分/对齐/裁决,把 Word 与 PDF 各自解析成纯文本后直接交给 LLM 比对差异并标注;结果适配为标准报告,不做风险分级、不生成 PDF 高亮框(无坐标信息)。
+- **LLM 直接比对**:`options.enable_llm_direct_diff=true`(或外部 API 默认配置 `external_enable_llm_direct_diff`)开启后,跳过条款切分/对齐/裁决,把 Word 与 PDF 各自解析成纯文本后直接交给 LLM 比对差异；结果适配为标准报告,不做风险分级。原件/回收件存在可验证版面坐标时会生成对应高亮，缺少坐标则只输出文字差异。
 - 提供标准条款比对和纯文本快速比对两种模式。
 - **金额统计**:一次可上传多个对帐单 PDF(扫描件),OCR 识别表格后用确定性代码抽取并累加金额,聚合输出所有文件的总金额;自动核对「合计/小计」声明值;列定位失败时由多模态 LLM 仅指认金额列(不做算术)。
 - 通过 SSE 实时展示任务进度、各阶段耗时，并支持任务完成 Webhook。
 - 输出 JSON 报告、带差异标注的 PDF，以及带整段高亮的 Word 报告。
+- 原件为 PDF 时直接标注；原件为 DOCX 时由容器内 LibreOffice 生成任务私有派生 PDF，再以其中可验证的文本块坐标标注。报告页、PDF 下载和外部 HTML 可同时展示原件侧旧值/删除内容与回收件侧新值/新增内容；映射不唯一或渲染失败时明确标为部分可用/不可用，不会伪造位置。
+- 外部自包含 HTML 在两侧高亮图均可用时始终以原件/回收件左右分栏展示；滚动任一侧会按页面内容进度同步另一侧，窄屏按可用宽度缩小双栏内容。
 - 报告页可在线查看带坐标的 PDF 差异标注，并可下载高亮 Word 报告。
 - **比对记录持久化**:每次任务(合同比对 / 无标注比对 / 对帐单统计)的元数据、里程碑事件与完整报告 JSON 都写入 Postgres;进程重启后报告仍可打开,并提供独立的「比对记录」页查询历史。
 
@@ -172,6 +174,8 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `DC_PORT` | `8000` | 后端监听端口；Compose 中也用作宿主机映射端口 |
 | `DC_STORAGE_DIR` | `./.dc_data` | 上传文件、配置和日志目录(报告 JSON 不再写文件,只在 Postgres) |
 | `DC_STATIC_DIR` | 空 | 前端静态文件目录；容器内已设为 `/app/static` |
+| `DC_DOCX_RENDERER_PATH` | `soffice` | DOCX 原件派生 PDF 的 LibreOffice 可执行文件；容器内为 `/usr/bin/soffice` |
+| `DC_DOCX_RENDER_TIMEOUT_SECONDS` | `90` | 单个 DOCX 渲染超时；超时只降级原件侧标注，不中断文字比对 |
 | `DC_LOG_LEVEL` | `INFO` | 日志级别，可设为 `DEBUG` |
 | `DATABASE_URL` | 空(必填) | Postgres 连接串;未配置时启动失败。docker-compose 自动注入 |
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(对应 `dc` 用户) |
@@ -224,9 +228,12 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `GET` | `/api/v1/compare/{task_id}` | 查询任务状态和结果 |
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
+| `GET` | `/api/v1/compare/{task_id}/report?format=pdf&side=source` | 下载原件侧标注；DOCX 使用 LibreOffice 派生 PDF，默认 `side=target` 为回收件 |
+| `GET` | `/api/v1/compare/{task_id}/original-pdf` | 预览原件 PDF，或 DOCX 的 LibreOffice 派生 PDF（仅用于视觉标注） |
 | `POST` | `/api/v1/external/contractCompare` | 外部系统提交标准合同比对(`X-API-Key`);默认异步,`sync=true` 同步返回结果 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
+| `GET` | `/api/v1/external/contractCompare/{task_id}/source-images/{page_number}` | 下载原件侧指定页高亮 PNG；DOCX 使用派生 PDF(`X-API-Key`) |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/report.html` | 下载自包含 HTML 比对报告(`X-API-Key`;`result_url` 指向此处,文件名 `【单据号】对比+时间.html`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
 | `POST` | `/api/v1/statement` | 提交金额统计(支持多文件,`target` 字段同键多值) |

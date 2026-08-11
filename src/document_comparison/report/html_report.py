@@ -72,7 +72,7 @@ def _label(diff: Diff) -> str:
 
 
 _CSS = """
-body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:980px;margin:24px auto;padding:0 20px;color:#222;background:#f7f7f9}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:none;margin:24px;padding:0;color:#222;background:#f7f7f9}
 h1{font-size:20px;border-bottom:2px solid #2c7be5;padding-bottom:8px;margin-bottom:4px}
 .meta{display:flex;flex-wrap:wrap;gap:8px 24px;margin:14px 0;font-size:14px}
 .meta b{color:#444}
@@ -93,7 +93,34 @@ footer{margin-top:20px;color:#adb5bd;font-size:12px;text-align:center}
 .pages figure{margin:0;background:#fff;border:1px solid #e3e3e5;border-radius:4px;padding:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .pages figcaption{font-size:12px;color:#868e96;margin-bottom:6px}
 .pages img{display:block;width:100%;height:auto;border:1px solid #f1f3f5}
-@media print{body{background:#fff}table{box-shadow:none}.pages figure{box-shadow:none;break-inside:avoid}}
+.bidirectional-pages{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:24px}
+.comparison-pane{min-width:0;background:#fff;border:1px solid #e3e3e5;border-radius:4px;padding:10px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.comparison-pane h2{font-size:16px;margin:0 0 10px;border-left:4px solid #2c7be5;padding-left:8px}
+.comparison-pane-scroll{max-height:min(78vh,900px);overflow-y:auto;overscroll-behavior:contain;padding-right:4px}
+@media (max-width:900px){body{margin:10px}.bidirectional-pages{gap:6px}.comparison-pane{padding:4px}.comparison-pane h2{font-size:13px;margin-bottom:6px;border-left-width:3px;padding-left:5px}.comparison-pane-scroll{max-height:65vh;padding-right:0}.pages{gap:6px}.pages figure{padding:3px}.pages figcaption{font-size:10px;margin-bottom:3px}}
+@media print{body{background:#fff}table,.comparison-pane{box-shadow:none}.pages figure{box-shadow:none;break-inside:avoid}.bidirectional-pages{display:block}.comparison-pane{margin-top:16px}.comparison-pane-scroll{max-height:none;overflow:visible}}
+"""
+
+_BIDIRECTIONAL_SCROLL_SCRIPT = """
+<script>
+(() => {
+  const source = document.getElementById('source-pages');
+  const target = document.getElementById('target-pages');
+  if (!source || !target) return;
+  let syncing = false;
+  const syncScroll = (from, to) => {
+    if (syncing) return;
+    const fromMax = from.scrollHeight - from.clientHeight;
+    const toMax = to.scrollHeight - to.clientHeight;
+    if (fromMax <= 0 || toMax <= 0) return;
+    syncing = true;
+    to.scrollTop = (from.scrollTop / fromMax) * toMax;
+    requestAnimationFrame(() => { syncing = false; });
+  };
+  source.addEventListener('scroll', () => syncScroll(source, target), { passive: true });
+  target.addEventListener('scroll', () => syncScroll(target, source), { passive: true });
+})();
+</script>
 """
 
 
@@ -102,12 +129,13 @@ def render_html_report(
     report: TamperReport,
     generated_at: datetime,
     highlight_images: list[str] | None = None,
+    source_highlight_images: list[str] | None = None,
 ) -> str:
     """生成自包含 HTML 报告字符串。
 
     ``generated_at`` 用于头部「生成时间」展示(调用方负责转北京时间)。
-    ``highlight_images`` 为可选的每页高亮标注图 data URI(或可访问 URL)列表,
-    非空时在差异表格下方按页内嵌(已标注差异的回收件页面)。
+    ``highlight_images`` 与 ``source_highlight_images`` 分别为回收件、原件的
+    每页高亮标注图 data URI(或可访问 URL)列表，非空时在差异表格下方按页内嵌。
     """
     diffs = [*report.diffs, *report.unmatched_clauses]
     conclusion = _CONCLUSION.get(report.change_status, report.change_status)
@@ -141,18 +169,40 @@ def render_html_report(
         '<tr><td colspan="5" class="empty" style="text-align:center">未发现内容变化</td></tr>'
     )
 
-    # 高亮标注图区:每页一张(烧录差异后的回收件页面)。data URI 内嵌保证单文件自包含。
-    images_html = ""
-    if highlight_images:
+    def _page_figures(images: list[str], side: str) -> str:
         figures = "\n".join(
-            f'<figure><figcaption>第 {idx} 页 / 共 {len(highlight_images)} 页</figcaption>'
-            f'<img alt="高亮标注 第{idx}页" src="{src}"></figure>'
-            for idx, src in enumerate(highlight_images, start=1)
+            f'<figure><figcaption>第 {idx} 页 / 共 {len(images)} 页</figcaption>'
+            f'<img alt="{side}高亮标注 第{idx}页" src="{src}"></figure>'
+            for idx, src in enumerate(images, start=1)
         )
+        return figures
+
+    def _render_images(title: str, images: list[str] | None) -> str:
+        if not images:
+            return ""
+        return (
+            f'<h2 class="pages-title">高亮标注图({title})</h2>'
+            f'<div class="pages">{_page_figures(images, title)}</div>'
+        )
+
+    # 两侧都可用时以独立可滚动面板左右展示，按相对滚动距离同步。
+    # 若某一侧没有定位产物，仍以单侧纵向报告输出，避免出现空白对照栏。
+    if source_highlight_images and highlight_images:
         images_html = (
-            '<h2 class="pages-title">高亮标注图(回收件)</h2>'
-            f'<div class="pages">{figures}</div>'
+            '<div class="bidirectional-pages">'
+            '<section class="comparison-pane"><h2>高亮标注图(原件)</h2>'
+            f'<div id="source-pages" class="comparison-pane-scroll pages">{_page_figures(source_highlight_images, "原件")}</div>'
+            '</section>'
+            '<section class="comparison-pane"><h2>高亮标注图(回收件)</h2>'
+            f'<div id="target-pages" class="comparison-pane-scroll pages">{_page_figures(highlight_images, "回收件")}</div>'
+            '</section></div>'
         )
+        scroll_script = _BIDIRECTIONAL_SCROLL_SCRIPT
+    else:
+        images_html = _render_images("原件", source_highlight_images) + _render_images(
+            "回收件", highlight_images
+        )
+        scroll_script = ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -180,6 +230,7 @@ def render_html_report(
 </table>
 {images_html}
 <footer>本报告由合同篡改检测系统自动生成</footer>
+{scroll_script}
 </body>
 </html>
 """

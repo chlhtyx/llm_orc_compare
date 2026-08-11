@@ -712,6 +712,36 @@ def test_locate_cross_block_fragment_fallback():
     assert len(regions[0]) == 3
 
 
+def test_locate_cross_block_fragment_excludes_unrelated_page_blocks():
+    """跨块命中只能返回覆盖 needle 的最小连续窗口，不能高亮整页。
+
+    DOCX 经 LibreOffice 渲染后通常每个段落/物理行各自成为一个 block。此前
+    跨块回退只要在整页拼接文本里找到 needle，就返回该页全部带 bbox 的 block，
+    导致一个跨行差异把同页其余无差异条款全部高亮。
+    """
+    pmeta = {0: _meta()}
+    blocks = [[
+        Block(block_id="before-1", page_index=0, label="text", bbox=[100, 50, 300, 70], content="第三条 费用及支付方式"),
+        Block(block_id="before-2", page_index=0, label="text", bbox=[100, 75, 300, 95], content="3.2 支付方式无变化"),
+        Block(block_id="match-1", page_index=0, label="text", bbox=[100, 100, 300, 120], content="甲方需在收到通知后3-7个"),
+        Block(block_id="match-2", page_index=0, label="text", bbox=[100, 125, 300, 145], content="工作日内完成验收工作"),
+        Block(block_id="after", page_index=0, label="text", bbox=[100, 150, 300, 170], content="第六条 违约责任"),
+    ]]
+    hunks = [TextDiffHunk(
+        tag="replace",
+        word_lines=["x"],
+        pdf_lines=["甲方需在收到通知后3-7个工作日内完成验收工作"],
+    )]
+
+    regions = locate_hunk_regions(hunks, blocks, pmeta)
+
+    assert len(regions[0]) == 2
+    assert [region.bbox[1] for region in regions[0]] == pytest.approx([
+        100 / pmeta[0].pdf_height_pt,
+        125 / pmeta[0].pdf_height_pt,
+    ])
+
+
 def test_locate_markdown_blocks_without_bbox_fall_back_to_page():
     """SDK markdown fallback 产出的 block 无 bbox 时,若同页有带 bbox 的 block 仍可定位。
 
@@ -890,4 +920,3 @@ def test_judge_uses_shared_helper_on_invalid_json(monkeypatch):
     # 无效输出应沿用规则结论 high,并给出降级说明
     assert risk == "high"
     assert reasons  # 非空,含「沿用规则」类提示
-

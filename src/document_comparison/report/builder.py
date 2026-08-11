@@ -52,6 +52,85 @@ def _normalize_regions(blocks, pmeta: dict[int, PageMeta]) -> list[PageRegion]:
     return regions
 
 
+def _layout_text(text: str) -> str:
+    """版面块定位用文本键：统一兼容字符并忽略排版空白，保留业务标点。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or "")).lower()
+
+
+def _changed_text_ranges(
+    segments: list[DiffSegment], *, side: str
+) -> list[tuple[int, int]]:
+    """返回字符 diff 在指定一侧重建文本中的实际变化区间。
+
+    source 只把 delete 视为存在于原件的变化证据；target 只把 insert 视为存在于
+    回收件的变化证据。equal 仅推进游标，不生成高亮。
+    """
+    if side not in {"source", "target"}:
+        raise ValueError("side 必须为 source 或 target")
+    present_ops = {"equal", "delete"} if side == "source" else {"equal", "insert"}
+    changed_op = "delete" if side == "source" else "insert"
+    cursor = 0
+    ranges: list[tuple[int, int]] = []
+    for segment in segments:
+        if segment.op not in present_ops:
+            continue
+        length = len(_layout_text(segment.text))
+        start = cursor
+        cursor += length
+        if segment.op == changed_op and length:
+            ranges.append((start, cursor))
+    return ranges
+
+
+def _find_block_interval(
+    block_text: str,
+    clause_text: str,
+    search_start: int,
+) -> tuple[int, int] | None:
+    """按文档顺序把真实块文本定位到条款文本，不能唯一验证则返回空。
+
+    编号条款的 ``Clause.text`` 会去掉“第一条”等标题前缀，而 Block 保留原文，
+    因此完整块未命中时允许裁掉块前缀，取最长可验证后缀。只裁前缀，不做模糊
+    相似匹配，避免把重复数字或短语映射到错误段落。
+    """
+    block_key = _layout_text(block_text)
+    if not block_key:
+        return None
+    for prefix_length in range(0, max(1, len(block_key) - 1)):
+        candidate = block_key[prefix_length:]
+        if len(candidate) < 2:
+            break
+        start = clause_text.find(candidate, search_start)
+        if start >= 0:
+            return start, start + len(candidate)
+    return None
+
+
+def _changed_blocks(
+    clause: Clause,
+    segments: list[DiffSegment],
+    *,
+    side: str,
+) -> list:
+    """筛选实际变化字符所在的真实版面块，排除同条款内纯 equal 段落。"""
+    changed_ranges = _changed_text_ranges(segments, side=side)
+    if not changed_ranges:
+        return []
+    clause_text = _layout_text(clause.text)
+    search_start = 0
+    selected: list = []
+    for block in clause.blocks:
+        interval = _find_block_interval(block.content, clause_text, search_start)
+        if interval is None:
+            continue
+        block_start, block_end = interval
+        search_start = block_end
+        if any(block_start < changed_end and changed_start < block_end
+               for changed_start, changed_end in changed_ranges):
+            selected.append(block)
+    return selected
+
+
 def _clean_bbox(bbox: list[float], page_w: float, page_h: float) -> list[float]:
     x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
     left, right = sorted((x1, x2))
@@ -315,6 +394,7 @@ def build_report(
     pdf_by: dict[str, Clause],
     embed,
     page_metas: list[PageMeta],
+    source_page_metas: list[PageMeta] | None = None,
     thresholds: dict[str, float],
     source: str,
     target: str,
@@ -323,6 +403,14 @@ def build_report(
     truncation: TruncationRecord | None = None,
 ) -> TamperReport:
     pmeta = {m.page_index: m for m in page_metas}
+    source_pmeta = {m.page_index: m for m in (source_page_metas or [])}
+
+    def _source_regions(clause: Clause | None) -> list[PageRegion]:
+        """只使用原件侧已验证的真实 bbox，绝不把 DOCX 页序当坐标。"""
+        if clause is None or not source_pmeta:
+            return []
+        return _normalize_regions(clause.blocks, source_pmeta)
+
     diffs: list[Diff] = []
     unmatched: list[Diff] = []
     all_key_elements: list[KeyElement] = []
@@ -380,6 +468,7 @@ def build_report(
                     number=pc.number,
                     title=pc.title,
                     page_regions=_normalize_regions(pc.blocks, pmeta),
+                    source_page_regions=[],
                 )
             else:  # deleted
                 verdict, confidence = _unmatched_verdict(wc) if wc else ("needs_review", "low")
@@ -404,6 +493,7 @@ def build_report(
                     alignment_reason=al.alignment_reason,
                     segments=[DiffSegment(op="delete", text=wc.text)] if wc else [],
                     page_regions=placeholder_regions,
+                    source_page_regions=_source_regions(wc),
                     number=wc.number if wc else "",
                     title=wc.title if wc else "",
                 )
@@ -466,7 +556,12 @@ def build_report(
             confidence=decision.confidence,
             judged_by=judged_by,
             alignment_reason=al.alignment_reason,
-            page_regions=_normalize_regions(pc.blocks, pmeta),
+            page_regions=_normalize_regions(
+                _changed_blocks(pc, segs, side="target"), pmeta
+            ),
+            source_page_regions=_normalize_regions(
+                _changed_blocks(wc, segs, side="source"), source_pmeta
+            ),
             number=wc.number or pc.number,
             title=wc.title or pc.title,
         )
@@ -504,6 +599,11 @@ def build_report(
         key_elements=changed_elems,
         unmatched_clauses=unmatched,
         page_meta=page_metas,
+        source_page_meta=list(source_page_metas or []),
+        source_annotation_status=("available" if source_page_metas else "unavailable"),
+        source_annotation_reason=(
+            "" if source_page_metas else "原件侧没有可用页面坐标"
+        ),
         truncation=truncation,
     )
 
@@ -595,17 +695,27 @@ def burn_pdf(
     pdf_path: str | Path,
     report: TamperReport,
     output_path: str | Path,
+    *,
+    side: str = "target",
 ) -> Path:
-    """在源 PDF 页面上烧录差异标注矩形框,保存为新文件。
+    """在指定一侧 PDF 页面上烧录差异标注矩形框,保存为新文件。
 
-    标注来自 report.diffs 及 unmatched_clauses 中所有带 page_regions 的条款。每个区域:
+    ``side=target`` 使用既有 ``page_regions`` 与 ``page_meta``；
+    ``side=source`` 使用 ``source_page_regions`` 与 ``source_page_meta``。
+    标注来自 report.diffs 及 unmatched_clauses 中所有带对应区域的条款。每个区域:
     - 真实高亮(real): 按风险等级/status 着色半透明实线矩形 + 编号标签
     - 推断占位框(placeholder, deleted 条款): 虚线红框 + 极淡填充 + [缺] 标签
 
     返回输出文件路径。
     """
+    if side not in {"source", "target"}:
+        raise ValueError("side 必须为 source 或 target")
     doc = pymupdf.open(str(pdf_path))
-    pmeta = {m.page_index: m for m in report.page_meta}
+    pmeta = {
+        m.page_index: m
+        for m in (report.source_page_meta if side == "source" else report.page_meta)
+    }
+    region_attr = "source_page_regions" if side == "source" else "page_regions"
     # 逐页收集标注:diffs(已配对 modified) + unmatched 中的 added / deleted 占位框
     page_regions: dict[int, list[tuple[Diff, PageRegion]]] = {}
     targets = [
@@ -613,11 +723,11 @@ def burn_pdf(
         *(
             diff
             for diff in report.unmatched_clauses
-            if diff.status in ("added", "deleted") and diff.page_regions
+            if diff.status in ("added", "deleted") and getattr(diff, region_attr)
         ),
     ]
     for d in targets:
-        for r in d.page_regions:
+        for r in getattr(d, region_attr):
             page_regions.setdefault(r.page_index, []).append((d, r))
 
     for pi in range(len(doc)):
@@ -697,7 +807,7 @@ def burn_pdf(
 
         # 页脚标注
         if regions:
-            footer = f"文档比对 · 本页 {len(regions)} 处差异"
+            footer = f"文档比对 · {'原件' if side == 'source' else '回收件'}本页 {len(regions)} 处差异"
             footer_rect = pymupdf.Rect(36, ph - 24, pw - 36, ph - 10)
             page.insert_textbox(
                 footer_rect,
@@ -727,14 +837,17 @@ def _block_norm_text(s: str) -> str:
 def _match_blocks(
     needle: str,
     pdf_blocks_by_page: dict[int, list],
+    *,
+    require_unique_page: bool = False,
 ) -> list:
     """在 PDF 结构化 blocks 里按归一化子串匹配命中的 block(带 bbox)。
 
     两级匹配:
     1. 逐块匹配:needle 归一化后是某 block content 的子串 → 命中该块(精确)。
-    2. 跨块回退:LLM 摘出的语义片段常跨多个细粒度 block(尤其 SDK markdown
-       模式每行一块)。逐块未中时,把同页所有 block content 联合后做子串匹配,
-       命中则返回该页所有带 bbox 的 block(块级粗定位,保证高亮出现在正确页)。
+    2. 跨块回退:LLM 摘出的语义片段常跨多个细粒度 block(尤其 DOCX 派生
+       PDF/SDK markdown 每行一块)。逐块未中时,把同页 block content 联合后
+       做子串匹配,但只返回覆盖命中字符范围的最小连续 block 窗口。不能返回
+       整页全部 block,否则一个跨行差异会把同页无差异条款全部高亮。
     needle 为空/过短时返回空列表。
     """
     if not needle:
@@ -752,13 +865,41 @@ def _match_blocks(
         # 1) 逐块精确匹配(只在带 bbox 的 block 里找)
         page_hits = [b for b in blocks_with_bbox if n in _block_norm_text(b.content)]
         if not page_hits and blocks_with_bbox:
-            # 2) 跨块回退:联合同页【全部】block 文本(含无 bbox 的,因为 LLM 看到
-            #    的是整篇拼接文本)做子串匹配;命中则返回该页所有带 bbox 的 block
-            #    (块级粗定位,保证高亮出现在正确页)。
-            joined = "".join(_block_norm_text(b.content) for b in blocks_with_content)
-            if n in joined:
-                page_hits = blocks_with_bbox
+            # 2) 跨块回退:保留每个 block 在页内拼接文本中的字符区间。needle
+            #    命中后仅选择与命中区间相交且有 bbox 的 block。无 bbox block
+            #    仍参与拼接匹配，但只有同一命中窗口里的有坐标 block 才能绘制。
+            intervals: list[tuple[object, int, int]] = []
+            joined_parts: list[str] = []
+            offset = 0
+            for block in blocks_with_content:
+                normalized = _block_norm_text(block.content)
+                if not normalized:
+                    continue
+                end = offset + len(normalized)
+                intervals.append((block, offset, end))
+                joined_parts.append(normalized)
+                offset = end
+            joined = "".join(joined_parts)
+            match_start = 0
+            seen_block_ids: set[int] = set()
+            while True:
+                match_start = joined.find(n, match_start)
+                if match_start < 0:
+                    break
+                match_end = match_start + len(n)
+                for block, start, end in intervals:
+                    if end <= match_start or start >= match_end:
+                        continue
+                    if len(getattr(block, "bbox", [])) < 4:
+                        continue
+                    identity = id(block)
+                    if identity not in seen_block_ids:
+                        page_hits.append(block)
+                        seen_block_ids.add(identity)
+                match_start += 1
         hits.extend(page_hits)
+    if require_unique_page and len({block.page_index for block in hits}) != 1:
+        return []
     return hits
 
 
@@ -766,6 +907,9 @@ def locate_hunk_regions(
     hunks: list[TextDiffHunk],
     pages_blocks: list[list],
     pmeta: dict[int, PageMeta],
+    *,
+    side: str = "target",
+    require_unique_page: bool = False,
 ) -> list[list[PageRegion]]:
     """把 LLM 直接比对的 hunks 定位到 PDF 结构化 block 的坐标。
 
@@ -773,8 +917,8 @@ def locate_hunk_regions(
     后,把每个 hunk 的文本片段匹配到对应 block,归一化为 PageRegion 注入报告,
     使该模式也能在报告页渲染高亮框。
 
-    - replace/insert:用 pdf_lines 在 PDF blocks 里子串匹配,命中 block 的 bbox。
-    - delete:回收件无对应内容,参照标准管线占位框语义(kind=placeholder),
+    - target 侧 replace/insert 用 pdf_lines；source 侧 replace/delete 用 word_lines。
+    - target 侧 delete:回收件无对应内容,参照标准管线占位框语义(kind=placeholder),
       位置取上一个已定位 hunk 同页底部偏下(表示「按文档顺序应在此处附近」);
       找不到任何已定位锚点时留空(退化为无高亮,与该模式现状一致)。
     - 匹配失败/无坐标时该 hunk 的 page_regions 为空,不影响其余流程。
@@ -787,12 +931,20 @@ def locate_hunk_regions(
     last_anchor: PageRegion | None = None  # 最近一个带真实坐标的 region
 
     for idx, hunk in enumerate(hunks):
-        # replace/insert 都用 pdf 侧文本定位;delete 用 word 侧但 PDF 无内容 → 走占位框
-        needle_lines = hunk.pdf_lines if hunk.tag in {"replace", "insert"} else []
+        if side not in {"source", "target"}:
+            raise ValueError("side 必须为 source 或 target")
+        # 两侧只定位各自实际存在的文本，绝不在不存在的一侧构造假坐标。
+        needle_lines = (
+            hunk.word_lines if side == "source" and hunk.tag in {"replace", "delete"}
+            else hunk.pdf_lines if side == "target" and hunk.tag in {"replace", "insert"}
+            else []
+        )
         needle = " ".join(needle_lines).strip()
 
         if needle:
-            hits = _match_blocks(needle, pdf_blocks_by_page)
+            hits = _match_blocks(
+                needle, pdf_blocks_by_page, require_unique_page=require_unique_page
+            )
             if hits:
                 # 命中的 block 可能跨页;按 page_index 分组归一化,去重
                 by_page: dict[int, list] = {}
@@ -812,7 +964,7 @@ def locate_hunk_regions(
                 continue
 
         # delete(或匹配失败的 replace/insert)走占位框策略
-        if hunk.tag == "delete" and last_anchor is not None:
+        if side == "target" and hunk.tag == "delete" and last_anchor is not None:
             meta = pmeta.get(last_anchor.page_index)
             if meta and meta.pdf_width_pt and meta.pdf_height_pt:
                 # 贴在锚点下方占一行高度(约页面高度的 2.5%)

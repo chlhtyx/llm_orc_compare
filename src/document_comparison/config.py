@@ -174,6 +174,16 @@ class Settings:
     # 过低(如 100)会让密集文字识别变差甚至更慢。
     pdf_render_dpi: int = 200
 
+    # —— DOCX 原件可视化标注 ——
+    # DOCX 比对仍由 python-docx 结构化解析完成；LibreOffice 仅生成派生 PDF 以取得
+    # 可验证的页面坐标。路径可供精简镜像或宿主替换，默认 Debian 的 soffice。
+    docx_renderer_path: str = field(
+        default_factory=lambda: _env("DC_DOCX_RENDERER_PATH", "soffice")
+    )
+    docx_render_timeout_seconds: float = field(
+        default_factory=lambda: float(_env("DC_DOCX_RENDER_TIMEOUT_SECONDS", "90"))
+    )
+
     # —— PDF 页数上限 ——
     # 提交时若扫描件 PDF 页数超过此值,直接拒绝(返回 400「暂不支持」),不进入流水线。
     # 0 表示不限制。OCR 单页成本较高,长文档易拖垮队列,故设置一个软上限。

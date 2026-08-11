@@ -75,12 +75,18 @@ def validate_public_base_url(value: str) -> str:
     return candidate
 
 
-def external_images_dir(task_id: str) -> Path:
-    return settings.reports_dir / f"{task_id}_images"
+def external_images_dir(task_id: str, *, side: str = "target") -> Path:
+    """返回外部高亮图片目录；目标侧保持历史路径不变。"""
+    root = settings.reports_dir / f"{task_id}_images"
+    if side == "target":
+        return root
+    if side == "source":
+        return root / "source"
+    raise ValueError("side 必须为 source 或 target")
 
 
-def external_image_path(task_id: str, page_number: int) -> Path:
-    return external_images_dir(task_id) / f"page-{page_number:04d}.png"
+def external_image_path(task_id: str, page_number: int, *, side: str = "target") -> Path:
+    return external_images_dir(task_id, side=side) / f"page-{page_number:04d}.png"
 
 
 def external_html_report_path(task_id: str) -> Path:
@@ -117,7 +123,7 @@ def write_external_html_report(
     """生成自包含 HTML 报告并落盘,返回写入路径。
 
     ``finished_at`` 用于头部「生成时间」(北京时间);缺失时用当前时刻。
-    自动内嵌该任务已生成的高亮标注 PNG(``{task_id}_images/page-*.png``,base64 data URI),
+    自动内嵌该任务已生成的原件/回收件高亮标注 PNG(base64 data URI),
     使下载的 HTML 离线即可查看差异标注,不依赖图片端点。
     生成失败只记日志,不抛(调用方在任务主流程中调用,不应因报告渲染失败而中断)。
     """
@@ -125,21 +131,30 @@ def write_external_html_report(
 
     settings.ensure_dirs()
     generated_at = (finished_at or datetime.now(timezone.utc)).astimezone(_BEIJING)
-    # 收集已渲染的高亮标注图(与 render_external_highlight_images 同目录),按页序排序。
-    highlight_images: list[str] = []
-    images_dir = external_images_dir(task_id)
-    if images_dir.is_dir():
+    def _embedded_images(side: str) -> list[str]:
+        images: list[str] = []
+        images_dir = external_images_dir(task_id, side=side)
+        if not images_dir.is_dir():
+            return images
         for png in sorted(images_dir.glob("page-*.png")):
             try:
                 data = png.read_bytes()
             except OSError:  # noqa: BLE001
-                logger.warning("read highlight image failed task=%s page=%s", task_id, png.name)
+                logger.warning("read highlight image failed task=%s side=%s page=%s", task_id, side, png.name)
                 continue
             b64 = base64.b64encode(data).decode("ascii")
-            highlight_images.append(f"data:image/png;base64,{b64}")
+            images.append(f"data:image/png;base64,{b64}")
+        return images
+
+    highlight_images = _embedded_images("target")
+    source_highlight_images = _embedded_images("source")
     try:
         html_text = render_html_report(
-            document_no, report, generated_at, highlight_images=highlight_images
+            document_no,
+            report,
+            generated_at,
+            highlight_images=highlight_images,
+            source_highlight_images=source_highlight_images,
         )
     except Exception:  # noqa: BLE001
         logger.exception("render external html report failed task=%s", task_id)
@@ -147,8 +162,8 @@ def write_external_html_report(
     path = external_html_report_path(task_id)
     path.write_text(html_text, encoding="utf-8")
     logger.info(
-        "external html report written task=%s path=%s pages=%s",
-        task_id, path, len(highlight_images),
+        "external html report written task=%s path=%s target_pages=%s source_pages=%s",
+        task_id, path, len(highlight_images), len(source_highlight_images),
     )
     return path
 
@@ -157,23 +172,37 @@ def render_external_highlight_images(
     task_id: str,
     pdf_path: str | Path,
     report: TamperReport,
+    source_pdf_path: str | Path | None = None,
 ) -> list[Path]:
-    """烧录现有标注后，将实际参与比对的 PDF 全部页面渲染为 PNG。"""
-    settings.ensure_dirs()
-    annotated_pdf = settings.reports_dir / f"{task_id}_external_annotated.pdf"
-    burn_pdf(pdf_path, report, annotated_pdf)
+    """生成回收件 PNG，并在原件 PDF/派生 PDF 可用时额外生成原件侧 PNG。
 
-    output_dir = external_images_dir(task_id)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    zoom = settings.external_image_dpi / 72.0
-    matrix = pymupdf.Matrix(zoom, zoom)
-    paths: list[Path] = []
-    with pymupdf.open(str(annotated_pdf)) as doc:
-        for page_index, page in enumerate(doc):
-            output = external_image_path(task_id, page_index + 1)
-            page.get_pixmap(matrix=matrix, alpha=False, annots=True).save(str(output))
-            paths.append(output)
-    return paths
+    返回值保持既有语义：仅返回回收件图片路径，避免破坏现有调用方。
+    """
+    settings.ensure_dirs()
+
+    def _render_side(path: str | Path, side: str) -> list[Path]:
+        annotated_pdf = settings.reports_dir / f"{task_id}_external_{side}_annotated.pdf"
+        burn_pdf(path, report, annotated_pdf, side=side)
+        output_dir = external_images_dir(task_id, side=side)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        zoom = settings.external_image_dpi / 72.0
+        matrix = pymupdf.Matrix(zoom, zoom)
+        paths: list[Path] = []
+        with pymupdf.open(str(annotated_pdf)) as doc:
+            for page_index, page in enumerate(doc):
+                output = external_image_path(task_id, page_index + 1, side=side)
+                page.get_pixmap(matrix=matrix, alpha=False, annots=True).save(str(output))
+                paths.append(output)
+        return paths
+
+    target_paths = _render_side(pdf_path, "target")
+    if source_pdf_path is not None and report.source_annotation_status in {"available", "partial"}:
+        try:
+            _render_side(source_pdf_path, "source")
+        except Exception:  # noqa: BLE001
+            # 原件侧是对既有回收件产物的增强；不能因它失败而把已完成的比对改为失败。
+            logger.exception("render source highlight images failed task=%s", task_id)
+    return target_paths
 
 
 def _diff_texts(diff: Diff) -> tuple[str, str]:
@@ -248,10 +277,20 @@ def build_external_result(
             )
         )
         page_number += 1
+    source_images: list[str] = []
+    page_number = 1
+    while external_image_path(task_id, page_number, side="source").is_file():
+        source_images.append(
+            _absolute_external_url(
+                f"/api/v1/external/contractCompare/{task_id}/source-images/{page_number}"
+            )
+        )
+        page_number += 1
     return {
         "change_status": report.change_status,
         "result_text": build_result_text(document_no, report),
         "highlight_images": images,
+        "source_highlight_images": source_images,
         # result_url 指向自包含 HTML 报告下载(attachment);JSON 查询仍用
         # GET /api/v1/external/contractCompare/{task_id}。
         "result_url": _absolute_external_url(

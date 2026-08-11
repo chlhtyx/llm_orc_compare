@@ -232,7 +232,11 @@ class Diff(BaseModel):
         default="rule", description="严重度说明来源:rule=确定性规则,llm=LLM 辅助说明"
     )
     page_regions: list[PageRegion] = Field(
-        default_factory=list, description="该条款在 PDF 扫描件上的高亮区域"
+        default_factory=list, description="该条款在回收件 PDF 上的高亮区域"
+    )
+    source_page_regions: list[PageRegion] = Field(
+        default_factory=list,
+        description="该条款在原件 PDF 或 DOCX 派生 PDF 上经真实文本块验证的高亮区域",
     )
     alignment_reason: str = Field(
         default="",
@@ -304,7 +308,20 @@ class TamperReport(BaseModel):
     diffs: list[Diff] = Field(default_factory=list)
     key_elements: list[KeyElement] = Field(default_factory=list)
     unmatched_clauses: list[Diff] = Field(default_factory=list)
+    # 保持 page_meta 的既有语义：它始终属于回收件 PDF。
     page_meta: list[PageMeta] = Field(default_factory=list)
+    source_page_meta: list[PageMeta] = Field(
+        default_factory=list,
+        description="原件 PDF 或 DOCX 派生 PDF 的页面元信息",
+    )
+    source_annotation_status: Literal["available", "partial", "unavailable"] = Field(
+        default="unavailable",
+        description="原件侧是否可生成视觉标注；仅原件 PDF 且取得页元数据时 available",
+    )
+    source_annotation_reason: str = Field(
+        default="",
+        description="原件侧无法标注时的原因；不影响内容比对结论",
+    )
     truncation: TruncationRecord | None = Field(
         default=None,
         description="回收件页数截取记录;None 表示未发生截断(等保审计留痕)",

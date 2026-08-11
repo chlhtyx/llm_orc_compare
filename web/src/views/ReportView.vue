@@ -5,7 +5,7 @@ import ProgressTracker from '@/components/ProgressTracker.vue'
 import DiffList from '@/components/DiffList.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
-import { ApiError, getSourcePdfUrl } from '@/api/compare'
+import { ApiError, getOriginalPdfUrl, getSourcePdfUrl } from '@/api/compare'
 import { useTaskStore } from '@/stores/task'
 import { useReportStore } from '@/stores/report'
 import type { Diff, TamperReport } from '@/api/types'
@@ -44,6 +44,9 @@ taskStore.dispose()
 })
 
 const showPdf = ref(false)
+const showSourcePdf = ref(false)
+const sourceScrollProgress = ref(0)
+const targetScrollProgress = ref(0)
 const filter = ref<'all' | 'risk' | 'modified'>('all')
 const selectedClauseId = ref<string | null>(null)
 
@@ -68,16 +71,35 @@ reportStore.diffs.some((d) => d.risk_level !== 'none'),
 // 高风险要素校验区:仅在报告里实际抽取到要素时才渲染
 // (关闭风险判别时 key_elements 为空,该区自动隐藏)。
 const hasKeyElements = computed<boolean>(() => reportStore.keyElements.length > 0)
+const hasSourcePdfPreview = computed<boolean>(() =>
+  reportStore.report?.source_annotation_status !== 'unavailable',
+)
+const hasBidirectionalPdfPreview = computed<boolean>(() =>
+  hasSourcePdfPreview.value
+  && reportStore.hasPdfHighlights,
+)
 
 const pdfUrl = computed(() => {
 return getSourcePdfUrl(props.taskId)
 })
+const originalPdfUrl = computed(() => getOriginalPdfUrl(props.taskId))
+
+function syncSourcePdfScroll(progress: number) {
+  targetScrollProgress.value = progress
+}
+
+function syncTargetPdfScroll(progress: number) {
+  sourceScrollProgress.value = progress
+}
 
 /** 点击条款 → 选中 + 展开 PDF 预览 + 滚动到对应页 */
 function onSelectClause(id: string) {
   selectedClauseId.value = id
   if (!showPdf.value) {
     showPdf.value = true
+  }
+  if (reportStore.hasSourcePdfHighlights) {
+    showSourcePdf.value = true
   }
 }
 </script>
@@ -219,9 +241,34 @@ function onSelectClause(id: string) {
         />
         </section>
 
-        <section v-if="reportStore.hasPdfHighlights" class="card">
+        <div v-if="hasBidirectionalPdfPreview" class="pdf-preview-grid">
+        <section class="card pdf-preview-card">
         <div class="list-head">
-        <h3 class="section-title" style="margin: 0">PDF 预览</h3>
+        <h3 class="section-title" style="margin: 0">原件渲染 PDF 预览</h3>
+        <button class="chip" @click="showSourcePdf = !showSourcePdf">{{ showSourcePdf ? '收起' : '展开' }}</button>
+        </div>
+        <PdfViewer
+        v-if="showSourcePdf"
+        :pdf-url="originalPdfUrl"
+        :page-meta="reportStore.report.source_page_meta"
+        :diffs="reportStore.sourcePdfHighlights"
+        side="source"
+        fit-to-container
+        contained-scroll
+        :scroll-progress="sourceScrollProgress"
+        :selected-clause-id="selectedClauseId"
+        @select-clause="onSelectClause"
+        @scroll-progress="syncSourcePdfScroll"
+        />
+        <p v-if="reportStore.report.source_annotation_status === 'partial'" class="muted small">
+          {{ reportStore.report.source_annotation_reason }}
+        </p>
+        <p v-else class="muted">展开查看原件 PDF 页面与旧值/删除内容的高亮区域。</p>
+        </section>
+
+        <section class="card pdf-preview-card">
+        <div class="list-head">
+        <h3 class="section-title" style="margin: 0">回收件 PDF 预览</h3>
         <button class="chip" @click="showPdf = !showPdf">{{ showPdf ? '收起' : '展开' }}</button>
         </div>
         <PdfViewer
@@ -229,11 +276,60 @@ function onSelectClause(id: string) {
         :pdf-url="pdfUrl"
         :page-meta="reportStore.report.page_meta"
         :diffs="reportStore.pdfHighlights"
+        side="target"
+        fit-to-container
+        contained-scroll
+        :scroll-progress="targetScrollProgress"
+        :selected-clause-id="selectedClauseId"
+        @select-clause="onSelectClause"
+        @scroll-progress="syncTargetPdfScroll"
+        />
+        <p v-else class="muted">展开查看回收件 PDF 页面与新值/新增内容的高亮区域。</p>
+        </section>
+        </div>
+
+        <template v-else>
+        <section v-if="hasSourcePdfPreview" class="card pdf-preview-card">
+        <div class="list-head">
+        <h3 class="section-title" style="margin: 0">原件 PDF 预览</h3>
+        <button class="chip" @click="showSourcePdf = !showSourcePdf">{{ showSourcePdf ? '收起' : '展开' }}</button>
+        </div>
+        <PdfViewer
+        v-if="showSourcePdf"
+        :pdf-url="originalPdfUrl"
+        :page-meta="reportStore.report.source_page_meta"
+        :diffs="reportStore.sourcePdfHighlights"
+        side="source"
         :selected-clause-id="selectedClauseId"
         @select-clause="onSelectClause"
         />
-        <p v-else class="muted">展开查看 PDF 页面与高亮区域。</p>
+        <p v-if="reportStore.report.source_annotation_status === 'partial'" class="muted small">
+          {{ reportStore.report.source_annotation_reason }}
+        </p>
+        <p v-else class="muted">展开查看原件 PDF 页面与旧值/删除内容的高亮区域。</p>
         </section>
+
+        <section v-else-if="reportStore.report.source_annotation_reason" class="card source-annotation-note">
+          <p class="muted">原件侧标注不可用：{{ reportStore.report.source_annotation_reason }}</p>
+        </section>
+
+        <section v-if="reportStore.hasPdfHighlights" class="card">
+        <div class="list-head">
+        <h3 class="section-title" style="margin: 0">回收件 PDF 预览</h3>
+        <button class="chip" @click="showPdf = !showPdf">{{ showPdf ? '收起' : '展开' }}</button>
+        </div>
+        <PdfViewer
+        v-if="showPdf"
+        :pdf-url="pdfUrl"
+        :page-meta="reportStore.report.page_meta"
+        :diffs="reportStore.pdfHighlights"
+        side="target"
+        :selected-clause-id="selectedClauseId"
+        @select-clause="onSelectClause"
+        />
+        <p v-else class="muted">展开查看回收件 PDF 页面与高亮区域。</p>
+        </section>
+        </template>
     </template>
 
     <section v-else-if="!loadError" class="card">
@@ -252,6 +348,27 @@ gap: 16px;
 .recognition-warning {
   border-left: 4px solid var(--risk-medium);
   background: var(--risk-medium-bg);
+}
+.pdf-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+.pdf-preview-card {
+  min-width: 0;
+  overflow-x: auto;
+}
+@media (max-width: 1100px) {
+  .pdf-preview-grid {
+    gap: 6px;
+  }
+  .pdf-preview-card {
+    padding: 8px;
+  }
+  .pdf-preview-card .section-title {
+    font-size: 14px;
+  }
 }
 .recognition-warning p,
 .recognition-warning ul {

@@ -32,6 +32,8 @@ from .external_api import (
     write_external_html_report,
 )
 from .storage import compared_pdf_path, effective_target_path
+from .storage import rendered_source_pdf_path
+from .parsing import DocxRenderError, render_docx_to_pdf
 from . import webhook
 
 logger = logging.getLogger(__name__)
@@ -294,6 +296,21 @@ class TaskManager:
                 # 所有对话型 LLM 调用记录 append 到同一个 list,任务结束批量入库。
                 with llm_call_collector() as llm_calls:
                     try:
+                        source_annotation_pdf_path: Path | None = None
+                        if Path(word_path).suffix.lower() == ".docx":
+                            rendered_source = rendered_source_pdf_path(task_id)
+                            try:
+                                source_annotation_pdf_path = await asyncio.to_thread(
+                                    render_docx_to_pdf,
+                                    word_path,
+                                    rendered_source,
+                                    executable=settings.docx_renderer_path,
+                                    timeout_seconds=settings.docx_render_timeout_seconds,
+                                )
+                            except DocxRenderError as exc:
+                                # DOCX 可视化标注是增强能力；渲染失败不应阻止原始的
+                                # 结构化文本比对，报告会明确标记原件侧不可用。
+                                logger.warning("source DOCX rendering unavailable: %s", exc)
                         report = await asyncio.to_thread(
                             run_pipeline, word_path, pdf_path, settings,
                             on_progress=self._make_progress_cb(task),
@@ -305,6 +322,7 @@ class TaskManager:
                             truncate_to_original_pages=truncate_to_original_pages,
                             original_page_count=original_page_count,
                             truncated_pdf_output_path=compared_pdf_path(task_id),
+                            source_annotation_pdf_path=source_annotation_pdf_path,
                         )
                     finally:
                         # 模型超时/解析异常会让 pipeline 抛错;仍要落库已收集的
@@ -320,9 +338,15 @@ class TaskManager:
                 # 正常任务必有上传件；这里保留调用方传入路径作兼容兜底，
                 # 使不落盘的测试/自定义执行器仍可生成外部产物。
                 effective_pdf_path = effective_target_path(task_id) or Path(pdf_path)
-                await asyncio.to_thread(
-                    render_external_highlight_images, task_id, effective_pdf_path, report
+                source_pdf_path = (
+                    Path(word_path)
+                    if Path(word_path).suffix.lower() == ".pdf"
+                    else rendered_source_pdf_path(task_id)
                 )
+                render_args = (task_id, effective_pdf_path, report)
+                if source_pdf_path.is_file():
+                    render_args = (*render_args, source_pdf_path)
+                await asyncio.to_thread(render_external_highlight_images, *render_args)
                 # 外部产物同步生成自包含 HTML 报告(供 result_url 下载);
                 # 渲染失败只记日志,不阻断任务主流程(done 状态与回调照常)。
                 try:

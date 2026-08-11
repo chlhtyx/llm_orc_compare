@@ -169,6 +169,14 @@ def compared_pdf_path(task_id: str) -> Path:
     return settings.reports_dir / f"{task_id}_compared.pdf"
 
 
+def rendered_source_pdf_path(task_id: str) -> Path:
+    """返回 DOCX 原件为标注而生成的派生 PDF 固定路径。
+
+    该文件不是上传原件，也不参与文本比对；仅供原件侧坐标、高亮和预览使用。
+    """
+    return settings.reports_dir / f"{task_id}_source_rendered.pdf"
+
+
 def effective_target_path(task_id: str) -> Path | None:
     """返回实际比对的回收件；未截取时回退到上传的原始 PDF。
 

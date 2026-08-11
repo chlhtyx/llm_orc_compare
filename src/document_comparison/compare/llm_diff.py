@@ -407,6 +407,8 @@ def text_diff_to_tamper_report(
     truncation: TruncationRecord | None = None,
     page_regions: list[list[PageRegion]] | None = None,
     page_metas: list[PageMeta] | None = None,
+    source_page_regions: list[list[PageRegion]] | None = None,
+    source_page_metas: list[PageMeta] | None = None,
 ) -> TamperReport:
     """把 LLM 直接比对产出的 TextDiffReport 适配为标准 TamperReport。
 
@@ -443,6 +445,11 @@ def text_diff_to_tamper_report(
 
         title = hunk.context_before[0].strip() if hunk.context_before else ""
         regions = list(page_regions[idx]) if page_regions and idx < len(page_regions) else []
+        source_regions = (
+            list(source_page_regions[idx])
+            if source_page_regions and idx < len(source_page_regions)
+            else []
+        )
         diffs.append(
             Diff(
                 alignment_id=f"llm-diff-{idx + 1}",
@@ -454,6 +461,7 @@ def text_diff_to_tamper_report(
                 judged_by="llm",
                 title=title,
                 page_regions=regions,
+                source_page_regions=source_regions,
             )
         )
 
@@ -476,4 +484,9 @@ def text_diff_to_tamper_report(
         recognition_diagnostics=list(raw.recognition_diagnostics),
         truncation=truncation,
         page_meta=list(page_metas) if page_metas else [],
+        source_page_meta=list(source_page_metas) if source_page_metas else [],
+        source_annotation_status=("available" if source_page_metas else "unavailable"),
+        source_annotation_reason=(
+            "" if source_page_metas else "原件侧没有可用页面坐标"
+        ),
     )

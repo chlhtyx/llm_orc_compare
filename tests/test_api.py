@@ -290,6 +290,93 @@ def test_preview_and_annotated_report_use_truncated_task_pdf(client, monkeypatch
         assert len(doc) == 1
 
 
+def test_original_pdf_preview_and_source_annotated_report(client, monkeypatch, tmp_path):
+    """原件为 PDF 时，内部接口能独立预览和下载原件侧标注。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    from document_comparison.api.app import task_manager
+    from document_comparison.models import Diff, PageMeta, PageRegion, TamperReport
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare")
+    task = task_manager.get(task_id)
+    assert task is not None
+    source = settings.uploads_dir / f"{task_id}-source.pdf"
+    target = settings.uploads_dir / f"{task_id}-target.pdf"
+    for path in (source, target):
+        pdf = fitz.open()
+        pdf.new_page(width=300, height=400)
+        pdf.save(path)
+        pdf.close()
+    page_meta = PageMeta(
+        page_index=0, width_px=300, height_px=400, pdf_width_pt=300, pdf_height_pt=400,
+    )
+    task.report = TamperReport(
+        source=str(source), target=str(target), change_status="changed",
+        page_meta=[page_meta], source_page_meta=[page_meta],
+        source_annotation_status="available",
+        diffs=[Diff(
+            alignment_id="source-diff", status="modified",
+            source_page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+        )],
+    )
+
+    preview = client.get(f"/api/v1/compare/{task_id}/original-pdf")
+    annotated = client.get(f"/api/v1/compare/{task_id}/report?format=pdf&side=source")
+    assert preview.status_code == 200
+    assert annotated.status_code == 200
+    with fitz.open(stream=annotated.content, filetype="pdf") as doc:
+        assert len(doc) == 1
+        assert len(list(doc[0].annots() or [])) == 1
+
+
+def test_docx_rendered_pdf_preview_and_source_annotated_report(client, monkeypatch, tmp_path):
+    """DOCX 原件预览/标注使用任务生成的派生 PDF，而不是改写上传 DOCX。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    from document_comparison.api.app import task_manager
+    from document_comparison.models import Diff, PageMeta, PageRegion, TamperReport
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare")
+    task = task_manager.get(task_id)
+    assert task is not None
+    source = settings.uploads_dir / f"{task_id}-source.docx"
+    target = settings.uploads_dir / f"{task_id}-target.pdf"
+    source.write_bytes(b"uploaded docx remains unchanged")
+    for path in (target, settings.reports_dir / f"{task_id}_source_rendered.pdf"):
+        pdf = fitz.open()
+        pdf.new_page(width=300, height=400)
+        pdf.save(path)
+        pdf.close()
+    page_meta = PageMeta(
+        page_index=0, width_px=300, height_px=400, pdf_width_pt=300, pdf_height_pt=400,
+    )
+    task.report = TamperReport(
+        source=str(source), target=str(target), change_status="changed",
+        page_meta=[page_meta], source_page_meta=[page_meta],
+        source_annotation_status="available",
+        diffs=[Diff(
+            alignment_id="docx-source-diff", status="modified",
+            source_page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+        )],
+    )
+
+    preview = client.get(f"/api/v1/compare/{task_id}/original-pdf")
+    annotated = client.get(f"/api/v1/compare/{task_id}/report?format=pdf&side=source")
+    assert preview.status_code == 200
+    assert annotated.status_code == 200
+    assert source.read_bytes() == b"uploaded docx remains unchanged"
+
+
 def test_compare_rejects_nonpositive_original_page_count(client):
     """original_page_count 必须 >= 1(0 / 负数返回 400)。"""
     import io

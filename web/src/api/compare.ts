@@ -63,6 +63,11 @@ export function getSourcePdfUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/source`)
 }
 
+/** 返回原件 PDF 的可访问 URL；DOCX 原件由服务端明确返回 409。 */
+export function getOriginalPdfUrl(taskId: string): string {
+  return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/original-pdf`)
+}
+
 export interface ProgressHandlers {
   onEvent: (ev: ProgressEvent) => void
   onDone?: (status: TaskStatus) => void

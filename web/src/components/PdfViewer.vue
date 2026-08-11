@@ -13,11 +13,19 @@ const props = defineProps<{
   pdfUrl?: string | null
   pageMeta: PageMeta[]
   diffs: Diff[]
+  side?: 'source' | 'target'
+  /** 双栏预览时按容器宽度缩小页面，避免窄屏退化为单栏或横向溢出。 */
+  fitToContainer?: boolean
+  /** 双栏预览时将页面列表限制为独立滚动窗，供两侧同步滚动。 */
+  containedScroll?: boolean
+  /** 由另一侧推送的相对滚动进度(0-1)。 */
+  scrollProgress?: number
   selectedClauseId?: string | null
 }>()
 
 const emit = defineEmits<{
   selectClause: [clauseId: string]
+  scrollProgress: [progress: number]
 }>()
 
 // ---- 状态 ----
@@ -30,6 +38,12 @@ const pages = ref<{
   height: number
   meta: PageMeta | null
 }[]>([])
+const viewerRoot = ref<HTMLElement | null>(null)
+const pagesContainer = ref<HTMLElement | null>(null)
+const fittedScale = ref(1)
+let resizeObserver: ResizeObserver | null = null
+let renderedContainerWidth = 0
+let applyingSyncedScroll = false
 
 // ---- 整理高亮区域 ----
 interface HighlightRegion {
@@ -43,9 +57,9 @@ interface HighlightRegion {
 
 const allRegions = computed<HighlightRegion[]>(() =>
   props.diffs
-    .filter((d) => d.page_regions.length)
+    .filter((d) => (props.side === 'source' ? (d.source_page_regions ?? []) : d.page_regions).length)
     .flatMap((d) =>
-      d.page_regions.map((r) => ({
+      (props.side === 'source' ? (d.source_page_regions ?? []) : d.page_regions).map((r) => ({
         diffId: d.alignment_id,
         label: [d.number, d.title].filter(Boolean).join(' · ') || d.alignment_id,
         risk: d.risk_level,
@@ -140,6 +154,27 @@ function scrollToPage(pageNum: number) {
   el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+function onPagesScroll() {
+  const container = pagesContainer.value
+  if (!container || !props.containedScroll || applyingSyncedScroll) return
+  const maxScroll = container.scrollHeight - container.clientHeight
+  emit('scrollProgress', maxScroll > 0 ? container.scrollTop / maxScroll : 0)
+}
+
+watch(
+  () => props.scrollProgress,
+  (progress) => {
+    const container = pagesContainer.value
+    if (!container || !props.containedScroll || progress == null) return
+    const maxScroll = container.scrollHeight - container.clientHeight
+    const nextTop = Math.max(0, Math.min(1, progress)) * maxScroll
+    if (Math.abs(container.scrollTop - nextTop) < 1) return
+    applyingSyncedScroll = true
+    container.scrollTop = nextTop
+    requestAnimationFrame(() => { applyingSyncedScroll = false })
+  },
+)
+
 // watch selectedClauseId → 定位到第一个匹配区域所在页
 watch(
   () => props.selectedClauseId,
@@ -166,13 +201,21 @@ async function renderPdf() {
   try {
     const pdf = await pdfjsLib.getDocument({ url: props.pdfUrl, cMapUrl: undefined, cMapPacked: true }).promise
     const newPages: typeof pages.value = []
+    const availableWidth = viewerRoot.value?.clientWidth ?? 0
+    renderedContainerWidth = availableWidth
+    let smallestFit = 1
 
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i)
       const meta = props.pageMeta?.find((m) => m.page_index === i - 1) ?? null
 
       // 使用设备像素比保证在各平台清晰且高亮对齐
-      const scale = dpr.value * zoom.value
+      const baseViewport = page.getViewport({ scale: 1 })
+      const fit = props.fitToContainer && availableWidth > 0
+        ? Math.min(1, Math.max(0.2, (availableWidth - 8) / baseViewport.width))
+        : 1
+      smallestFit = Math.min(smallestFit, fit)
+      const scale = dpr.value * zoom.value * fit
       const viewport = page.getViewport({ scale })
       const canvas = document.createElement('canvas')
       canvas.width = viewport.width
@@ -191,6 +234,7 @@ async function renderPdf() {
     }
 
     pages.value = newPages
+    fittedScale.value = smallestFit
   } catch (e) {
     loadError.value = `PDF 加载失败: ${(e as Error).message}`
   } finally {
@@ -205,25 +249,40 @@ function mountCanvas(canvas: HTMLCanvasElement, container: HTMLElement) {
 }
 
 watch(() => props.pdfUrl, () => { void renderPdf() })
-onMounted(() => { void renderPdf() })
+onMounted(() => {
+  if (viewerRoot.value && props.fitToContainer) {
+    resizeObserver = new ResizeObserver(([entry]) => {
+      const width = entry?.contentRect.width ?? 0
+      if (Math.abs(width - renderedContainerWidth) > 8) void renderPdf()
+    })
+    resizeObserver.observe(viewerRoot.value)
+  }
+  void renderPdf()
+})
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
   pages.value = []
 })
 </script>
 
 <template>
-  <div class="pv">
+  <div ref="viewerRoot" class="pv">
     <div v-if="loading" class="pv-loading muted">PDF 加载中…</div>
     <p v-else-if="loadError" class="pv-err">{{ loadError }}</p>
 
     <!-- 缩放控件 -->
     <div v-if="pages.length" class="pv-toolbar">
       <button class="chip" @click="zoom = Math.max(0.5, zoom - 0.25); renderPdf()">-</button>
-      <span class="zoom-label">{{ Math.round(zoom * 100) }}%</span>
+      <span class="zoom-label">{{ Math.round(zoom * fittedScale * 100) }}%</span>
       <button class="chip" @click="zoom = Math.min(3, zoom + 0.25); renderPdf()">+</button>
     </div>
 
-    <div v-if="pages.length" class="pv-pages">
+    <div
+      v-if="pages.length"
+      ref="pagesContainer"
+      :class="['pv-pages', { 'pv-pages--contained': containedScroll }]"
+      @scroll="onPagesScroll"
+    >
       <div
         v-for="(p, pi) in pages"
         :key="p.pageNum"
@@ -312,6 +371,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 16px;
   align-items: center;
+}
+.pv-pages--contained {
+  max-height: min(76vh, 920px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 .pv-page {
   position: relative;

@@ -24,10 +24,11 @@ FROM python:3.12-slim AS runtime
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_TRUSTED_HOST=mirrors.aliyun.com
 
-# 系统依赖:PyMuPDF / PaddleOCR(OpenCV libGL) 运行库 +
-# curl(健康检查)+ tzdata(时区,日志/时间戳用本地时区)
+# 系统依赖:PyMuPDF / PaddleOCR(OpenCV libGL) 运行库 + LibreOffice 无头 DOCX→PDF
+# 渲染(原件侧标注) + Noto CJK 字体(固定中文排版) + curl(健康检查)+ tzdata(时区)。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl libgl1 tzdata \
+    && apt-get install -y --no-install-recommends \
+        curl libgl1 tzdata libreoffice-writer fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -82,6 +83,7 @@ ENV DC_HOST=0.0.0.0 \
     DC_PORT=8000 \
     DC_STORAGE_DIR=/app/.dc_data \
     DC_STATIC_DIR=/app/static \
+    DC_DOCX_RENDERER_PATH=/usr/bin/soffice \
     TZ=Asia/Shanghai \
     DC_VERSION=${DC_VERSION}
 

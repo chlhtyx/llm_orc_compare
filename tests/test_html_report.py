@@ -155,6 +155,27 @@ def test_render_html_report_with_highlight_images():
     assert "第 2 页 / 共 2 页" in html
     assert 'src="data:image/png;base64,AAA"' in html
     assert 'src="data:image/png;base64,BBB"' in html
+    assert "max-width:none" in html
+
+
+def test_render_html_report_includes_source_highlight_images():
+    report = TamperReport(
+        source="s.pdf", target="t.pdf", change_status="changed", diffs=[_modified_diff()]
+    )
+    html = render_html_report(
+        "BILL-001",
+        report,
+        datetime.now(timezone.utc),
+        highlight_images=["data:image/png;base64,TARGET"],
+        source_highlight_images=["data:image/png;base64,SOURCE"],
+    )
+    assert "高亮标注图(原件)" in html
+    assert "base64,SOURCE" in html
+    assert "高亮标注图(回收件)" in html
+    assert 'class="bidirectional-pages"' in html
+    assert 'id="source-pages"' in html
+    assert 'id="target-pages"' in html
+    assert "syncScroll" in html
 
 
 def test_render_html_report_without_images_omits_section():

@@ -26,6 +26,10 @@ export const useReportStore = defineStore('report', () => {
       (d) => (d.status === 'added' || d.status === 'deleted') && d.page_regions.length > 0,
     ),
   ])
+  const sourcePdfHighlights = computed<Diff[]>(() => [
+    ...diffs.value.filter((d) => (d.source_page_regions ?? []).length > 0),
+    ...unmatched.value.filter((d) => (d.source_page_regions ?? []).length > 0),
+  ])
 
   /** 按风险等级排序的条款差异(high → none)。 */
   const diffsBySeverity = computed<Diff[]>(() =>
@@ -44,6 +48,9 @@ export const useReportStore = defineStore('report', () => {
   const hasPdfHighlights = computed<boolean>(() =>
     pdfHighlights.value.some((d) => d.page_regions.length > 0),
   )
+  const hasSourcePdfHighlights = computed<boolean>(() =>
+    sourcePdfHighlights.value.some((d) => (d.source_page_regions ?? []).length > 0),
+  )
 
  const counts = computed(() => {
    const total = diffs.value.length
@@ -61,10 +68,12 @@ export const useReportStore = defineStore('report', () => {
     keyElements,
     unmatched,
     pdfHighlights,
+    sourcePdfHighlights,
     diffsBySeverity,
     highRiskDiffs,
     changedKeyElements,
     hasPdfHighlights,
+    hasSourcePdfHighlights,
     counts,
     overallRisk,
     set,
