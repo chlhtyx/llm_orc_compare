@@ -30,6 +30,7 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `DC_PORT` | `8000` | 宿主机映射端口(容器内固定 8000) |
+| `DC_FONTS_DIR` | `./fonts` | 可选的授权字体目录，只读挂载到 `/usr/local/share/fonts/authorized`；不要把字体提交到仓库或打进镜像 |
 | `DATABASE_URL` | (compose 自动注入) | Postgres 连接串;必填,未配置则应用启动失败 |
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(`dc` 用户) |
 | `DC_DB_AUTO_MIGRATE` | `1` | 启动时自动 `alembic upgrade head`(默认开);设为 `0` 改由运维手动控制 |
@@ -49,6 +50,18 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 上述 `DC_EXTERNAL_*` 仅作为首次启动或数据库配置不可用时的默认值。该页中的管线
 测试与正式外部接口共用 OCR/LLM 比对选项，会生成真实 OCR/比对调用和全页 PNG，
 但不会发送回调。测试文件与产物按普通任务保存在 `uploads/`、`reports/` 和任务历史中。
+
+## DOCX 渲染字体
+
+镜像内置 Noto CJK、Liberation、Carlito、Caladea，并通过 Fontconfig 为常见 Word 字体提供回退。若合同依赖等线、微软雅黑、宋体、Arial 等授权字体，请在部署机准备只包含授权 `.ttf`、`.ttc`、`.otf` 文件的目录，在 `.env` 中设置 `DC_FONTS_DIR=/srv/document-comparison/fonts`，然后重新部署：
+
+```bash
+docker compose up -d --build
+docker compose exec llm-ocr-compare fc-match "等线"
+docker compose exec llm-ocr-compare fc-match Arial
+```
+
+挂载目录为只读，不会写入上传文件、报告、日志或镜像。字体改变只影响后续 DOCX 派生 PDF；既有 HTML/PNG 报告需重新提交任务生成。
 
 ## 数据持久化
 

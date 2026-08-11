@@ -60,3 +60,6 @@ services:
       # LLM/OCR 配置写入同栈 Postgres(llm_config 表),不再读写此卷下的 llm_config.json
       # 宿主机直接 tail -f ./data/logs/app.log 即可查看日志
       - ./data:/app/.dc_data
+      # 可选:部署方拥有授权的 Word 字体(等线、微软雅黑、宋体、Arial 等)放在
+      # DC_FONTS_DIR。只读挂载，字体不进入镜像、仓库或任务数据目录。
+      - ${DC_FONTS_DIR:-./fonts}:/usr/local/share/fonts/authorized:ro

@@ -25,11 +25,20 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_TRUSTED_HOST=mirrors.aliyun.com
 
 # 系统依赖:PyMuPDF / PaddleOCR(OpenCV libGL) 运行库 + LibreOffice 无头 DOCX→PDF
-# 渲染(原件侧标注) + Noto CJK 字体(固定中文排版) + curl(健康检查)+ tzdata(时区)。
+# 渲染(原件侧标注) + 开源 CJK/Office 兼容字体 + curl(健康检查)+ tzdata(时区)。
+# 等线、微软雅黑、Arial 等受授权约束的字体不打进镜像；部署时可只读挂载到
+# /usr/local/share/fonts/authorized，由 Fontconfig 优先匹配。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl libgl1 tzdata libreoffice-writer fonts-noto-cjk \
+        curl libgl1 tzdata libreoffice-writer fontconfig \
+        fonts-noto-cjk fonts-liberation2 \
+        fonts-crosextra-carlito fonts-crosextra-caladea \
     && rm -rf /var/lib/apt/lists/*
+
+# Word 常用字体的稳定回退顺序。真实授权字体若由部署环境挂载，会保留在
+# 请求族名前并优先命中；本配置只为缺失字体提供开源替代。
+COPY docker/fonts/25-document-comparison.conf /etc/fonts/conf.d/25-document-comparison.conf
+RUN fc-cache -f
 
 WORKDIR /app
 

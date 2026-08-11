@@ -38,6 +38,12 @@ curl http://localhost:8000/health
 
 默认访问地址为 <http://localhost:8000>。当前 `docker-compose.yml` 使用 `${DC_PORT:-3012}` 作为宿主机端口；复制 `.env.example` 后，端口为其中配置的 `DC_PORT=8000`。
 
+### DOCX 渲染字体
+
+镜像内置 Noto CJK、Liberation、Carlito 和 Caladea，并为等线、微软雅黑、宋体、Arial、Calibri、Cambria 等常见 Word 字体配置开源回退。若合同使用的字体有授权，请把 `.ttf`、`.ttc` 或 `.otf` 放入部署机的专用目录，并在 `.env` 设置 `DC_FONTS_DIR`（默认 `./fonts`）。该目录会以只读方式挂载到容器，字体不会进入镜像、Git 仓库或任务数据目录。
+
+字体可减少换行和分页漂移，但不能承诺与 Microsoft Word 完全一致。部署后可运行 `docker compose exec llm-ocr-compare fc-match "等线"` 和 `docker compose exec llm-ocr-compare fc-match Arial` 确认实际命中字体；修改字体后请执行 `docker compose up -d --build` 再重新提交 DOCX 任务。
+
 首次使用时：
 
 1. 打开页面右上角的“设置”。
@@ -176,6 +182,7 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `DC_STATIC_DIR` | 空 | 前端静态文件目录；容器内已设为 `/app/static` |
 | `DC_DOCX_RENDERER_PATH` | `soffice` | DOCX 原件派生 PDF 的 LibreOffice 可执行文件；容器内为 `/usr/bin/soffice` |
 | `DC_DOCX_RENDER_TIMEOUT_SECONDS` | `90` | 单个 DOCX 渲染超时；超时只降级原件侧标注，不中断文字比对 |
+| `DC_FONTS_DIR` | `./fonts` | Compose 只读挂载的授权字体目录；字体不参与 Docker 构建，供 LibreOffice/Fontconfig 运行时发现 |
 | `DC_LOG_LEVEL` | `INFO` | 日志级别，可设为 `DEBUG` |
 | `DATABASE_URL` | 空(必填) | Postgres 连接串;未配置时启动失败。docker-compose 自动注入 |
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(对应 `dc` 用户) |

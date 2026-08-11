@@ -30,3 +30,7 @@ dist/
 .env
 docs/
 README.md
+
+# 授权字体只允许运行时 bind mount，不能进入 Docker build context 或镜像。
+fonts/*
+!fonts/README.md
