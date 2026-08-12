@@ -68,6 +68,11 @@ export function getOriginalPdfUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/original-pdf`)
 }
 
+/** 下载自包含 HTML 报告；包含差异表和可联动跳转的高亮页面。 */
+export function getHtmlReportUrl(taskId: string): string {
+  return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/report?format=html`)
+}
+
 export interface ProgressHandlers {
   onEvent: (ev: ProgressEvent) => void
   onDone?: (status: TaskStatus) => void

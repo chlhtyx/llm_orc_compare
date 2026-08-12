@@ -234,7 +234,7 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `POST` | `/api/v1/compare` | 提交标准条款比对(默认仅列举差异;`options.enable_risk_assessment=true` 开启风险判别) |
 | `GET` | `/api/v1/compare/{task_id}` | 查询任务状态和结果 |
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
-| `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|docx` | 下载报告 |
+| `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|html` | 下载报告；HTML 为自包含文件，差异行可跳转到高亮页 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=pdf&side=source` | 下载原件侧标注；DOCX 使用 LibreOffice 派生 PDF，默认 `side=target` 为回收件 |
 | `GET` | `/api/v1/compare/{task_id}/original-pdf` | 预览原件 PDF，或 DOCX 的 LibreOffice 派生 PDF（仅用于视觉标注） |
 | `POST` | `/api/v1/external/contractCompare` | 外部系统提交标准合同比对(`X-API-Key`);默认异步,`sync=true` 同步返回结果 |

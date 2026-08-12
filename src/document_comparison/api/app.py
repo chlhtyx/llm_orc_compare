@@ -4,7 +4,7 @@
   POST /api/v1/compare              提交(支持 callback_url,可选)
   GET  /api/v1/compare/{task_id}    查询结果
   GET  /api/v1/compare/{task_id}/events   SSE 进度(§7.3)
-  GET  /api/v1/compare/{task_id}/report   下载报告(json/pdf)
+  GET  /api/v1/compare/{task_id}/report   下载报告(json/pdf/html)
   GET  /api/v1/compare/{task_id}/source   获取源 PDF 预览
   GET  /health
 """
@@ -69,9 +69,11 @@ from ..external_api import (
     external_html_report_path,
     external_image_path,
     external_report_filename,
+    render_external_highlight_images,
     require_external_api_key,
     validate_callback_url,
     validate_public_base_url,
+    write_external_html_report,
 )
 from ..tasks import task_manager
 
@@ -1711,7 +1713,7 @@ def create_app() -> FastAPI:
     )
     async def download_report(
         task_id: str,
-        format: str = "json",
+        format: Literal["json", "pdf", "html"] = "json",
         side: Literal["target", "source"] = "target",
     ):
         task = task_manager.get(task_id)
@@ -1754,6 +1756,40 @@ def create_app() -> FastAPI:
                     "Content-Disposition": f'attachment; filename="report-{side}-{task_id}.pdf"'
                 },
             )
+        # Web 端导出与外部 API 的 HTML 使用同一个渲染器：差异表行可跳到
+        # 对应的高亮页面，且整页 PNG 已内嵌，下载后仍可离线查看。
+        target_pdf = effective_target_path(task_id)
+        if target_pdf is None:
+            raise HTTPException(404, "回收件 PDF 文件已过期,无法生成 HTML 报告")
+        source_path = upload_path(task_id, "source")
+        source_pdf = (
+            source_path
+            if source_path is not None and source_path.suffix.lower() == ".pdf"
+            else rendered_source_pdf_path(task_id)
+        )
+        render_args: tuple[Any, ...] = (task_id, target_pdf, report)
+        if source_pdf.is_file():
+            render_args = (*render_args, source_pdf)
+        await asyncio.to_thread(render_external_highlight_images, *render_args)
+        html_path = await asyncio.to_thread(
+            write_external_html_report,
+            task_id,
+            (task.document_no if task else "") or task_id,
+            report,
+        )
+        filename = external_report_filename(
+            (task.document_no if task else "") or task_id,
+            None,
+        )
+        from urllib.parse import quote
+
+        return FileResponse(
+            html_path,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+            },
+        )
 
     @app.get(
         "/api/v1/compare/{task_id}/source",

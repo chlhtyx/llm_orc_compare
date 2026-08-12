@@ -81,6 +81,9 @@ h1{font-size:20px;border-bottom:2px solid #2c7be5;padding-bottom:8px;margin-bott
 table{width:100%;border-collapse:collapse;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:13px}
 th,td{border:1px solid #e3e3e5;padding:8px 10px;vertical-align:top;text-align:left}
 th{background:#f1f3f5;white-space:nowrap}
+tbody tr[data-target-page],tbody tr[data-source-page]{cursor:pointer}
+tbody tr[data-target-page]:hover,tbody tr[data-source-page]:hover{background:#eef6ff}
+tbody tr.report-row-selected{outline:2px solid #2c7be5;outline-offset:-2px;background:#eef6ff}
 .idx{width:36px;color:#888;text-align:center}
 .col-status{width:64px}
 .del{background:#ffe3e3;text-decoration:line-through;border-radius:2px;padding:0 1px}
@@ -106,9 +109,9 @@ _BIDIRECTIONAL_SCROLL_SCRIPT = """
 (() => {
   const source = document.getElementById('source-pages');
   const target = document.getElementById('target-pages');
-  if (!source || !target) return;
   let syncing = false;
   const syncScroll = (from, to) => {
+    if (!from || !to) return;
     if (syncing) return;
     const fromMax = from.scrollHeight - from.clientHeight;
     const toMax = to.scrollHeight - to.clientHeight;
@@ -117,8 +120,41 @@ _BIDIRECTIONAL_SCROLL_SCRIPT = """
     to.scrollTop = (from.scrollTop / fromMax) * toMax;
     requestAnimationFrame(() => { syncing = false; });
   };
-  source.addEventListener('scroll', () => syncScroll(source, target), { passive: true });
-  target.addEventListener('scroll', () => syncScroll(target, source), { passive: true });
+  if (source && target) {
+    source.addEventListener('scroll', () => syncScroll(source, target), { passive: true });
+    target.addEventListener('scroll', () => syncScroll(target, source), { passive: true });
+  }
+
+  const rows = document.querySelectorAll('tr[data-target-page], tr[data-source-page]');
+  const jump = (row) => {
+    const scrollToPage = (container, prefix, page) => {
+      if (!page) return;
+      const figure = document.getElementById(`${prefix}-page-${page}`);
+      if (!figure) return;
+      if (container) {
+        container.scrollTo({
+          top: figure.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop,
+          behavior: 'smooth',
+        });
+      } else {
+        figure.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    };
+    rows.forEach((item) => item.classList.remove('report-row-selected'));
+    row.classList.add('report-row-selected');
+    scrollToPage(source, 'source', row.dataset.sourcePage);
+    scrollToPage(target, 'target', row.dataset.targetPage);
+  };
+  rows.forEach((row) => {
+    row.tabIndex = 0;
+    row.addEventListener('click', () => jump(row));
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        jump(row);
+      }
+    });
+  });
 })();
 </script>
 """
@@ -155,8 +191,19 @@ def render_html_report(
         label_cell = html.escape(_label(diff))
         status_cls = html.escape(diff.status)
         status_text = html.escape(status_zh)
+        # 页码始终由真实报告坐标得出；没有坐标时不输出 data 属性，避免把
+        # 无法定位的差异伪装成可以跳到精确高亮的位置。
+        target_page = next((region.page_index + 1 for region in diff.page_regions), None)
+        source_page = next(
+            (region.page_index + 1 for region in diff.source_page_regions), None
+        )
+        row_attrs = ""
+        if target_page is not None:
+            row_attrs += f' data-target-page="{target_page}"'
+        if source_page is not None:
+            row_attrs += f' data-source-page="{source_page}"'
         rows.append(
-            "<tr>"
+            f"<tr{row_attrs}>"
             f'<td class="idx">{index}</td>'
             f'<td class="col-status"><span class="badge badge-{status_cls}">{status_text}</span></td>'
             f"<td>{label_cell}</td>"
@@ -169,9 +216,9 @@ def render_html_report(
         '<tr><td colspan="5" class="empty" style="text-align:center">未发现内容变化</td></tr>'
     )
 
-    def _page_figures(images: list[str], side: str) -> str:
+    def _page_figures(images: list[str], side: str, dom_prefix: str) -> str:
         figures = "\n".join(
-            f'<figure><figcaption>第 {idx} 页 / 共 {len(images)} 页</figcaption>'
+            f'<figure id="{dom_prefix}-page-{idx}"><figcaption>第 {idx} 页 / 共 {len(images)} 页</figcaption>'
             f'<img alt="{side}高亮标注 第{idx}页" src="{src}"></figure>'
             for idx, src in enumerate(images, start=1)
         )
@@ -182,7 +229,7 @@ def render_html_report(
             return ""
         return (
             f'<h2 class="pages-title">高亮标注图({title})</h2>'
-            f'<div class="pages">{_page_figures(images, title)}</div>'
+            f'<div class="pages">{_page_figures(images, title, "source" if title == "采购部合同" else "target")}</div>'
         )
 
     # 两侧都可用时以独立可滚动面板左右展示，按相对滚动距离同步。
@@ -191,10 +238,10 @@ def render_html_report(
         images_html = (
             '<div class="bidirectional-pages">'
             '<section class="comparison-pane"><h2>高亮标注图(采购部合同)</h2>'
-            f'<div id="source-pages" class="comparison-pane-scroll pages">{_page_figures(source_highlight_images, "采购部合同")}</div>'
+            f'<div id="source-pages" class="comparison-pane-scroll pages">{_page_figures(source_highlight_images, "采购部合同", "source")}</div>'
             '</section>'
             '<section class="comparison-pane"><h2>高亮标注图(供应商合同)</h2>'
-            f'<div id="target-pages" class="comparison-pane-scroll pages">{_page_figures(highlight_images, "供应商合同")}</div>'
+            f'<div id="target-pages" class="comparison-pane-scroll pages">{_page_figures(highlight_images, "供应商合同", "target")}</div>'
             '</section></div>'
         )
         scroll_script = _BIDIRECTIONAL_SCROLL_SCRIPT
@@ -202,7 +249,8 @@ def render_html_report(
         images_html = _render_images("采购部合同", source_highlight_images) + _render_images(
             "供应商合同", highlight_images
         )
-        scroll_script = ""
+        # 单侧高亮图也允许差异行跳到本侧页面；脚本会自动跳过不存在的另一侧。
+        scroll_script = _BIDIRECTIONAL_SCROLL_SCRIPT if (source_highlight_images or highlight_images) else ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">

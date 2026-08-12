@@ -161,6 +161,19 @@ function scrollToPage(pageNum: number) {
   el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+/**
+ * 选中条款时定位到本侧首个真实或推断区域。
+ *
+ * 列表点击会先让父组件展开预览，再挂载 PdfViewer；因此不能只依赖 prop
+ * 改变时的 watcher，还要在 PDF 页面实际渲染、页面 ref 已挂载后再执行一次。
+ */
+function scrollToSelectedClause() {
+  const id = props.selectedClauseId
+    if (!id) return
+  const region = allRegions.value.find((r) => r.diffId === id)
+  if (region) scrollToPage(region.pageIndex)
+}
+
 watch(
   () => props.zoomLevel,
   (nextZoom, previousZoom) => {
@@ -168,16 +181,12 @@ watch(
   },
 )
 
-// watch selectedClauseId → 定位到第一个匹配区域所在页
 watch(
   () => props.selectedClauseId,
-  (id) => {
-    if (!id) return
-    const region = allRegions.value.find((r) => r.diffId === id)
-    if (region) {
-      nextTick(() => scrollToPage(region.pageIndex))
-    }
+  () => {
+    void nextTick(scrollToSelectedClause)
   },
+  { flush: 'post' },
 )
 
 
@@ -228,6 +237,9 @@ async function renderPdf() {
 
     pages.value = newPages
     fittedScale.value = smallestFit
+    // 首次由条款列表展开预览时 selectedClauseId 已存在，等 ref 完整挂载后再跳转。
+    await nextTick()
+    scrollToSelectedClause()
   } catch (e) {
     loadError.value = `PDF 加载失败: ${(e as Error).message}`
   } finally {

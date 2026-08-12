@@ -290,6 +290,52 @@ def test_preview_and_annotated_report_use_truncated_task_pdf(client, monkeypatch
         assert len(doc) == 1
 
 
+def test_html_report_download_embeds_highlight_pages_and_clause_navigation(client, monkeypatch, tmp_path):
+    """Web HTML 导出复用已验证坐标，表格行可跳转到对应高亮页。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    from document_comparison.api.app import task_manager
+    from document_comparison.models import Diff, PageRegion, TamperReport
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare", document_no="WEB-HTML-001")
+    task = task_manager.get(task_id)
+    assert task is not None
+    for role in ("source", "target"):
+        path = settings.uploads_dir / f"{task_id}-{role}.pdf"
+        pdf = fitz.open()
+        pdf.new_page(width=300, height=400)
+        pdf.save(path)
+        pdf.close()
+    task.report = TamperReport(
+        source="source.pdf",
+        target="target.pdf",
+        change_status="changed",
+        source_annotation_status="available",
+        diffs=[Diff(
+            alignment_id="html-nav",
+            status="modified",
+            page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+            source_page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+        )],
+    )
+
+    response = client.get(f"/api/v1/compare/{task_id}/report?format=html")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "attachment;" in response.headers["content-disposition"]
+    assert 'data-target-page="1"' in response.text
+    assert 'data-source-page="1"' in response.text
+    assert 'id="target-page-1"' in response.text
+    assert 'id="source-page-1"' in response.text
+    assert "row.dataset.targetPage" in response.text
+
+
 def test_original_pdf_preview_and_source_annotated_report(client, monkeypatch, tmp_path):
     """原件为 PDF 时，内部接口能独立预览和下载原件侧标注。"""
     try:

@@ -5,7 +5,7 @@ from document_comparison.external_api import (
     external_report_filename,
     safe_filename_stem,
 )
-from document_comparison.models import Diff, DiffSegment, TamperReport
+from document_comparison.models import Diff, DiffSegment, PageRegion, TamperReport
 from document_comparison.report import render_html_report
 
 
@@ -176,6 +176,50 @@ def test_render_html_report_includes_source_highlight_images():
     assert 'id="source-pages"' in html
     assert 'id="target-pages"' in html
     assert "syncScroll" in html
+
+
+def test_html_report_row_jumps_to_verified_highlight_pages():
+    """只把真实报告坐标转为可跳转页码；无坐标条款不生成伪定位。"""
+    located = _modified_diff()
+    located.page_regions = [PageRegion(page_index=2, bbox=[0.1, 0.1, 0.2, 0.2])]
+    located.source_page_regions = [PageRegion(page_index=1, bbox=[0.1, 0.1, 0.2, 0.2])]
+    unlocated = Diff(alignment_id="u-1", status="added")
+    report = TamperReport(
+        source="s.pdf",
+        target="t.pdf",
+        change_status="changed",
+        diffs=[located, unlocated],
+    )
+    html = render_html_report(
+        "BILL-NAV",
+        report,
+        datetime.now(timezone.utc),
+        highlight_images=["data:image/png;base64,TARGET"],
+        source_highlight_images=["data:image/png;base64,SOURCE"],
+    )
+
+    assert '<tr data-target-page="3" data-source-page="2">' in html
+    assert '<figure id="source-page-1">' in html
+    assert '<figure id="target-page-1">' in html
+    assert "report-row-selected" in html
+    assert "row.dataset.targetPage" in html
+    assert '<tr><td class="idx">2</td>' in html
+
+
+def test_html_report_single_side_images_still_support_row_jump():
+    located = _modified_diff()
+    located.page_regions = [PageRegion(page_index=0, bbox=[0.1, 0.1, 0.2, 0.2])]
+    report = TamperReport(source="s", target="t", change_status="changed", diffs=[located])
+    html = render_html_report(
+        "BILL-ONE-SIDE",
+        report,
+        datetime.now(timezone.utc),
+        highlight_images=["data:image/png;base64,TARGET"],
+    )
+
+    assert '<tr data-target-page="1">' in html
+    assert 'id="target-page-1"' in html
+    assert "row.dataset.targetPage" in html
 
 
 def test_render_html_report_without_images_omits_section():
