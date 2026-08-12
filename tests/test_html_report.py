@@ -150,7 +150,7 @@ def test_render_html_report_with_highlight_images():
         datetime(2026, 8, 7, 15, 30),
         highlight_images=["data:image/png;base64,AAA", "data:image/png;base64,BBB"],
     )
-    assert "高亮标注图(回收件)" in html
+    assert "高亮标注图(供应商合同)" in html
     assert "第 1 页 / 共 2 页" in html
     assert "第 2 页 / 共 2 页" in html
     assert 'src="data:image/png;base64,AAA"' in html
@@ -169,9 +169,9 @@ def test_render_html_report_includes_source_highlight_images():
         highlight_images=["data:image/png;base64,TARGET"],
         source_highlight_images=["data:image/png;base64,SOURCE"],
     )
-    assert "高亮标注图(原件)" in html
+    assert "高亮标注图(采购部合同)" in html
     assert "base64,SOURCE" in html
-    assert "高亮标注图(回收件)" in html
+    assert "高亮标注图(供应商合同)" in html
     assert 'class="bidirectional-pages"' in html
     assert 'id="source-pages"' in html
     assert 'id="target-pages"' in html

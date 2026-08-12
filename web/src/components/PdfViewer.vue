@@ -16,16 +16,14 @@ const props = defineProps<{
   side?: 'source' | 'target'
   /** 双栏预览时按容器宽度缩小页面，避免窄屏退化为单栏或横向溢出。 */
   fitToContainer?: boolean
-  /** 双栏预览时将页面列表限制为独立滚动窗，供两侧同步滚动。 */
-  containedScroll?: boolean
-  /** 由另一侧推送的相对滚动进度(0-1)。 */
-  scrollProgress?: number
+  /** 双栏预览共用的缩放倍率；不传时仍由组件独立管理。 */
+  zoomLevel?: number
   selectedClauseId?: string | null
 }>()
 
 const emit = defineEmits<{
   selectClause: [clauseId: string]
-  scrollProgress: [progress: number]
+  updateZoomLevel: [zoomLevel: number]
 }>()
 
 // ---- 状态 ----
@@ -39,11 +37,9 @@ const pages = ref<{
   meta: PageMeta | null
 }[]>([])
 const viewerRoot = ref<HTMLElement | null>(null)
-const pagesContainer = ref<HTMLElement | null>(null)
 const fittedScale = ref(1)
 let resizeObserver: ResizeObserver | null = null
 let renderedContainerWidth = 0
-let applyingSyncedScroll = false
 
 // ---- 整理高亮区域 ----
 interface HighlightRegion {
@@ -139,7 +135,18 @@ function regionIsSelected(r: HighlightRegion): boolean {
 }
 
 // ---- 放大 ----
-const zoom = ref(1.0)
+const localZoom = ref(1.0)
+const zoom = computed(() => props.zoomLevel ?? localZoom.value)
+
+function setZoom(nextZoom: number): void {
+  const boundedZoom = Math.max(0.5, Math.min(3, nextZoom))
+  if (props.zoomLevel == null) {
+    localZoom.value = boundedZoom
+    void renderPdf()
+    return
+  }
+  emit('updateZoomLevel', boundedZoom)
+}
 
 // ---- 滚动到指定页 ----
 const pageRefs = ref<Map<number, HTMLElement>>(new Map())
@@ -154,24 +161,10 @@ function scrollToPage(pageNum: number) {
   el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-function onPagesScroll() {
-  const container = pagesContainer.value
-  if (!container || !props.containedScroll || applyingSyncedScroll) return
-  const maxScroll = container.scrollHeight - container.clientHeight
-  emit('scrollProgress', maxScroll > 0 ? container.scrollTop / maxScroll : 0)
-}
-
 watch(
-  () => props.scrollProgress,
-  (progress) => {
-    const container = pagesContainer.value
-    if (!container || !props.containedScroll || progress == null) return
-    const maxScroll = container.scrollHeight - container.clientHeight
-    const nextTop = Math.max(0, Math.min(1, progress)) * maxScroll
-    if (Math.abs(container.scrollTop - nextTop) < 1) return
-    applyingSyncedScroll = true
-    container.scrollTop = nextTop
-    requestAnimationFrame(() => { applyingSyncedScroll = false })
+  () => props.zoomLevel,
+  (nextZoom, previousZoom) => {
+    if (nextZoom != null && nextZoom !== previousZoom) void renderPdf()
   },
 )
 
@@ -272,23 +265,24 @@ onBeforeUnmount(() => {
 
     <!-- 缩放控件 -->
     <div v-if="pages.length" class="pv-toolbar">
-      <button class="chip" @click="zoom = Math.max(0.5, zoom - 0.25); renderPdf()">-</button>
+      <button class="chip" @click="setZoom(zoom - 0.25)">-</button>
       <span class="zoom-label">{{ Math.round(zoom * fittedScale * 100) }}%</span>
-      <button class="chip" @click="zoom = Math.min(3, zoom + 0.25); renderPdf()">+</button>
+      <button class="chip" @click="setZoom(zoom + 0.25)">+</button>
     </div>
 
     <div
       v-if="pages.length"
-      ref="pagesContainer"
-      :class="['pv-pages', { 'pv-pages--contained': containedScroll }]"
-      @scroll="onPagesScroll"
+      class="pv-pages"
     >
       <div
         v-for="(p, pi) in pages"
         :key="p.pageNum"
         :ref="(el) => setPageRef(pi, el as Element)"
         class="pv-page"
-        :style="{ width: `${p.width}px`, height: `${p.height}px` }"
+        :style="{
+          width: `${p.width}px`,
+          aspectRatio: `${p.width} / ${p.height}`,
+        }"
       >
         <!-- canvas 层 -->
         <div class="pv-canvas-wrap" :ref="(el) => el && mountCanvas(p.canvas, el as HTMLElement)" />
@@ -367,18 +361,16 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
 }
 .pv-pages {
+  width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  align-items: center;
-}
-.pv-pages--contained {
-  max-height: min(76vh, 920px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 4px;
+  align-items: flex-start;
 }
 .pv-page {
+  flex: 0 0 auto;
+  margin-inline: auto;
   position: relative;
   border: 1px solid var(--border);
   border-radius: 2px;
@@ -393,7 +385,7 @@ onBeforeUnmount(() => {
 .pv-canvas-wrap :deep(canvas) {
   display: block;
   width: 100%;
-  height: 100%;
+  height: auto;
 }
 .pv-overlay {
   position: absolute;

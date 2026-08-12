@@ -134,7 +134,7 @@ def render_html_report(
     """生成自包含 HTML 报告字符串。
 
     ``generated_at`` 用于头部「生成时间」展示(调用方负责转北京时间)。
-    ``highlight_images`` 与 ``source_highlight_images`` 分别为回收件、原件的
+    ``highlight_images`` 与 ``source_highlight_images`` 分别为供应商合同、采购部合同的
     每页高亮标注图 data URI(或可访问 URL)列表，非空时在差异表格下方按页内嵌。
     """
     diffs = [*report.diffs, *report.unmatched_clauses]
@@ -190,17 +190,17 @@ def render_html_report(
     if source_highlight_images and highlight_images:
         images_html = (
             '<div class="bidirectional-pages">'
-            '<section class="comparison-pane"><h2>高亮标注图(原件)</h2>'
-            f'<div id="source-pages" class="comparison-pane-scroll pages">{_page_figures(source_highlight_images, "原件")}</div>'
+            '<section class="comparison-pane"><h2>高亮标注图(采购部合同)</h2>'
+            f'<div id="source-pages" class="comparison-pane-scroll pages">{_page_figures(source_highlight_images, "采购部合同")}</div>'
             '</section>'
-            '<section class="comparison-pane"><h2>高亮标注图(回收件)</h2>'
-            f'<div id="target-pages" class="comparison-pane-scroll pages">{_page_figures(highlight_images, "回收件")}</div>'
+            '<section class="comparison-pane"><h2>高亮标注图(供应商合同)</h2>'
+            f'<div id="target-pages" class="comparison-pane-scroll pages">{_page_figures(highlight_images, "供应商合同")}</div>'
             '</section></div>'
         )
         scroll_script = _BIDIRECTIONAL_SCROLL_SCRIPT
     else:
-        images_html = _render_images("原件", source_highlight_images) + _render_images(
-            "回收件", highlight_images
+        images_html = _render_images("采购部合同", source_highlight_images) + _render_images(
+            "供应商合同", highlight_images
         )
         scroll_script = ""
 
@@ -223,7 +223,7 @@ def render_html_report(
   <div><b>生成时间:</b>{html.escape(stamp)}</div>
 </div>
 <table>
-<thead><tr><th class="idx">#</th><th class="col-status">状态</th><th>条款</th><th>原始合同</th><th>回收件</th></tr></thead>
+<thead><tr><th class="idx">#</th><th class="col-status">状态</th><th>条款</th><th>采购部合同</th><th>供应商合同</th></tr></thead>
 <tbody>
 {rows_html}
 </tbody>

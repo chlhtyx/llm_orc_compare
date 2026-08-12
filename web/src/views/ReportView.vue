@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ProgressTracker from '@/components/ProgressTracker.vue'
-import DiffList from '@/components/DiffList.vue'
+import DiffComparisonTable from '@/components/DiffComparisonTable.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
 import { ApiError, getOriginalPdfUrl, getSourcePdfUrl } from '@/api/compare'
@@ -43,10 +43,8 @@ onBeforeUnmount(() => {
 taskStore.dispose()
 })
 
-const showPdf = ref(false)
-const showSourcePdf = ref(false)
-const sourceScrollProgress = ref(0)
-const targetScrollProgress = ref(0)
+const showPreview = ref(false)
+const sharedPdfZoom = ref(1)
 const filter = ref<'all' | 'risk' | 'modified'>('all')
 const selectedClauseId = ref<string | null>(null)
 
@@ -57,7 +55,7 @@ const changeStatusText = computed(() => ({
 }[reportStore.report?.change_status ?? 'clean']))
 
 const visibleDiffs = computed<Diff[]>(() => {
-const list = reportStore.diffsBySeverity
+const list = reportStore.diffs
 if (filter.value === 'risk') return list.filter((d) => d.risk_level !== 'none')
 if (filter.value === 'modified') return list.filter((d) => d.status === 'modified')
 return list
@@ -84,23 +82,10 @@ return getSourcePdfUrl(props.taskId)
 })
 const originalPdfUrl = computed(() => getOriginalPdfUrl(props.taskId))
 
-function syncSourcePdfScroll(progress: number) {
-  targetScrollProgress.value = progress
-}
-
-function syncTargetPdfScroll(progress: number) {
-  sourceScrollProgress.value = progress
-}
-
 /** 点击条款 → 选中 + 展开 PDF 预览 + 滚动到对应页 */
 function onSelectClause(id: string) {
   selectedClauseId.value = id
-  if (!showPdf.value) {
-    showPdf.value = true
-  }
-  if (reportStore.hasSourcePdfHighlights) {
-    showSourcePdf.value = true
-  }
+  showPreview.value = true
 }
 </script>
 
@@ -134,11 +119,11 @@ function onSelectClause(id: string) {
           v-if="reportStore.report.truncation"
           class="card truncation-warning"
         >
-          <h3 class="section-title">回收件页数已截取</h3>
+          <h3 class="section-title">供应商合同页数已截取</h3>
           <p>
-            回收 PDF 共
+            供应商合同 PDF 共
             <strong>{{ reportStore.report.truncation.original_pdf_page_count }}</strong> 页,
-            超过原始合同
+            超过采购部合同
             <strong>{{ reportStore.report.truncation.original_doc_page_count }}</strong> 页
             <span class="muted small">
               ({{
@@ -184,38 +169,20 @@ function onSelectClause(id: string) {
           </ul>
         </section>
 
-        <section class="card">
-        <div class="summary">
-        <div class="sum-item">
-            <span :class="['verdict-badge', `verdict-${reportStore.report?.change_status ?? 'clean'}`]">
-              {{ changeStatusText }}
-            </span>
-        </div>
-        <div class="sum-item">
-            <span class="sum-num">{{ reportStore.counts.total }}</span>
-            <span class="muted">条款总数</span>
-        </div>
-        <div class="sum-item">
-            <span class="sum-num warn">{{ reportStore.counts.modified }}</span>
-            <span class="muted">已修改</span>
-        </div>
-        <div class="sum-item">
-            <span class="sum-num">{{ reportStore.counts.added }}</span>
-            <span class="muted">PDF 新增</span>
-        </div>
-        <div class="sum-item">
-            <span class="sum-num">{{ reportStore.counts.deleted }}</span>
-           <span class="muted">缺失</span>
-       </div>
-       </div>
-       </section>
+        <section class="card report-meta">
+          <div><b>任务编号:</b> {{ taskId }}</div>
+          <div><b>结论:</b> <span :class="['verdict-badge', `verdict-${reportStore.report.change_status}`]">{{ changeStatusText }}</span></div>
+          <div><b>识别状态:</b> {{ reportStore.report.recognition_status === 'reliable' ? '可靠' : '待人工复核' }}</div>
+          <div><b>高亮定位:</b> {{ ({ complete: '完整', partial: '部分缺失', missing: '缺失' })[reportStore.report.location_status] }}</div>
+          <div><b>差异数量:</b> {{ reportStore.counts.total + reportStore.counts.unmatched }}</div>
+        </section>
 
         <section v-if="hasKeyElements" class="card">
         <h3 class="section-title">高风险要素校验</h3>
         <KeyElementTable :elements="reportStore.keyElements" />
         </section>
 
-        <section class="card">
+        <section class="card diff-section">
         <div class="list-head">
         <h3 class="section-title" style="margin: 0">条款差异</h3>
         <div class="filters">
@@ -224,78 +191,75 @@ function onSelectClause(id: string) {
             <button :class="['chip', { on: filter === 'modified' }]" @click="filter = 'modified'">已修改</button>
         </div>
         </div>
-        <DiffList
+        <DiffComparisonTable
           :diffs="visibleDiffs"
           :selected-clause-id="selectedClauseId"
           @select="onSelectClause"
         />
         </section>
 
-        <section v-if="reportStore.unmatched.length" class="card">
+        <section v-if="reportStore.unmatched.length" class="card diff-section">
         <h3 class="section-title">未对齐条款({{ reportStore.counts.unmatched }})</h3>
-        <DiffList
+        <DiffComparisonTable
           :diffs="reportStore.unmatched"
-          empty-hint="无"
           :selected-clause-id="selectedClauseId"
           @select="onSelectClause"
         />
         </section>
 
-        <div v-if="hasBidirectionalPdfPreview" class="pdf-preview-grid">
-        <section class="card pdf-preview-card">
+        <section v-if="hasBidirectionalPdfPreview" class="card pdf-comparison-card">
         <div class="list-head">
-        <h3 class="section-title" style="margin: 0">原件渲染 PDF 预览</h3>
-        <button class="chip" @click="showSourcePdf = !showSourcePdf">{{ showSourcePdf ? '收起' : '展开' }}</button>
+        <h3 class="section-title" style="margin: 0">合同高亮预览</h3>
+        <button class="chip" @click="showPreview = !showPreview">{{ showPreview ? '统一收起' : '统一展开' }}</button>
         </div>
+
+        <div v-if="showPreview" class="pdf-preview-scroll">
+        <div class="pdf-preview-grid">
+        <section class="pdf-preview-pane">
+        <h4 class="preview-pane-title">采购部合同</h4>
         <PdfViewer
-        v-if="showSourcePdf"
         :pdf-url="originalPdfUrl"
         :page-meta="reportStore.report.source_page_meta"
         :diffs="reportStore.sourcePdfHighlights"
         side="source"
         fit-to-container
-        contained-scroll
-        :scroll-progress="sourceScrollProgress"
+        :zoom-level="sharedPdfZoom"
         :selected-clause-id="selectedClauseId"
         @select-clause="onSelectClause"
-        @scroll-progress="syncSourcePdfScroll"
+        @update:zoom-level="sharedPdfZoom = $event"
         />
         <p v-if="reportStore.report.source_annotation_status === 'partial'" class="muted small">
           {{ reportStore.report.source_annotation_reason }}
         </p>
-        <p v-else class="muted">展开查看原件 PDF 页面与旧值/删除内容的高亮区域。</p>
         </section>
 
-        <section class="card pdf-preview-card">
-        <div class="list-head">
-        <h3 class="section-title" style="margin: 0">回收件 PDF 预览</h3>
-        <button class="chip" @click="showPdf = !showPdf">{{ showPdf ? '收起' : '展开' }}</button>
-        </div>
+        <section class="pdf-preview-pane">
+        <h4 class="preview-pane-title">供应商合同</h4>
         <PdfViewer
-        v-if="showPdf"
         :pdf-url="pdfUrl"
         :page-meta="reportStore.report.page_meta"
         :diffs="reportStore.pdfHighlights"
         side="target"
         fit-to-container
-        contained-scroll
-        :scroll-progress="targetScrollProgress"
+        :zoom-level="sharedPdfZoom"
         :selected-clause-id="selectedClauseId"
         @select-clause="onSelectClause"
-        @scroll-progress="syncTargetPdfScroll"
+        @update:zoom-level="sharedPdfZoom = $event"
         />
-        <p v-else class="muted">展开查看回收件 PDF 页面与新值/新增内容的高亮区域。</p>
         </section>
         </div>
+        </div>
+        <p v-else class="muted preview-collapsed-hint">统一展开后可同步查看、滚动和缩放采购部合同与供应商合同。</p>
+        </section>
 
         <template v-else>
         <section v-if="hasSourcePdfPreview" class="card pdf-preview-card">
         <div class="list-head">
-        <h3 class="section-title" style="margin: 0">原件 PDF 预览</h3>
-        <button class="chip" @click="showSourcePdf = !showSourcePdf">{{ showSourcePdf ? '收起' : '展开' }}</button>
+        <h3 class="section-title" style="margin: 0">采购部合同 PDF 预览</h3>
+        <button class="chip" @click="showPreview = !showPreview">{{ showPreview ? '收起' : '展开' }}</button>
         </div>
         <PdfViewer
-        v-if="showSourcePdf"
+        v-if="showPreview"
         :pdf-url="originalPdfUrl"
         :page-meta="reportStore.report.source_page_meta"
         :diffs="reportStore.sourcePdfHighlights"
@@ -306,20 +270,20 @@ function onSelectClause(id: string) {
         <p v-if="reportStore.report.source_annotation_status === 'partial'" class="muted small">
           {{ reportStore.report.source_annotation_reason }}
         </p>
-        <p v-else class="muted">展开查看原件 PDF 页面与旧值/删除内容的高亮区域。</p>
+        <p v-else class="muted">展开查看采购部合同 PDF 页面与旧值/删除内容的高亮区域。</p>
         </section>
 
         <section v-else-if="reportStore.report.source_annotation_reason" class="card source-annotation-note">
-          <p class="muted">原件侧标注不可用：{{ reportStore.report.source_annotation_reason }}</p>
+          <p class="muted">采购部合同侧标注不可用：{{ reportStore.report.source_annotation_reason }}</p>
         </section>
 
         <section v-if="reportStore.hasPdfHighlights" class="card">
         <div class="list-head">
-        <h3 class="section-title" style="margin: 0">回收件 PDF 预览</h3>
-        <button class="chip" @click="showPdf = !showPdf">{{ showPdf ? '收起' : '展开' }}</button>
+        <h3 class="section-title" style="margin: 0">供应商合同 PDF 预览</h3>
+        <button class="chip" @click="showPreview = !showPreview">{{ showPreview ? '收起' : '展开' }}</button>
         </div>
         <PdfViewer
-        v-if="showPdf"
+        v-if="showPreview"
         :pdf-url="pdfUrl"
         :page-meta="reportStore.report.page_meta"
         :diffs="reportStore.pdfHighlights"
@@ -327,7 +291,7 @@ function onSelectClause(id: string) {
         :selected-clause-id="selectedClauseId"
         @select-clause="onSelectClause"
         />
-        <p v-else class="muted">展开查看回收件 PDF 页面与高亮区域。</p>
+        <p v-else class="muted">展开查看供应商合同 PDF 页面与高亮区域。</p>
         </section>
         </template>
     </template>
@@ -352,8 +316,38 @@ gap: 16px;
 .pdf-preview-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
+  align-items: stretch;
   gap: 16px;
+}
+.pdf-preview-scroll {
+  width: 100%;
+  max-height: min(76vh, 920px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.pdf-comparison-card {
+  min-width: 0;
+}
+.pdf-preview-pane {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.preview-pane-title {
+  min-height: 24px;
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.preview-collapsed-hint {
+  margin: 0;
 }
 .pdf-preview-card {
   min-width: 0;
@@ -364,6 +358,9 @@ gap: 16px;
     gap: 6px;
   }
   .pdf-preview-card {
+    padding: 8px;
+  }
+  .pdf-preview-pane {
     padding: 8px;
   }
   .pdf-preview-card .section-title {
@@ -399,6 +396,26 @@ display: flex;
 flex-wrap: wrap;
 gap: 24px;
 align-items: center;
+}
+.report-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+  font-size: 14px;
+}
+.report-meta b {
+  color: #444;
+  margin-right: 4px;
+}
+.diff-section {
+  padding: 0;
+  overflow: hidden;
+}
+.diff-section .list-head,
+.diff-section > .section-title {
+  margin: 16px 20px 12px;
 }
 .sum-item {
 display: flex;
