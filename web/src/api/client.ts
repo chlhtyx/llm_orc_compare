@@ -1,6 +1,9 @@
 // 极简 HTTP 客户端:
 // - 统一错误归一化为 ApiError {code, message, request_id}
 // - 提供 fetch + ReadableStream 的 SSE 读取
+// - 控制台会话失效(401)时统一跳登录页
+import router from '@/router'
+
 export interface NormalizedError {
   code: number
   message: string
@@ -32,6 +35,29 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
+/**
+ * 控制台会话失效(401)时跳登录页并带回跳地址。仅针对控制台业务接口:
+ * /api/v1/auth/*(登录本身)、/api/v1/external/* 与 api-test(独立 X-API-Key)
+ * 的 401 属于业务错误,不触发跳转。
+ */
+const CONSOLE_401_EXEMPT_PREFIXES = ['/api/v1/auth/', '/api/v1/external/']
+const CONSOLE_401_EXEMPT_PATHS = ['/api/v1/compare/api-test']
+
+function redirectToLoginOnConsole401(path: string): void {
+  if (!path.startsWith('/api/')) return
+  if (
+    CONSOLE_401_EXEMPT_PREFIXES.some((p) => path.startsWith(p)) ||
+    CONSOLE_401_EXEMPT_PATHS.includes(path)
+  ) {
+    return
+  }
+  if (router.currentRoute.value.name === 'login') return
+  router.push({
+    name: 'login',
+    query: { redirect: router.currentRoute.value.fullPath },
+  })
+}
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const headers = new Headers()
   if (opts.body instanceof FormData) {
@@ -56,6 +82,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (!res.ok) {
+    if (res.status === 401) redirectToLoginOnConsole401(path)
     throw new ApiError(await normalizeError(res))
   }
 
@@ -106,6 +133,7 @@ export function openEventStream(path: string, handlers: SSEHandlers): AbortContr
       return
     }
     if (!res.ok || !res.body) {
+      if (!res.ok && res.status === 401) redirectToLoginOnConsole401(path)
       handlers.onError?.(new ApiError(await normalizeError(res)))
       return
     }

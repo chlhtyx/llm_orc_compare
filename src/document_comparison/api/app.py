@@ -62,6 +62,17 @@ from ..storage import (
 from ..report.builder import burn_pdf
 from ..compare.llm_diff import DEFAULT_DIFF_SYSTEM_PROMPT
 from .. import webhook
+from ..console_auth import (
+    COOKIE_NAME,
+    clear_login_failures,
+    console_auth_enabled,
+    console_auth_required,
+    issue_session_token,
+    login_rate_limited,
+    record_login_failure,
+    verify_console_password,
+    verify_session_token,
+)
 from ..external_api import (
     build_external_result,
     build_external_statement_result,
@@ -578,6 +589,23 @@ def create_app() -> FastAPI:
                 ))
 
     @app.middleware("http")
+    async def _console_auth_middleware(request, call_next):
+        """控制台口令鉴权中间件(DC_CONSOLE_PASSWORD 非空时生效)。
+
+        注册在 scan_protection 之内、access log 之外:被拒的 401 会进 access log,
+        也能带上 scan_protection 补充的安全响应头。豁免名单见
+        console_auth.console_auth_required;会话校验为无状态 HMAC,多 worker 免共享。
+        """
+        if not console_auth_enabled() or not console_auth_required(request.url.path):
+            return await call_next(request)
+        if not verify_session_token(request.cookies.get(COOKIE_NAME, "")):
+            return JSONResponse(
+                status_code=401,
+                content={"code": 401, "message": "console authentication required"},
+            )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def _scan_protection_middleware(request, call_next):
         """在路由前拒绝常见漏洞扫描请求，并为所有响应补充安全头。
 
@@ -653,6 +681,54 @@ def create_app() -> FastAPI:
     async def version():
         """返回应用版本号(单一真相源:.env 的 DC_VERSION;回退到 package __version__)。"""
         return {"version": settings.version}
+
+    # —— 控制台口令鉴权(DC_CONSOLE_PASSWORD 非空时启用,端点自身豁免于鉴权中间件)——
+    @app.get("/api/v1/auth/status")
+    async def auth_status(request: Request):
+        """登录状态(免鉴权):前端据此决定是否先跳登录页。"""
+        auth_required = console_auth_enabled()
+        authenticated = (
+            verify_session_token(request.cookies.get(COOKIE_NAME, ""))
+            if auth_required
+            else True
+        )
+        return {"auth_required": auth_required, "authenticated": authenticated}
+
+    @app.post("/api/v1/auth/login")
+    async def auth_login(body: dict, request: Request):
+        """控制台登录:校验口令,成功后下发会话 Cookie(HttpOnly + SameSite=Lax)。
+
+        登录失败按来源 IP 限速(进程内滑动窗口,达到阈值后 429)。access log 的
+        脱敏规则已覆盖 "password" key,口令明文不会进入本地日志。
+        """
+        if not console_auth_enabled():
+            raise HTTPException(400, "控制台口令未配置,无需登录")
+        client_ip = _extract_client_ip(request)
+        if login_rate_limited(client_ip):
+            raise HTTPException(429, "登录失败次数过多,请稍后再试")
+        if not verify_console_password(str(body.get("password", ""))):
+            record_login_failure(client_ip)
+            raise HTTPException(401, "口令错误")
+        clear_login_failures(client_ip)
+        response = JSONResponse(
+            content={"status": "ok", "auth_required": True, "authenticated": True}
+        )
+        response.set_cookie(
+            COOKIE_NAME,
+            issue_session_token(),
+            max_age=max(1, int(settings.console_session_ttl_hours * 3600)),
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/v1/auth/logout")
+    async def auth_logout():
+        """退出登录:清除会话 Cookie(服务端无状态,令牌随之失效)。"""
+        response = JSONResponse(content={"status": "ok"})
+        response.delete_cookie(COOKIE_NAME, path="/")
+        return response
 
     @app.get("/api/v1/config/llm")
     async def get_llm_config():

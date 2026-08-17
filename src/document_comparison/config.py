@@ -65,6 +65,20 @@ class Settings:
         default_factory=lambda: int(_env("DC_API_LOG_MAX_BODY", "65536"))
     )
 
+    # —— 控制台访问口令 ——
+    # 设置后,Web 控制台的所有业务接口(/api/v1/* 任务/报告/配置等)需要先用
+    # POST /api/v1/auth/login 换取会话 Cookie 才能访问;留空(默认)不启用,
+    # 保持内网/可信环境免鉴权使用习惯。外部接口 /api/v1/external/* 与
+    # /api/v1/compare/api-test 不受影响(仍走 X-API-Key);/health、
+    # /api/v1/version、/api/v1/auth/* 与前端静态资源同样豁免。
+    console_password: str = field(
+        default_factory=lambda: _env("DC_CONSOLE_PASSWORD", "")
+    )
+    # 会话有效期(小时),超时后需重新登录;修改口令会使所有已发会话立即失效。
+    console_session_ttl_hours: float = field(
+        default_factory=lambda: float(_env("DC_CONSOLE_SESSION_TTL_HOURS", "12"))
+    )
+
     # —— 应用版本号(单一真相源 = 镜像构建期烧入的 DC_VERSION ARG,与镜像 tag 同源)——
     # Dockerfile 把 --build-arg DC_VERSION 写成 ENV,任意机器拉镜像后无需再配 .env
     # 即可自报正确版本。本地裸跑/单测无该变量时回退到 package __version__。

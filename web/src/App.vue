@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { computed, onMounted, ref } from 'vue'
 import { getAppVersion } from '@/api/config'
+import { logoutConsole } from '@/api/auth'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
 
 // 版本号来自后端 __version__,接口失败时静默不显示(装饰信息,不阻塞主页面)。
 const version = ref<string>('')
@@ -15,6 +19,17 @@ onMounted(async () => {
     /* 忽略:版本号缺失不影响功能 */
   }
 })
+// 口令登录状态由路由守卫每次跳转刷新;这里只负责展示与退出。
+const showLogout = computed(() => auth.auth_required && auth.authenticated)
+async function logout() {
+  try {
+    await logoutConsole()
+  } catch {
+    /* 忽略:Cookie 未清也能重新登录 */
+  }
+  auth.authenticated = false
+  router.replace({ name: 'login' })
+}
 const activeName = computed(() => {
   const name = String(route.name ?? '')
   if (name === 'report' || name === 'raw-report' || name === 'statement-report') return name
@@ -62,6 +77,7 @@ const reportHref = computed(() => {
         <RouterLink to="/settings" :class="{ active: activeName === 'settings' }">
           设置
         </RouterLink>
+        <a v-if="showLogout" href="#" class="app-logout" @click.prevent="logout">退出</a>
       </nav>
     </header>
     <main class="app-main">
@@ -82,5 +98,9 @@ const reportHref = computed(() => {
 }
 .app-version {
   font-size: 12px;
+}
+.app-logout {
+  color: var(--text-muted);
+  margin-left: 4px;
 }
 </style>

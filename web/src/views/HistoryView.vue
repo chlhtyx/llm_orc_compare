@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import LlmCallList from '@/components/LlmCallList.vue'
 import {
   ApiError,
   getTaskEvents,
@@ -41,8 +42,6 @@ const selectedEvents = ref<TaskEventItem[]>([])
 const selectedLlmCalls = ref<LlmCallItem[]>([])
 const selectedExternalCalls = ref<ExternalCallItem[]>([])
 const eventsLoading = ref(false)
-/** 展开后每条 LLM 调用的 payload/response 折叠状态(id → 是否展开)。 */
-const expandedCalls = ref<Record<number, boolean>>({})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
@@ -216,7 +215,6 @@ async function showLlmCalls(taskId: string): Promise<void> {
   selectedTaskId.value = taskId
   detailTab.value = 'llm-calls'
   selectedLlmCalls.value = []
-  expandedCalls.value = {}
   eventsLoading.value = true
   try {
     const resp = await getTaskLlmCalls(taskId)
@@ -251,7 +249,6 @@ function collapseDetail(): void {
   selectedEvents.value = []
   selectedLlmCalls.value = []
   selectedExternalCalls.value = []
-  expandedCalls.value = {}
 }
 
 /** 对已完成且配置了回调地址的任务重新推送一次回调。 */
@@ -287,26 +284,9 @@ function canRedeliver(item: TaskListItem): boolean {
   return !!item.callback_url && (item.status === 'done' || item.status === 'failed')
 }
 
-function toggleCall(id: number): void {
-  expandedCalls.value = { ...expandedCalls.value, [id]: !expandedCalls.value[id] }
-}
-
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
 })
-
-/** 模型调用/OCR 解析结果 kind → 中文标签。 */
-const llmKindText: Record<string, string> = {
-  'ocr': 'OCR 识别',
-  'ocr-whole': '整页 OCR',
-  'ocr-result': 'OCR 解析结果',
-  'paddleocr': 'PaddleOCR',
-  'judge': '辅助说明',
-  'alignment': '条款对齐',
-  'llm-diff': '整篇比对',
-  'statement-column': '列定位',
-  'statement-amount': '金额抽取',
-}
 
 /** 外部接口 endpoint → 中文标签。 */
 const externalEndpointText: Record<string, string> = {
@@ -340,7 +320,7 @@ function formatMs(ms: number | null): string {
   return `${(ms / 1000).toFixed(2)} s`
 }
 
-/** 把 payload/response 对象渲染成可读 JSON(图片已脱敏)。 */
+/** 把对象渲染成可读 JSON(回调 tab 展示 callback_payload;LLM 卡片的展示在 LlmCallList 组件内)。 */
 function jsonPreview(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2)
@@ -539,42 +519,7 @@ onMounted(refresh)
                       <p v-else class="muted">该任务没有已保存的里程碑事件(可能创建于本次持久化功能上线前)。</p>
                     </template>
                     <template v-else-if="detailTab === 'llm-calls'">
-                      <div v-if="!selectedLlmCalls.length" class="muted">
-                        该任务没有已保存的模型 / OCR 记录(embedding 不记录;可能创建于本功能上线前)。
-                      </div>
-                      <ul v-else class="llm-call-list">
-                        <li v-for="call in selectedLlmCalls" :key="call.id" class="llm-call-item">
-                          <div class="llm-call-head" @click="toggleCall(call.id)">
-                            <span class="llm-kind" :class="`kind-${call.kind}`">
-                              {{ llmKindText[call.kind] ?? call.kind }}
-                            </span>
-                            <span :class="['http-tag', statusClass(call.status_code)]">
-                              {{ httpStatusText(call.status_code) }}
-                            </span>
-                            <span class="muted small">#{{ call.attempt }}</span>
-                            <span class="muted small">{{ formatMs(call.elapsed_ms) }}</span>
-                            <span class="mono small ev-time">{{ formatTime(call.created_at) }}</span>
-                            <span class="muted small toggle-hint">
-                              {{ expandedCalls[call.id] ? '收起 ▲' : '展开 ▼' }}
-                            </span>
-                          </div>
-                          <div v-if="call.error" class="llm-call-err small">⚠ {{ call.error }}</div>
-                          <div v-if="expandedCalls[call.id]" class="llm-call-body">
-                            <div class="llm-block">
-                              <div class="llm-block-title muted small">
-                                {{ call.kind === 'ocr-result' ? '识别结果元数据' : '请求 payload(图片已脱敏)' }}
-                              </div>
-                              <pre class="llm-json">{{ jsonPreview(call.payload) }}</pre>
-                            </div>
-                            <div v-if="call.response" class="llm-block">
-                              <div class="llm-block-title muted small">
-                                {{ call.kind === 'ocr-result' ? '最终解析结果(文本预览受限，整条最多 64KB)' : '响应 response(截断 64KB)' }}
-                              </div>
-                              <pre class="llm-json">{{ jsonPreview(call.response) }}</pre>
-                            </div>
-                          </div>
-                        </li>
-                      </ul>
+                      <LlmCallList :calls="selectedLlmCalls" />
                     </template>
                     <template v-else-if="detailTab === 'external-calls'">
                       <div v-if="!selectedExternalCalls.length" class="muted">
@@ -959,7 +904,7 @@ table.task-table {
   border-radius: 4px;
 }
 
-/* —— LLM 调用明细 —— */
+/* —— 调用记录卡片(外部调用 tab 复用;LLM 调用卡片样式在 LlmCallList 组件内) —— */
 .llm-call-list {
   list-style: none;
   margin: 0;
@@ -1004,20 +949,10 @@ table.task-table {
 .http-4xx { background: var(--risk-medium-bg); color: var(--risk-medium); }
 .http-5xx { background: var(--risk-high-bg); color: var(--risk-high); }
 .http-fail { background: var(--risk-none-bg); color: var(--risk-none); }
-.toggle-hint {
-  margin-left: auto;
-}
 .llm-call-err {
   padding: 6px 12px;
   color: var(--risk-high);
   background: var(--risk-high-bg);
-}
-.llm-call-body {
-  padding: 8px 12px 12px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 .llm-block-title {
   margin-bottom: 4px;

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import LlmCallList from '@/components/LlmCallList.vue'
+import { getTaskLlmCalls, type LlmCallItem } from '@/api/history'
 import { ApiError } from '@/api/statement'
 import { useStatementTaskStore } from '@/stores/statementTask'
 import type {
@@ -26,6 +28,33 @@ async function attach(): Promise<void> {
 void attach()
 
 const report = computed<StatementSummaryReport | null>(() => store.report)
+
+// —— 模型调用记录(展示本次金额统计用到的 LLM 提示词)——
+const llmCalls = ref<LlmCallItem[]>([])
+const llmCallsLoading = ref(false)
+const llmCallsOpen = ref(false)
+
+async function loadLlmCalls(): Promise<void> {
+  llmCallsLoading.value = true
+  try {
+    const resp = await getTaskLlmCalls(props.taskId)
+    llmCalls.value = resp.items
+  } catch (e) {
+    llmCalls.value = []
+    console.warn('[statement] load llm calls failed:', e)
+  } finally {
+    llmCallsLoading.value = false
+  }
+}
+
+// LLM 调用仅在任务终结(done)后落库(task_llm_calls);immediate 覆盖进来即已 done 的情况
+watch(
+  () => store.status,
+  (s) => {
+    if (s === 'done') void loadLlmCalls()
+  },
+  { immediate: true },
+)
 
 onBeforeUnmount(() => {
   store.dispose()
@@ -277,6 +306,19 @@ function tableSourceBadge(source: string | undefined): string {
           <p v-if="!f.tables.length" class="muted">未识别到结构化表格。</p>
         </template>
       </section>
+
+      <!-- 模型调用记录(展示本次金额统计用到的 LLM 提示词) -->
+      <section class="card llm-section">
+        <header class="llm-section-head" @click="llmCallsOpen = !llmCallsOpen">
+          <h3 class="section-title">
+            模型调用记录
+            <span class="muted llm-section-count">{{ llmCalls.length }} 条 · 含 LLM 提示词</span>
+          </h3>
+          <span class="muted small">{{ llmCallsOpen ? '收起 ▲' : '展开 ▼' }}</span>
+        </header>
+        <p v-if="llmCallsLoading" class="muted">加载模型调用记录…</p>
+        <LlmCallList v-else-if="llmCallsOpen" :calls="llmCalls" />
+      </section>
     </template>
 
     <section v-else-if="!loadError" class="card">
@@ -524,5 +566,19 @@ code {
 .verify-item.bad {
   color: var(--risk-high);
   font-weight: 600;
+}
+
+/* 模型调用记录区块 */
+.llm-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+.llm-section-count {
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 6px;
 }
 </style>

@@ -43,6 +43,8 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 | `DC_EXTERNAL_ENABLE_LLM_ALIGNMENT` | `0` | 外部 API 是否默认启用 LLM 原始块联合分段对齐；失败自动回退 Clause 对齐 |
 | `DC_EXTERNAL_ENABLE_LLM_JUDGE` | `0` | 外部 API 是否默认启用 LLM 辅助说明 |
 | `DC_EXTERNAL_ENABLE_RISK_ASSESSMENT` | `0` | 外部 API 是否默认开启风险分级 |
+| `DC_CONSOLE_PASSWORD` | 空 | Web 控制台访问口令；非空时控制台业务接口需口令登录(会话 Cookie),外部 X-API-Key 接口、`/health`、`/api/v1/version` 与静态资源不受影响 |
+| `DC_CONSOLE_SESSION_TTL_HOURS` | `12` | 控制台会话有效期(小时)；修改口令会使所有已发会话立即失效 |
 
 > LLM / OCR 配置(API Base、API Key、模型名、超时、并发等)统一持久化于 Postgres 的 `llm_config` 表,通过 UI 设置页维护,不使用环境变量。首次启动若 `./data/llm_config.json` 存在且 PG 无记录,会自动一次性导入该文件并保留文件作备份,之后不再读取。
 

@@ -64,6 +64,22 @@ curl http://localhost:8000/health
 
 可用 `DC_SCAN_PROTECTION_ENABLED=0` 或 `DC_SECURITY_HEADERS_ENABLED=0` 临时关闭对应应用层能力。公网部署仍应在反向代理/WAF 层配置 HTTPS、请求体大小限制、基于真实客户端 IP 的共享限速和告警；不要使用每个 worker 独立的内存限速器。
 
+## 控制台访问口令
+
+Web 控制台默认无鉴权,适合内网/可信环境。若部署端口可达范围超出可信网络,设置 `DC_CONSOLE_PASSWORD` 启用口令登录:所有控制台业务接口(任务提交/查询、报告与合同原文下载、模型配置读写、比对记录与调用明细等)都需要先在登录页输入口令换取会话 Cookie。
+
+- 登录:`POST /api/v1/auth/login`;会话为无状态 HMAC 签名 Cookie(`HttpOnly` + `SameSite=Lax`),多 worker 部署下任意进程可独立校验,无需共享存储。
+- 会话有效期 `DC_CONSOLE_SESSION_TTL_HOURS`(默认 12 小时);修改口令会使所有已发会话立即失效。
+- 登录失败按来源 IP 限速(每 worker 独立计数,5 分钟窗口内 10 次失败后临时拒绝)。
+- 豁免范围:外部接口 `/api/v1/external/*` 与 `/api/v1/compare/api-test` 不受影响(仍走 `X-API-Key`);`/health`、`/api/v1/version`、`/api/v1/auth/*` 与前端静态资源保持开放。
+- 控制台内的「外部 API 配置」若尚未配置 `external_api_key`,设置控制台口令尤其重要——否则任何人都能通过无鉴权的 `PUT /api/v1/config/llm` 改写外部接口鉴权与模型配置。
+
+```bash
+# .env 中设置后 docker compose up -d 生效
+DC_CONSOLE_PASSWORD=强口令
+DC_CONSOLE_SESSION_TTL_HOURS=12   # 可选,默认 12
+```
+
 ## 并发与多 worker
 
 默认单进程(`DC_UVICORN_WORKERS=1`)、并发任务上限 4(`DC_MAX_CONCURRENT_TASKS=4`)。
