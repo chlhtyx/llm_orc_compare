@@ -30,6 +30,7 @@ from .external_api import (
     build_external_statement_result,
     render_external_highlight_images,
     write_external_html_report,
+    write_external_pdf_report,
 )
 from .storage import compared_pdf_path, effective_target_path
 from .storage import rendered_source_pdf_path
@@ -359,6 +360,18 @@ class TaskManager:
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "external html report generation failed task=%s", task_id, exc_info=True
+                    )
+                # 同一份内容的 PDF 版本(结果字段 result_url 的下载目标),失败同样不阻断。
+                try:
+                    await asyncio.to_thread(
+                        write_external_pdf_report,
+                        task_id,
+                        task.document_no or "",
+                        report,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "external pdf report generation failed task=%s", task_id, exc_info=True
                     )
             task.info.overall_risk = report.overall_risk
             task.info.status = "done"

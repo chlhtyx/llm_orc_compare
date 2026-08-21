@@ -82,7 +82,8 @@ curl -X POST {BASE}/contractCompare \
   "change_status": "changed", // changed | needs_review | clean
   "result_text": "...",
   "highlight_images": [".../images/1", ".../images/2"],
-  "result_url": ".../contractCompare/{task_id}/report.html"  // HTML 报告下载地址
+  "result_url": ".../contractCompare/{task_id}/report.pdf",  // PDF 报告下载地址
+  "html_url": ".../contractCompare/{task_id}/report.html"    // HTML 报告下载地址
 }
 ```
 
@@ -100,15 +101,20 @@ curl -X POST {BASE}/contractCompare \
 
 ---
 
-## 下载 HTML 报告
+## 下载 HTML / PDF 报告
 
 `GET /api/v1/external/contractCompare/{task_id}/report.html` → 200 `text/html`
 
-- 即 `result_url` 指向的地址;`Content-Disposition: attachment`,浏览器直接下载。
+- 即 `html_url` 指向的地址;`Content-Disposition: attachment`,浏览器直接下载。
 - 文件名:`【单据号】对比YYYYMMDD-HHMM.html`(时间为任务完成时刻的北京时间,到分钟)。
 - 内容:结构化差异表格(逐条「原始合同 vs 回收件」,修改项红绿高亮)+ 内嵌高亮标注图(回收件每页 PNG 以 base64 内嵌,单文件离线可看)。
 - 鉴权:同其他外部端点,需 `X-API-Key`(未配置 Key 时免鉴权)。
 - 仅 `done` 后才有文件;未生成 / 已清理 / 非对外任务 → 404。
+
+`GET /api/v1/external/contractCompare/{task_id}/report.pdf` → 200 `application/pdf`
+
+- 即 `result_url` 指向的地址;与 HTML 报告同一套内容:概要 + 差异明细(修改项删除线/红绿着色)+ 逐页高亮标注图(原件在前、回收件在后)。
+- 文件名:`【单据号】对比YYYYMMDD-HHMM.pdf`;鉴权与 404 语义同 HTML 报告。
 
 ---
 
@@ -146,7 +152,8 @@ pending → running → done
 { "event_id":"...", "task_id":"...", "status":"done",
   "event_type":"contract.compare.completed",
   "document_no":"...", "change_status":"changed",
-  "result_text":"...", "highlight_images":[], "result_url":".../contractCompare/{task_id}/report.html" }
+  "result_text":"...", "highlight_images":[], "result_url":".../contractCompare/{task_id}/report.pdf",
+  "html_url":".../contractCompare/{task_id}/report.html" }
 
 // 失败
 { "event_id":"...", "task_id":"...", "status":"failed",

@@ -1305,16 +1305,23 @@ def test_statement_api_test_query_isolates_non_test_tasks(external_client, monke
     assert response.status_code == 404
 
 
-# —— HTML 报告下载端点 + result_url ——
+# —— 报告下载端点 + result_url / html_url ——
 
 
-def test_build_external_result_url_points_to_html_report():
-    """result_url 指向 HTML 报告下载端点(/report.html),不再指向 JSON 查询端点。"""
+def test_build_external_result_url_points_to_pdf_report():
+    """result_url 指向 PDF 报告下载端点(/report.pdf);html_url 指向 HTML 版本。"""
     report = TamperReport(source="s.docx", target="t.pdf", change_status="clean", diffs=[])
     res = build_external_result("task-html-1", "BILL-HTML", report)
-    assert res["result_url"].endswith("/api/v1/external/contractCompare/task-html-1/report.html")
+    assert res["result_url"].endswith("/api/v1/external/contractCompare/task-html-1/report.pdf")
     # 不再是裸 task_id 查询端点
     assert not res["result_url"].endswith("/contractCompare/task-html-1")
+
+
+def test_build_external_result_includes_html_url():
+    """结果结构新增 html_url,指向 HTML 报告下载端点(/report.html)。"""
+    report = TamperReport(source="s.docx", target="t.pdf", change_status="clean", diffs=[])
+    res = build_external_result("task-pdf-0", "BILL-PDF", report)
+    assert res["html_url"].endswith("/api/v1/external/contractCompare/task-pdf-0/report.html")
 
 
 def _make_external_done_task(task_manager, document_no="BILL-HTML-1"):
@@ -1390,3 +1397,80 @@ def test_html_report_download_404_for_non_external_task(external_client):
         headers={"X-API-Key": "external-test-key"},
     )
     assert r.status_code == 404
+
+
+# —— PDF 报告下载端点 + html_url ——
+
+
+def test_pdf_report_download_requires_api_key(external_client):
+    """report.pdf 端点复用外部 API Key 鉴权:缺失/错误 → 401。"""
+    from document_comparison.api.app import task_manager
+    from document_comparison.external_api import external_pdf_report_path
+
+    task_id = _make_external_done_task(task_manager)
+    external_pdf_report_path(task_id).parent.mkdir(parents=True, exist_ok=True)
+    external_pdf_report_path(task_id).write_bytes(b"%PDF-1.4 stub")
+
+    url = f"/api/v1/external/contractCompare/{task_id}/report.pdf"
+    assert external_client.get(url).status_code == 401  # 无 Key
+    assert external_client.get(url, headers={"X-API-Key": "wrong"}).status_code == 401
+
+
+def test_pdf_report_download_returns_attachment_with_filename(external_client):
+    """200 返回 PDF;Content-Disposition 为 attachment,文件名后缀 .pdf。"""
+    from document_comparison.api.app import task_manager
+    from document_comparison.external_api import external_pdf_report_path
+
+    task_id = _make_external_done_task(task_manager, document_no="BILL-PDF-2")
+    external_pdf_report_path(task_id).parent.mkdir(parents=True, exist_ok=True)
+    external_pdf_report_path(task_id).write_bytes(b"%PDF-1.4 report body")
+
+    r = external_client.get(
+        f"/api/v1/external/contractCompare/{task_id}/report.pdf",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert r.status_code == 200
+    assert "application/pdf" in r.headers.get("content-type", "")
+    disp = r.headers.get("content-disposition", "")
+    assert "attachment" in disp
+    assert "filename*=UTF-8''" in disp
+    assert disp.rstrip("'").endswith(".pdf")
+
+
+def test_pdf_report_download_404_when_file_missing(external_client):
+    """任务存在但 PDF 文件尚未生成/已清理 → 404。"""
+    from document_comparison.api.app import task_manager
+
+    task_id = _make_external_done_task(task_manager, document_no="BILL-PDF-3")
+    r = external_client.get(
+        f"/api/v1/external/contractCompare/{task_id}/report.pdf",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert r.status_code == 404
+
+
+def test_pdf_report_download_404_for_non_external_task(external_client):
+    """非对外任务(internal)不可经外部端点下载 PDF 报告 → 404。"""
+    from document_comparison.api.app import task_manager
+
+    task_id = task_manager.create("compare", external_request=False)
+    r = external_client.get(
+        f"/api/v1/external/contractCompare/{task_id}/report.pdf",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert r.status_code == 404
+
+
+def test_result_payload_of_done_task_carries_result_and_html_url(external_client):
+    """done 任务查询响应:result_url 指向 PDF 报告,html_url 指向 HTML 报告。"""
+    from document_comparison.api.app import task_manager
+
+    task_id = _make_external_done_task(task_manager, document_no="BILL-PDF-4")
+    r = external_client.get(
+        f"/api/v1/external/contractCompare/{task_id}",
+        headers={"X-API-Key": "external-test-key"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result_url"].endswith(f"/contractCompare/{task_id}/report.pdf")
+    assert body["html_url"].endswith(f"/contractCompare/{task_id}/report.html")

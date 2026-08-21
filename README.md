@@ -257,7 +257,8 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `GET` | `/api/v1/external/contractCompare/{task_id}` | 外部系统查询结果文本和全页高亮图片清单 |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/images/{page_number}` | 下载指定页高亮 PNG(`X-API-Key`) |
 | `GET` | `/api/v1/external/contractCompare/{task_id}/source-images/{page_number}` | 下载原件侧指定页高亮 PNG；DOCX 使用派生 PDF(`X-API-Key`) |
-| `GET` | `/api/v1/external/contractCompare/{task_id}/report.html` | 下载自包含 HTML 比对报告(`X-API-Key`;`result_url` 指向此处,文件名 `【单据号】对比+时间.html`) |
+| `GET` | `/api/v1/external/contractCompare/{task_id}/report.html` | 下载自包含 HTML 比对报告(`X-API-Key`;`html_url` 指向此处,文件名 `【单据号】对比+时间.html`) |
+| `GET` | `/api/v1/external/contractCompare/{task_id}/report.pdf` | 下载自包含 PDF 比对报告(`X-API-Key`;`result_url` 指向此处,概要+差异明细+逐页高亮图,文件名 `【单据号】对比+时间.pdf`) |
 | `POST` | `/api/v1/raw-compare` | 提交纯文本快速比对 |
 | `POST` | `/api/v1/statement` | 提交金额统计(支持多文件,`target` 字段同键多值) |
 | `GET` | `/api/v1/statement/{task_id}` | 查询统计任务状态和结果 |
@@ -350,7 +351,8 @@ curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/1",
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/2"
   ],
-  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.html"
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.pdf",
+  "html_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.html"
 }
 // 任务失败时 status="failed"、error 为失败原因,其余结果字段缺省。
 ```
@@ -379,7 +381,8 @@ curl -X POST 'https://compare.example.com/api/v1/external/contractCompare' \
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/1",
     "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/images/2"
   ],
-  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.html"
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.pdf",
+  "html_url": "https://compare.example.com/api/v1/external/contractCompare/a1b2c3d4e5f6/report.html"
 }
 ```
 

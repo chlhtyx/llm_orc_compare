@@ -179,7 +179,8 @@ curl -X POST https://compare.example.com/api/v1/external/contractCompare \
     "https://compare.example.com/api/v1/external/contractCompare/9f3c...e1/images/1",
     "https://compare.example.com/api/v1/external/contractCompare/9f3c...e1/images/2"
   ],
-  "result_url": "https://compare.example.com/api/v1/external/contractCompare/9f3c...e1"
+  "result_url": "https://compare.example.com/api/v1/external/contractCompare/9f3c...e1/report.pdf",
+  "html_url": "https://compare.example.com/api/v1/external/contractCompare/9f3c...e1/report.html"
 }
 ```
 
@@ -191,7 +192,7 @@ curl -X POST https://compare.example.com/api/v1/external/contractCompare \
 
 | `status` | 含义 | 响应体特征 |
 |---|---|---|
-| `"done"` | 比对成功完成 | 附带 `change_status` / `result_text` / `highlight_images` / `result_url` 四个字段 |
+| `"done"` | 比对成功完成 | 附带 `change_status` / `result_text` / `highlight_images` / `result_url` / `html_url` 五个字段 |
 | `"failed"` | 比对执行失败 | `error` 字段带失败原因;**不**附带上述四个结果字段 |
 
 即:`code/message/request_id` 那套错误结构**只覆盖入参校验类失败**(发生在比对启动之前,如 400/401/413/429)。比对执行过程中的失败(如 OCR、LLM 超时)不会触发 5xx,而是以 `200 + status="failed"` 返回。
@@ -321,7 +322,8 @@ X-API-Key: <KEY>
   "change_status": "changed",
   "result_text": "...",
   "highlight_images": ["..."],
-  "result_url": "..."
+  "result_url": ".../report.pdf",
+  "html_url": ".../report.html"
 }
 ```
 
@@ -420,7 +422,8 @@ X-API-Key: <KEY>
 | `change_status` | string | **核心结论**。内容是否变化。枚举见[十](#十枚举值速查)。 |
 | `result_text` | string | 人类可读的中文结论文本,多行(`\n` 分隔)。格式见下。 |
 | `highlight_images` | string[] | 逐页高亮 PNG 的**绝对 URL** 数组,基于 `external_public_base_url`。 |
-| `result_url` | string | 本任务查询端点的绝对 URL(自指,便于留档)。 |
+| `result_url` | string | 自包含 **PDF** 比对报告下载端点的绝对 URL(概要+差异明细+逐页高亮图,attachment)。 |
+| `html_url` | string | 自包含 HTML 比对报告下载端点的绝对 URL(同内容 HTML 版本,attachment,离线单文件)。 |
 
 ### `result_text` 文本格式
 
@@ -526,7 +529,8 @@ X-Event-Id: {event_id}
   "change_status": "changed",
   "result_text": "...",
   "highlight_images": ["..."],
-  "result_url": "..."
+  "result_url": ".../report.pdf",
+  "html_url": ".../report.html"
 }
 ```
 
@@ -555,7 +559,8 @@ X-Event-Id: {event_id}
 | `change_status` | string | 仅 `done` 有。内容变化结论,同查询端点。 |
 | `result_text` | string | 仅 `done` 有。中文结论文本,同查询端点。 |
 | `highlight_images` | string[] | 仅 `done` 有。高亮图 URL 数组,同查询端点。 |
-| `result_url` | string | 仅 `done` 有。查询端点绝对 URL。 |
+| `result_url` | string | 仅 `done` 有。PDF 报告下载绝对 URL,同查询端点。 |
+| `html_url` | string | 仅 `done` 有。HTML 报告下载绝对 URL,同查询端点。 |
 | `error` | string | 仅 `failed` 有。失败原因。 |
 
 ### 投递与重试机制

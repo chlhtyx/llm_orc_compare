@@ -14,7 +14,7 @@ from fastapi import Header, HTTPException
 
 from .config import settings
 from .models import Diff, StatementSummaryReport, TamperReport
-from .report import render_html_report
+from .report import render_html_report, render_pdf_report
 from .report.builder import burn_pdf
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,11 @@ def external_html_report_path(task_id: str) -> Path:
     return settings.reports_dir / f"{task_id}_external_report.html"
 
 
+def external_pdf_report_path(task_id: str) -> Path:
+    """外部比对 PDF 报告的落盘路径(on-disk 用 task_id 命名,安全且稳定)。"""
+    return settings.reports_dir / f"{task_id}_external_report.pdf"
+
+
 def safe_filename_stem(document_no: str) -> str:
     """把单据号清洗为文件名安全片段(去路径分隔符/控制字符,截断长度)。
 
@@ -103,15 +108,20 @@ def safe_filename_stem(document_no: str) -> str:
     return cleaned[:80] or "report"
 
 
-def external_report_filename(document_no: str, finished_at: datetime | None) -> str:
-    """生成下载文件名:【单据号】对比YYYYMMDD-HHMM.html。
+def external_report_filename(
+    document_no: str,
+    finished_at: datetime | None,
+    *,
+    suffix: str = ".html",
+) -> str:
+    """生成下载文件名:【单据号】对比YYYYMMDD-HHMM{suffix}。
 
     ``finished_at`` 为 UTC 时间(来自 PG ``finished_at``);转北京时间到分钟。
     缺失时回退当前时刻。
     """
     moment = (finished_at or datetime.now(timezone.utc)).astimezone(_BEIJING)
     stamp = moment.strftime("%Y%m%d-%H%M")
-    return f"【{safe_filename_stem(document_no)}】对比{stamp}.html"
+    return f"【{safe_filename_stem(document_no)}】对比{stamp}{suffix}"
 
 
 def write_external_html_report(
@@ -164,6 +174,50 @@ def write_external_html_report(
     logger.info(
         "external html report written task=%s path=%s target_pages=%s source_pages=%s",
         task_id, path, len(highlight_images), len(source_highlight_images),
+    )
+    return path
+
+
+def _sorted_highlight_pngs(task_id: str, side: str) -> list[Path]:
+    """按页号顺序返回指定侧已生成的每页高亮标注 PNG 路径。"""
+    images_dir = external_images_dir(task_id, side=side)
+    if not images_dir.is_dir():
+        return []
+    return sorted(images_dir.glob("page-*.png"))
+
+
+def write_external_pdf_report(
+    task_id: str,
+    document_no: str,
+    report: TamperReport,
+    finished_at: datetime | None = None,
+) -> Path:
+    """生成自包含 PDF 比对报告(概要+差异明细+逐页高亮图)并落盘,返回写入路径。
+
+    与 ``write_external_html_report`` 同约定:``finished_at`` 用于头部「生成时间」
+    (北京时间,缺失回退当前时刻);直接内嵌已生成的高亮标注 PNG,单文件离线可看。
+    生成失败记日志后仍抛出,由调用方决定是否容忍(任务主流程中只记日志不中断)。
+    """
+    settings.ensure_dirs()
+    generated_at = (finished_at or datetime.now(timezone.utc)).astimezone(_BEIJING)
+    try:
+        path = render_pdf_report(
+            document_no,
+            report,
+            generated_at,
+            output_path=external_pdf_report_path(task_id),
+            highlight_images=_sorted_highlight_pngs(task_id, "target"),
+            source_highlight_images=_sorted_highlight_pngs(task_id, "source"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("render external pdf report failed task=%s", task_id)
+        raise
+    logger.info(
+        "external pdf report written task=%s path=%s target_pages=%s source_pages=%s",
+        task_id,
+        path,
+        len(_sorted_highlight_pngs(task_id, "target")),
+        len(_sorted_highlight_pngs(task_id, "source")),
     )
     return path
 
@@ -291,9 +345,12 @@ def build_external_result(
         "result_text": build_result_text(document_no, report),
         "highlight_images": images,
         "source_highlight_images": source_images,
-        # result_url 指向自包含 HTML 报告下载(attachment);JSON 查询仍用
-        # GET /api/v1/external/contractCompare/{task_id}。
+        # result_url 指向自包含 PDF 报告下载(attachment),html_url 指向同内容
+        # 的 HTML 版本;JSON 查询仍用 GET /api/v1/external/contractCompare/{task_id}。
         "result_url": _absolute_external_url(
+            f"/api/v1/external/contractCompare/{task_id}/report.pdf"
+        ),
+        "html_url": _absolute_external_url(
             f"/api/v1/external/contractCompare/{task_id}/report.html"
         ),
     }

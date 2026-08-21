@@ -18,6 +18,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
+from datetime import datetime
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -79,6 +80,7 @@ from ..external_api import (
     external_config_enabled,
     external_html_report_path,
     external_image_path,
+    external_pdf_report_path,
     external_report_filename,
     render_external_highlight_images,
     require_external_api_key,
@@ -431,6 +433,19 @@ def _task_record_to_task_info_dict(rec, *, kind: str) -> dict:
     elif kind == "statement" and rec.report_statement is not None:
         base["statement_report"] = rec.report_statement
     return base
+
+
+def _attachment_file_response(path: Path, media_type: str, filename: str) -> FileResponse:
+    """attachment 下载响应;RFC 5987:中文文件名用 filename*=UTF-8'' 编码。"""
+    from urllib.parse import quote
+
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+        },
+    )
 
 
 async def _external_task_response(task_id: str) -> dict:
@@ -1422,17 +1437,11 @@ def create_app() -> FastAPI:
             },
         )
 
-    @app.get("/api/v1/external/contractCompare/{task_id}/report.html")
-    async def download_external_html_report(
-        request: Request,
-        task_id: str,
-        _auth: None = Depends(require_external_api_key),
-    ):
-        """下载自包含 HTML 比对报告(attachment;文件名=【单据号】对比+北京时间)。"""
-        from urllib.parse import quote
-
-        # 审计中间件读取:报告下载关联 task_id
-        request.state.audit_endpoint = "contractCompare.report"
+    async def _external_report_file_context(
+        request: Request, task_id: str, audit_endpoint: str
+    ) -> tuple[str, datetime | None]:
+        """外部报告下载端点共用:审计标签 + 任务归属校验,返回 (document_no, finished_at)。"""
+        request.state.audit_endpoint = audit_endpoint
         request.state.audit_task_id = task_id
         request.state.audit_document_no = None
         document_no = ""
@@ -1449,20 +1458,39 @@ def create_app() -> FastAPI:
                 finished_at = rec.finished_at or rec.created_at
         if not is_external:
             raise HTTPException(404, "task not found")
+        return document_no, finished_at
+
+    @app.get("/api/v1/external/contractCompare/{task_id}/report.html")
+    async def download_external_html_report(
+        request: Request,
+        task_id: str,
+        _auth: None = Depends(require_external_api_key),
+    ):
+        """下载自包含 HTML 比对报告(attachment;文件名=【单据号】对比+北京时间)。"""
+        document_no, finished_at = await _external_report_file_context(
+            request, task_id, "contractCompare.report"
+        )
         path = external_html_report_path(task_id)
         if not path.is_file():
             raise HTTPException(404, "report not ready")
         filename = external_report_filename(document_no, finished_at)
-        return FileResponse(
-            path,
-            media_type="text/html; charset=utf-8",
-            headers={
-                # RFC 5987:中文文件名用 filename*=UTF-8'' 编码,兼容主流浏览器。
-                "Content-Disposition": (
-                    f"attachment; filename*=UTF-8''{quote(filename)}"
-                )
-            },
+        return _attachment_file_response(path, "text/html; charset=utf-8", filename)
+
+    @app.get("/api/v1/external/contractCompare/{task_id}/report.pdf")
+    async def download_external_pdf_report(
+        request: Request,
+        task_id: str,
+        _auth: None = Depends(require_external_api_key),
+    ):
+        """下载自包含 PDF 比对报告(attachment;结果字段 ``result_url`` 指向此处)。"""
+        document_no, finished_at = await _external_report_file_context(
+            request, task_id, "contractCompare.report"
         )
+        path = external_pdf_report_path(task_id)
+        if not path.is_file():
+            raise HTTPException(404, "report not ready")
+        filename = external_report_filename(document_no, finished_at, suffix=".pdf")
+        return _attachment_file_response(path, "application/pdf", filename)
 
     @app.post("/api/v1/external/amountStat", status_code=202)
     async def external_statement(
