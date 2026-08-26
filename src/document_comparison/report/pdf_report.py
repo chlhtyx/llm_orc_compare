@@ -47,6 +47,7 @@ _STATUS_BADGE = {
 
 _INK = (0.13, 0.13, 0.13)
 _MUTED = (0.45, 0.48, 0.51)
+_NOTE = (0.54, 0.35, 0.0)  # 说明行(与 HTML pages-note #8a5a00 同色)
 _DEL = (0.78, 0.12, 0.12)
 _INS = (0.08, 0.47, 0.21)
 _ACCENT = (0.17, 0.48, 0.90)
@@ -301,8 +302,16 @@ def _section_title(layout: _Layout, title: str) -> None:
     layout.y += 26
 
 
-def _image_pages(doc: pymupdf.Document, title: str, images: list[Path]) -> None:
-    """高亮标注图区:每页 PNG 独占一个 PDF 页,标题 + 页码说明在图上方。"""
+def _image_pages(
+    doc: pymupdf.Document,
+    title: str,
+    images: list[Path],
+    note: str | None = None,
+) -> None:
+    """高亮标注图区:每页 PNG 独占一个 PDF 页,标题 + 页码说明在图上方。
+
+    ``note`` 非空时在标题下方输出一行说明(如两侧页数不一致提示)。
+    """
     page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
     page.draw_rect(
         pymupdf.Rect(_MARGIN, _MARGIN + 2, _MARGIN + 4, _MARGIN + 18),
@@ -317,6 +326,15 @@ def _image_pages(doc: pymupdf.Document, title: str, images: list[Path]) -> None:
         color=_INK,
     )
     caption_y = _MARGIN + 34
+    if note:
+        page.insert_text(
+            (_MARGIN, caption_y),
+            note,
+            fontname=_FONT,
+            fontsize=9,
+            color=_NOTE,
+        )
+        caption_y += 14
     page.insert_text(
         (_MARGIN, caption_y),
         f"第 1 页 / 共 {len(images)} 页",
@@ -417,8 +435,20 @@ def render_pdf_report(
     )
 
     # —— 高亮标注图(原件在前,与 HTML 报告两侧面板顺序一致)——
+    # 两侧页数来自两份不同的物理 PDF(DOCX 原件侧为 LibreOffice 派生渲染),
+    # 分页不同属正常;在图片区头部明示,与 HTML 报告口径一致。
+    page_note = None
+    if (
+        source_highlight_images
+        and highlight_images
+        and len(source_highlight_images) != len(highlight_images)
+    ):
+        page_note = (
+            f"采购部合同共 {len(source_highlight_images)} 页、供应商合同共 "
+            f"{len(highlight_images)} 页,两份文件分页不一致,页码按各自文档独立展示"
+        )
     if source_highlight_images:
-        _image_pages(doc, "采购部合同", list(source_highlight_images))
+        _image_pages(doc, "采购部合同", list(source_highlight_images), note=page_note)
     if highlight_images:
         _image_pages(doc, "供应商合同", list(highlight_images))
 

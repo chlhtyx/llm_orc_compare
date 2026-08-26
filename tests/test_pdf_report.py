@@ -158,6 +158,51 @@ def test_render_pdf_report_appends_image_pages(tmp_path):
     doc.close()
 
 
+def test_render_pdf_report_page_count_mismatch_note(tmp_path):
+    """两侧高亮图页数不一致时,图片区头部给出说明;一致时不出现。"""
+    report = TamperReport(source="s", target="t", change_status="clean", diffs=[])
+    target_imgs = []
+    for idx in (1, 2, 3):
+        p = tmp_path / f"target-{idx}.png"
+        _tiny_png(p, f"回收{idx}")
+        target_imgs.append(p)
+    source_imgs = []
+    for idx in (1, 2):
+        p = tmp_path / f"source-{idx}.png"
+        _tiny_png(p, f"原件{idx}")
+        source_imgs.append(p)
+
+    out = tmp_path / "report-mismatch.pdf"
+    render_pdf_report(
+        "BILL-NOTE",
+        report,
+        datetime.now(timezone.utc),
+        out,
+        highlight_images=target_imgs,
+        source_highlight_images=source_imgs,
+    )
+    doc = pymupdf.open(str(out))
+    text = "".join(page.get_text() for page in doc)
+    assert "两份文件分页不一致" in text
+    assert "采购部合同共 2 页" in text
+    assert "供应商合同共 3 页" in text
+    doc.close()
+
+    out_equal = tmp_path / "report-equal.pdf"
+    render_pdf_report(
+        "BILL-NONE",
+        report,
+        datetime.now(timezone.utc),
+        out_equal,
+        highlight_images=target_imgs[:2],
+        source_highlight_images=source_imgs,
+    )
+    doc = pymupdf.open(str(out_equal))
+    text = "".join(page.get_text() for page in doc)
+    assert "两份文件分页不一致" not in text
+    doc.close()
+
+
 def test_render_pdf_report_long_text_flows_across_pages(tmp_path):
     """超长条款自动折行并跨页流动,不抛错、不丢尾部文本。"""
     long_text = "甲方应按本合同约定履行义务并承担相应责任," * 60

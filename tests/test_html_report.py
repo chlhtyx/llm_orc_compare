@@ -231,6 +231,31 @@ def test_render_html_report_without_images_omits_section():
     assert "高亮标注图" not in html_empty
 
 
+def test_render_html_report_page_count_mismatch_note():
+    """两侧页数不一致时,双栏区给出说明;页数一致时不出现。"""
+    report = TamperReport(source="s.pdf", target="t.pdf", change_status="changed", diffs=[])
+    mismatch = render_html_report(
+        "BILL-MISMATCH",
+        report,
+        datetime.now(timezone.utc),
+        highlight_images=["data:image/png;base64,T1"] * 3,
+        source_highlight_images=["data:image/png;base64,S1"] * 2,
+    )
+    assert "两份文件分页不一致" in mismatch
+    assert "采购部合同共 2 页" in mismatch
+    assert "供应商合同共 3 页" in mismatch
+    assert 'class="pages-note"' in mismatch
+
+    equal = render_html_report(
+        "BILL-MATCH",
+        report,
+        datetime.now(timezone.utc),
+        highlight_images=["data:image/png;base64,T1"] * 2,
+        source_highlight_images=["data:image/png;base64,S1"] * 2,
+    )
+    assert "两份文件分页不一致" not in equal
+
+
 def test_write_external_html_report_embeds_highlight_images(tmp_path, monkeypatch):
     """write 函数读取 {task_id}_images/page-*.png,按页序 base64 内嵌进 HTML。"""
     import base64

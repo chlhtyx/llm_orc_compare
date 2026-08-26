@@ -92,6 +92,7 @@ tbody tr.report-row-selected{outline:2px solid #2c7be5;outline-offset:-2px;backg
 .summary{margin:10px 0 6px;color:#555;font-size:13px}
 footer{margin-top:20px;color:#adb5bd;font-size:12px;text-align:center}
 .pages-title{font-size:16px;margin:24px 0 10px;border-left:4px solid #2c7be5;padding-left:8px}
+.pages-note{grid-column:1 / -1;margin:0;background:#fff8e6;border:1px solid #f1e3b6;border-radius:4px;padding:8px 12px;color:#8a5a00;font-size:13px}
 .pages{display:flex;flex-direction:column;gap:16px}
 .pages figure{margin:0;background:#fff;border:1px solid #e3e3e5;border-radius:4px;padding:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .pages figcaption{font-size:12px;color:#868e96;margin-bottom:6px}
@@ -235,8 +236,18 @@ def render_html_report(
     # 两侧都可用时以独立可滚动面板左右展示，按相对滚动距离同步。
     # 若某一侧没有定位产物，仍以单侧纵向报告输出，避免出现空白对照栏。
     if source_highlight_images and highlight_images:
+        # 两侧页数来自两份不同的物理 PDF(DOCX 原件侧为 LibreOffice 派生渲染),
+        # 分页不同属正常;明示出来,避免读者把页数差当成报告缺陷。
+        note_html = ""
+        if len(source_highlight_images) != len(highlight_images):
+            note_html = (
+                f'<p class="pages-note">采购部合同共 {len(source_highlight_images)} 页、'
+                f"供应商合同共 {len(highlight_images)} 页,两份文件分页不一致;"
+                "左右页码按各自文档独立展示,同一水平位置不保证对应同一页内容。</p>"
+            )
         images_html = (
             '<div class="bidirectional-pages">'
+            f"{note_html}"
             '<section class="comparison-pane"><h2>高亮标注图(采购部合同)</h2>'
             f'<div id="source-pages" class="comparison-pane-scroll pages">{_page_figures(source_highlight_images, "采购部合同", "source")}</div>'
             '</section>'

@@ -1,6 +1,7 @@
 """文件存储(本地文件系统,§11.2)。
 
 职责仅限于**上传的原始文件**(source docx / target pdf)落盘与查找;
+上传件按 task_id 归集到 uploads/{task_id}/ 子目录(旧平铺命名仍可读取,不迁移)。
 比对报告 JSON 不再写文件,统一持久化到 Postgres(见 db/repository.py)。
 生产可替换为对象存储。
 """
@@ -20,17 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 def save_upload(upload: UploadFile, task_id: str, role: str, index: int | None = None) -> Path:
-    """保存上传文件。role ∈ {source, target}。
+    """保存上传文件。role ∈ {source, target}。归集到 uploads/{task_id}/ 子目录。
 
-    index 非 None 时(对帐单多文件场景),命名为 f"{task_id}-{role}-{index}{suffix}",
-    避免同 task 多 PDF 互相覆盖。index 为 None 保持原命名(单文件 source/target 向后兼容)。
+    index 非 None 时(对帐单多文件场景),命名为 f"{role}-{index}{suffix}",
+    避免同 task 多 PDF 互相覆盖。index 为 None 时命名 f"{role}{suffix}"(单文件)。
+    目录名承载 task_id,文件名不再重复前缀。
     """
     settings.ensure_dirs()
     suffix = Path(upload.filename or "").suffix or ".bin"
+    task_dir = _task_upload_dir(task_id)
+    task_dir.mkdir(parents=True, exist_ok=True)
     if index is None:
-        path = settings.uploads_dir / f"{task_id}-{role}{suffix}"
+        path = task_dir / f"{role}{suffix}"
     else:
-        path = settings.uploads_dir / f"{task_id}-{role}-{index}{suffix}"
+        path = task_dir / f"{role}-{index}{suffix}"
     with path.open("wb") as f:
         f.write(upload.file.read())
     return path
@@ -101,17 +105,20 @@ def finalize_temp_file(
     temp_path: Path, task_id: str, role: str, filename: str,
     index: int | None = None,
 ) -> Path:
-    """把 `download_to_upload` 的临时产物 rename 到与 `save_upload` 一致的最终命名。
+    """把 `download_to_upload` 的临时产物 rename 到与 `save_upload` 一致的最终位置。
 
-    命名规则与 `save_upload` 对齐:index=None 时 `{task_id}-{role}{suffix}`(单文件分支),
-    index 非 None 时 `{task_id}-{role}-{index}{suffix}`(对帐单多文件场景,避免互相覆盖)。
-    同文件系统 rename 原子安全;幂等性由 task_id 唯一性保证。
+    命名规则与 `save_upload` 对齐:uploads/{task_id}/ 下,index=None 时
+    `{role}{suffix}`(单文件分支),index 非 None 时 `{role}-{index}{suffix}`
+    (对帐单多文件场景,避免互相覆盖)。同文件系统 rename 原子安全;
+    幂等性由 task_id 唯一性保证。
     """
     suffix = Path(filename).suffix or ".bin"
+    task_dir = _task_upload_dir(task_id)
+    task_dir.mkdir(parents=True, exist_ok=True)
     if index is None:
-        final_path = settings.uploads_dir / f"{task_id}-{role}{suffix}"
+        final_path = task_dir / f"{role}{suffix}"
     else:
-        final_path = settings.uploads_dir / f"{task_id}-{role}-{index}{suffix}"
+        final_path = task_dir / f"{role}-{index}{suffix}"
     temp_path.replace(final_path)
     return final_path
 
@@ -152,12 +159,28 @@ def _filename_from_response(content_disposition: str | None, url_path: str) -> s
     return last or None
 
 
+def _task_upload_dir(task_id: str) -> Path:
+    """任务上传文件的归集目录:uploads/{task_id}/。"""
+    return settings.uploads_dir / task_id
+
+
 def upload_path(task_id: str, role: str) -> Path | None:
     """查找已上传文件路径。role ∈ {source, target}。
 
-    返回匹配的第一个文件(通过前缀 task_id-role 匹配,不限后缀)。
-    不存在时返回 None。
+    优先在归集目录 uploads/{task_id}/ 内匹配(单文件 `{role}{suffix}` 优先于
+    对帐单多文件的 `{role}-{index}{suffix}`);目录不存在或未命中时,回退扫描
+    uploads/ 平铺的旧命名 `{task_id}-{role}*`,历史任务数据无需迁移。
+    返回匹配的第一个文件,不存在时返回 None。
     """
+    task_dir = _task_upload_dir(task_id)
+    if task_dir.is_dir():
+        files = [f for f in task_dir.iterdir() if f.is_file()]
+        for f in sorted(files):
+            if f.name.startswith(f"{role}."):
+                return f
+        for f in sorted(files):
+            if f.name.startswith(f"{role}-"):
+                return f
     for f in settings.uploads_dir.iterdir():
         if f.is_file() and f.name.startswith(f"{task_id}-{role}"):
             return f

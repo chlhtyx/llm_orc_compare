@@ -13,6 +13,7 @@ from document_comparison.external_api import (
     build_external_result,
     build_external_statement_result,
     build_result_text,
+    external_images_dir,
     render_external_highlight_images,
     require_external_api_key,
     validate_callback_url,
@@ -653,6 +654,58 @@ def test_external_renders_and_exposes_source_highlight_images(monkeypatch, tmp_p
     assert result["source_highlight_images"] == [
         "https://dc.example.test/api/v1/external/contractCompare/task-source/source-images/1"
     ]
+
+
+def test_render_replaces_stale_highlight_pngs(monkeypatch, tmp_path):
+    """整侧重渲时旧的 page-*.png 被整体替换,不残留多余页。"""
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    monkeypatch.setattr(settings, "external_image_dpi", 72)
+    monkeypatch.setattr(settings, "external_public_base_url", "https://dc.example.test")
+    report = _changed_report(page_count=2)
+    pdf_path = tmp_path / "target.pdf"
+    pdf_path.write_bytes(_pdf_bytes(page_count=2).getvalue())
+
+    img_dir = external_images_dir("task-stale")
+    img_dir.mkdir(parents=True)
+    (img_dir / "page-0001.png").write_bytes(b"stale-page1")
+    (img_dir / "page-0009.png").write_bytes(b"stale-extra")
+
+    images = render_external_highlight_images("task-stale", pdf_path, report)
+
+    assert [path.name for path in images] == ["page-0001.png", "page-0002.png"]
+    # 多余的旧页被清掉,正式目录只剩当前文档的页集
+    assert sorted(p.name for p in img_dir.glob("page-*.png")) == [
+        "page-0001.png", "page-0002.png",
+    ]
+    # 旧占位被真实渲染覆盖
+    assert (img_dir / "page-0001.png").read_bytes() != b"stale-page1"
+    assert (img_dir / "page-0002.png").stat().st_size > 0
+
+
+def test_render_side_failure_leaves_no_partial_pngs(monkeypatch, tmp_path):
+    """渲染中途失败时,正式目录不留残缺页集(报告不会嵌入不完整的一侧)。"""
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    monkeypatch.setattr(settings, "external_image_dpi", 72)
+    monkeypatch.setattr(settings, "external_public_base_url", "https://dc.example.test")
+    report = _changed_report(page_count=2)
+    pdf_path = tmp_path / "target.pdf"
+    pdf_path.write_bytes(_pdf_bytes(page_count=2).getvalue())
+
+    original = pymupdf.Page.get_pixmap
+    calls = {"count": 0}
+
+    def flaky_get_pixmap(self, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:  # 第 2 页渲染时失败,第 1 页已画进临时目录
+            raise RuntimeError("pixmap boom")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", flaky_get_pixmap)
+    with pytest.raises(RuntimeError, match="pixmap boom"):
+        render_external_highlight_images("task-partial", pdf_path, report)
+
+    img_dir = external_images_dir("task-partial")
+    assert list(img_dir.glob("page-*.png")) == []
 
 
 def test_missing_location_does_not_claim_highlight(monkeypatch, tmp_path):

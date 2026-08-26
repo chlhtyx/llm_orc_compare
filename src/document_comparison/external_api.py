@@ -4,6 +4,7 @@ from __future__ import annotations
 import hmac
 import logging
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -241,12 +242,24 @@ def render_external_highlight_images(
         output_dir.mkdir(parents=True, exist_ok=True)
         zoom = settings.external_image_dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
+        # 整侧页面先在正式目录内的临时子目录渲染,全部成功后再整体替换;渲染
+        # 中途失败不会留下残缺/陈旧的 page-*.png 被报告当成完整一套嵌入
+        # (表现为该侧页数与真实文档不一致)。
         paths: list[Path] = []
-        with pymupdf.open(str(annotated_pdf)) as doc:
-            for page_index, page in enumerate(doc):
-                output = external_image_path(task_id, page_index + 1, side=side)
-                page.get_pixmap(matrix=matrix, alpha=False, annots=True).save(str(output))
-                paths.append(output)
+        with tempfile.TemporaryDirectory(
+            prefix=f"{task_id}-{side}-", dir=output_dir
+        ) as tmp_name:
+            tmp_dir = Path(tmp_name)
+            with pymupdf.open(str(annotated_pdf)) as doc:
+                for page_index, page in enumerate(doc):
+                    output = tmp_dir / external_image_path(task_id, page_index + 1, side=side).name
+                    page.get_pixmap(matrix=matrix, alpha=False, annots=True).save(str(output))
+            for stale in output_dir.glob("page-*.png"):
+                stale.unlink(missing_ok=True)
+            for png in sorted(tmp_dir.glob("page-*.png")):
+                final = output_dir / png.name
+                png.replace(final)
+                paths.append(final)
         return paths
 
     target_paths = _render_side(pdf_path, "target")

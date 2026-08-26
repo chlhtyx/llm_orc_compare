@@ -71,7 +71,7 @@ docker compose exec llm-ocr-compare fc-match Arial
 
 | 路径 | 内容 | 容器内路径 |
 |------|------|------------|
-| `./data/uploads` | 上传的源/目标文件(docx/pdf) | `/app/.dc_data/uploads` |
+| `./data/uploads` | 上传的源/目标文件(docx/pdf),按 `uploads/{task_id}/` 子目录归集;旧版本的平铺命名文件仍可直接读取,无需迁移 | `/app/.dc_data/uploads` |
 | `./data/reports` | 外部接口的标注 PDF 与逐页高亮 PNG | `/app/.dc_data/reports` |
 | `./data/logs/app.log` | 应用滚动日志(10MB×5) | `/app/.dc_data/logs/app.log` |
 | `./data/pg/` | Postgres 数据目录(任务记录、里程碑事件、**完整报告 JSONB**、**LLM/OCR 模型配置**) | `/var/lib/postgresql/data` |
