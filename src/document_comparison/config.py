@@ -105,8 +105,10 @@ class Settings:
     ocr_backend: str = "llm"
 
     # —— 远端多模态推理(llm 引擎用:通用 VL 模型)——
-    # 兼容 OpenAI Chat Completions 协议(base_url 指向 vLLM / SGLang / 云端 API)。
-    # 适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o 等)。
+    # 接口协议可选:openai(Chat Completions,默认)/ openai_responses(OpenAI 新版
+    # Responses API,vLLM 0.10+)/ anthropic(Messages,官方 Claude 或兼容网关)。
+    # 适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o / Claude 等)。
+    llm_api_protocol: str = "openai"
     llm_api_base: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
@@ -142,7 +144,9 @@ class Settings:
 
     # —— LLM 辅助说明服务(对 modified 条款补充严重度建议)——
     # 与 OCR 服务独立配置:OCR 需多模态 VL 模型(看图),说明需纯文本 LLM。
-    # 走 OpenAI 兼容 Chat Completions 协议。未配置时复核自动回退规则判定。
+    # 协议可选同 llm_api_protocol(openai / openai_responses / anthropic)。
+    # 未配置时复核自动回退规则判定。
+    judge_api_protocol: str = "openai"
     judge_api_base: str = ""
     judge_api_key: str = ""
     judge_model: str = ""
@@ -320,7 +324,10 @@ settings = Settings()
 # 本模块 import 时不读 PG(此时引擎尚未初始化),避免在 settings 创建期触发 DB 访问。
 import json as _json
 
+from .llm_protocol import VALID_PROTOCOLS as _VALID_PROTOCOLS
+
 _LLM_CONFIG_FIELDS = (
+    "llm_api_protocol",
     "llm_api_base",
     "llm_api_key",
     "llm_model",
@@ -340,6 +347,7 @@ _LLM_CONFIG_FIELDS = (
     "paddleocr_timeout",
     "paddleocr_max_concurrency",
     "paddleocr_max_retries",
+    "judge_api_protocol",
     "judge_api_base",
     "judge_api_key",
     "judge_model",
@@ -367,6 +375,7 @@ _LLM_CONFIG_FIELDS = (
 
 # dataclass 字段默认值,供 PG 无记录时合并使用(不再写入种子配置)。
 _LLM_DEFAULTS: dict = {
+    "llm_api_protocol": "openai",
     "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "llm_api_key": "",
     "llm_model": "qwen-vl-max",
@@ -386,6 +395,7 @@ _LLM_DEFAULTS: dict = {
     "paddleocr_timeout": 300,
     "paddleocr_max_concurrency": 4,
     "paddleocr_max_retries": 2,
+    "judge_api_protocol": "openai",
     "judge_api_base": "",
     "judge_api_key": "",
     "judge_model": "",
@@ -468,6 +478,8 @@ def apply_llm_overrides() -> None:
     save_llm_overrides 写入后也会调用一次。模块 import 期不再自动调用。
     """
     cfg = load_llm_overrides()
+    if cfg.get("llm_api_protocol") in _VALID_PROTOCOLS:
+        settings.llm_api_protocol = str(cfg["llm_api_protocol"])
     if "llm_api_base" in cfg:
         settings.llm_api_base = cfg["llm_api_base"]
     if "llm_api_key" in cfg:
@@ -508,6 +520,8 @@ def apply_llm_overrides() -> None:
         settings.paddleocr_max_concurrency = int(cfg["paddleocr_max_concurrency"])
     if "paddleocr_max_retries" in cfg:
         settings.paddleocr_max_retries = int(cfg["paddleocr_max_retries"])
+    if cfg.get("judge_api_protocol") in _VALID_PROTOCOLS:
+        settings.judge_api_protocol = str(cfg["judge_api_protocol"])
     if "judge_api_base" in cfg:
         settings.judge_api_base = cfg["judge_api_base"]
     if "judge_api_key" in cfg:

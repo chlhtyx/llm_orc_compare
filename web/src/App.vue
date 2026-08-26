@@ -35,6 +35,7 @@ const activeName = computed(() => {
   if (name === 'report' || name === 'raw-report' || name === 'statement-report') return name
   if (name === 'settings') return 'settings'
   if (name === 'external-api-config') return 'external-api-config'
+  if (name === 'dashboard') return 'dashboard'
   if (name === 'history') return 'history'
   if (name === 'raw-submit') return 'raw-submit'
   if (name === 'statement-submit') return 'statement-submit'
@@ -59,7 +60,10 @@ const reportHref = computed(() => {
         <span class="app-title">文档比对系统</span>
       </div>
       <nav class="app-nav">
-        <RouterLink to="/" :class="{ active: activeName === 'submit' }">合同比对 API</RouterLink>
+        <RouterLink to="/dashboard" :class="{ active: activeName === 'dashboard' }">
+          看板
+        </RouterLink>
+        <RouterLink to="/compare" :class="{ active: activeName === 'submit' }">合同比对 API</RouterLink>
         <RouterLink to="/statement" :class="{ active: activeName === 'statement-submit' }">金额统计 API</RouterLink>
         <RouterLink
           v-if="reportHref"

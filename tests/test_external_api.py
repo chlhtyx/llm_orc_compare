@@ -921,12 +921,18 @@ def test_build_external_statement_result_returns_each_file_total():
     result = build_external_statement_result("task-1", "STMT-1", report)
 
     assert "grand_totals_by_column" not in result
+    assert result["document_type"] is None
     assert result["file_totals"] == [
         {"file_index": 0, "file_name": "target.pdf", "total_amount": 60000.0, "error": None},
         {"file_index": 1, "file_name": "failed.pdf", "total_amount": 0.0, "error": "OCR 解析失败"},
     ]
     assert "column_detection_summary" not in result
     assert "report" not in result
+
+    result_contract = build_external_statement_result(
+        "task-2", "STMT-2", report, document_type="2"
+    )
+    assert result_contract["document_type"] == "2"
 
 
 def test_external_statement_submit_async_echoes_document_no(external_client, monkeypatch):
@@ -951,12 +957,98 @@ def test_external_statement_submit_async_echoes_document_no(external_client, mon
     assert response.status_code == 202, response.json()
     body = response.json()
     assert body["document_no"] == "STMT-2026-001"
+    # 缺省 document_type 归一为 "1"(发票)
+    assert body["document_type"] == "1"
     assert body["status"] == "pending"
     task = task_manager.get(body["task_id"])
     assert task is not None
     assert task.external_request is True
     assert task.kind == "statement"
+    assert task.document_type == "1"
     assert task.sync_mode is False
+
+
+def test_external_statement_submit_document_type_statement(external_client, monkeypatch):
+    """document_type=2(对帐单)入库并在受理响应回显,供对比记录区分发票/对帐单。"""
+    from document_comparison.api.app import task_manager
+
+    async def _no_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run_statement", _no_run)
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "STMT-2026-TYPE2",
+            "document_type": "2",
+            "callback_url": "http://internal/callback",
+        },
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert response.status_code == 202, response.json()
+    body = response.json()
+    assert body["document_type"] == "2"
+    task = task_manager.get(body["task_id"])
+    assert task is not None
+    assert task.document_type == "2"
+
+
+def test_external_statement_document_type_accepts_chinese_alias(external_client, monkeypatch):
+    """中文别名归一:发票→"1"、对帐单→"2";空串/缺省→"1"(发票)。"""
+    from document_comparison.api.app import task_manager
+
+    async def _no_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task_manager, "run_statement", _no_run)
+
+    def _submit(document_type):
+        data = {
+            "document_no": "STMT-ALIAS",
+            "callback_url": "http://internal/callback",
+        }
+        if document_type is not None:
+            data["document_type"] = document_type
+        return external_client.post(
+            "/api/v1/external/amountStat",
+            headers={"X-API-Key": "external-test-key"},
+            data=data,
+            files=[("target", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+        )
+
+    resp = _submit("发票")
+    assert resp.status_code == 202
+    assert resp.json()["document_type"] == "1"
+
+    resp = _submit("对帐单")
+    assert resp.status_code == 202
+    assert resp.json()["document_type"] == "2"
+
+    resp = _submit("")
+    assert resp.status_code == 202
+    assert resp.json()["document_type"] == "1"
+    task = task_manager.get(resp.json()["task_id"])
+    assert task.document_type == "1"
+
+
+def test_external_statement_rejects_bad_document_type(external_client):
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "external-test-key"},
+        data={
+            "document_no": "STMT-BADTYPE",
+            "document_type": "3",
+            "callback_url": "http://internal/callback",
+        },
+        files=[
+            ("target", ("a.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert response.status_code == 400
+    assert "document_type" in response.json()["message"]
 
 
 def test_external_statement_rejects_missing_files(external_client):
@@ -1026,6 +1118,7 @@ def test_external_statement_sync_returns_full_result(external_client, monkeypatc
     assert response.status_code == 200, response.json()
     body = response.json()
     assert body["status"] == "done"
+    assert body["document_type"] == "1"
     assert body["grand_total"] == 100000.0
     assert body["verdict"] == "clean"
     assert "grand_totals_by_column" not in body

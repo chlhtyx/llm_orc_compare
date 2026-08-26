@@ -55,6 +55,11 @@ class TaskRecord(Base):
     document_no: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True, default=None
     )
+    # 单据类型(statement 金额统计任务的细分):"1"=发票 | "2"=对帐单(字符串枚举)。
+    # 供「对比记录」标识与后续查询过滤;非 statement 任务为 None。
+    document_type: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, default=None
+    )
     external_request: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, index=True
     )
@@ -239,6 +244,13 @@ class ExternalApiCall(Base):
     request_id: Mapped[str] = mapped_column(String(12), index=True)
     # 请求体字节数(排查 413);无 body 为 None
     content_length: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 请求参数快照(端点入口写入 request.state.audit_params):提交类为表单字段
+    # (文件只记文件名,不记内容)+ callback_url/sync 等;图片类含 page_number。
+    # 401 鉴权失败、422 FastAPI 校验失败(端点体未执行)由审计中间件预读 multipart
+    # 非文件字段兜底(chunked 无 Content-Length 或 body 超上传上限时为 None)。
+    request_params: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
     )

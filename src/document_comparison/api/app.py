@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -62,6 +62,7 @@ from ..storage import (
 )
 from ..report.builder import burn_pdf
 from ..compare.llm_diff import DEFAULT_DIFF_SYSTEM_PROMPT
+from ..llm_protocol import VALID_PROTOCOLS
 from .. import webhook
 from ..console_auth import (
     COOKIE_NAME,
@@ -89,6 +90,19 @@ from ..external_api import (
     write_external_html_report,
 )
 from ..tasks import task_manager
+
+# python-multipart 低层解析 API(与 starlette.formparsers 同款 import 兼容);
+# 仅用于外部审计的表单字段预提取,缺库时该兜底自动失效。
+try:
+    import python_multipart as multipart
+    from python_multipart.multipart import parse_options_header
+except ImportError:  # pragma: no cover
+    try:
+        import multipart
+        from multipart.multipart import parse_options_header
+    except ImportError:
+        multipart = None  # type: ignore[assignment]
+        parse_options_header = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +134,33 @@ def _normalize_target_urls(values: list[str]) -> list[str]:
         else:
             normalized.append(candidate)
     return normalized
+
+
+# 单据类型归一化表:金额统计(amountStat)任务的发票/对帐单细分。
+# 对外契约(字符串枚举):"1"=发票、"2"=对帐单;不传默认 "1"(发票)。
+# 兼容中文别名,归一后统一存 "1"/"2"。
+_STATEMENT_DOCUMENT_TYPE_ALIASES = {
+    "1": "1",
+    "发票": "1",
+    "2": "2",
+    "对帐单": "2",
+    "对账单": "2",
+}
+
+
+def _normalize_document_type(value: str | None) -> str:
+    """归一化单据类型为 "1"(发票)/ "2"(对帐单)。
+
+    空值默认 "1"(发票);支持中文别名(发票/对帐单/对账单);
+    无法识别 → ValueError(端点转 400)。
+    """
+    candidate = (value or "").strip()
+    if not candidate:
+        return "1"
+    mapped = _STATEMENT_DOCUMENT_TYPE_ALIASES.get(candidate)
+    if mapped is None:
+        raise ValueError("document_type 必须为 1(发票)或 2(对帐单)")
+    return mapped
 
 
 def _persist_role(
@@ -182,6 +223,166 @@ def _api_key_fingerprint(raw_key: str | None) -> str | None:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
+# 审计参数快照中单个字符串值的上限;超长 URL / 文件名截断,防止撑爆 JSONB
+_AUDIT_PARAM_MAX_STR = 512
+
+
+def _sanitize_audit_params(params: Any) -> dict[str, Any] | None:
+    """清洗端点写入的 request.state.audit_params:敏感 key 脱敏 + 长字符串截断。
+
+    仅接受 dict(其它类型记 None)。端点只记文件名不记文件内容,此处截断是
+    防御性兜底,避免异常超长的 URL / 文件名进入审计记录。
+    """
+    if not isinstance(params, dict):
+        return None
+
+    def _short(value: Any) -> Any:
+        if isinstance(value, str) and len(value) > _AUDIT_PARAM_MAX_STR:
+            return value[:_AUDIT_PARAM_MAX_STR] + "…(truncated)"
+        if isinstance(value, list):
+            return [_short(item) for item in value]
+        if isinstance(value, dict):
+            return {str(k): _short(v) for k, v in value.items()}
+        return value
+
+    return _short(_mask_sensitive(params))
+
+
+# 预解析阶段单个非文件字段的字节上限(防恶意超长字段;落库前还有 512 字符截断)
+_PREFILL_FIELD_MAX_BYTES = 64 * 1024
+
+
+class _MultipartFieldCollector:
+    """python-multipart 回调收集器:只保留非文件字段值与文件字段名,丢弃文件内容。
+
+    与端点的结构化快照口径一致——文件只记文件名;同名重复字段(如 amountStat
+    的多个 target_urls)聚合成 list。字段值超上限截断,文件数据不缓冲。
+    """
+
+    def __init__(self) -> None:
+        self.fields: dict[str, Any] = {}
+        self._field_name: str | None = None
+        self._filename: str | None = None
+        self._buf = bytearray()
+        self._hdr_name = b""
+        self._hdr_value = b""
+        self._content_disposition = b""
+
+    def on_part_begin(self) -> None:
+        self._field_name = None
+        self._filename = None
+        self._buf = bytearray()
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._filename is not None or self._field_name is None:
+            return  # 文件内容直接丢弃
+        chunk = data[start:end]
+        room = _PREFILL_FIELD_MAX_BYTES - len(self._buf)
+        if room > 0:
+            self._buf += chunk[:room]
+
+    def on_part_end(self) -> None:
+        if self._field_name is None:
+            return
+        value = (
+            self._filename
+            if self._filename is not None
+            else self._buf.decode("utf-8", errors="replace")
+        )
+        existing = self.fields.get(self._field_name)
+        if existing is None:
+            self.fields[self._field_name] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            self.fields[self._field_name] = [existing, value]
+
+    def on_header_field(self, data: bytes, start: int, end: int) -> None:
+        self._hdr_name += data[start:end]
+
+    def on_header_value(self, data: bytes, start: int, end: int) -> None:
+        self._hdr_value += data[start:end]
+
+    def on_header_end(self) -> None:
+        if self._hdr_name.lower() == b"content-disposition":
+            self._content_disposition = self._hdr_value
+        self._hdr_name = b""
+        self._hdr_value = b""
+
+    def on_headers_finished(self) -> None:
+        if parse_options_header is None or not self._content_disposition:
+            return
+        _, options = parse_options_header(self._content_disposition)
+        name = options.get(b"name")
+        if name is not None:
+            self._field_name = name.decode("utf-8", errors="replace")
+        filename = options.get(b"filename")
+        if filename is not None:
+            self._filename = filename.decode("utf-8", errors="replace")
+
+    def on_end(self) -> None:
+        pass
+
+
+def _extract_multipart_fields(body: bytes, content_type: str) -> dict[str, Any] | None:
+    """从完整 multipart body 提取非文件字段与文件名;解析失败返回 None 不抛。"""
+    if multipart is None or parse_options_header is None:
+        return None
+    try:
+        _, params = parse_options_header(content_type.encode("latin-1", errors="replace"))
+        boundary = params[b"boundary"]
+    except Exception:  # noqa: BLE001
+        return None
+    collector = _MultipartFieldCollector()
+    callbacks = {
+        "on_part_begin": collector.on_part_begin,
+        "on_part_data": collector.on_part_data,
+        "on_part_end": collector.on_part_end,
+        "on_header_field": collector.on_header_field,
+        "on_header_value": collector.on_header_value,
+        "on_header_end": collector.on_header_end,
+        "on_headers_finished": collector.on_headers_finished,
+        "on_end": collector.on_end,
+    }
+    try:
+        parser = multipart.MultipartParser(boundary, callbacks)
+        parser.write(body)
+        parser.finalize()
+    except Exception:  # noqa: BLE001
+        return None
+    return collector.fields or None
+
+
+async def _prefill_external_audit_params(request: Request) -> None:
+    """外部端点执行前预解析表单字段,兜底 401/422 失败拦截的请求参数记录。
+
+    401(X-API-Key 鉴权依赖)与 422(FastAPI 参数校验)发生在端点体之前,
+    端点入口写的 audit_params 不会执行;这里在中间件层先把调用方原始提交的
+    非文件字段 + 文件名写入 request.state.audit_params,端点体执行时再覆盖为
+    结构化快照。因此成功/400/413/429 请求记录的仍是端点的结构化版本。
+
+    必须整体 ``await request.body()``:Starlette BaseHTTPMiddleware 的
+    _CachedRequest 只在 body() 时缓存供下游重放;stream() 会给下游发空 body,
+    破坏 FastAPI 表单解析。防内存放大:Content-Length 缺失(chunked 流式)或
+    超过外部上传上限的请求跳过预读(正常表单提交均携带 Content-Length)。
+    """
+    ct = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" not in ct:
+        return
+    if getattr(request.state, "audit_params", None):
+        return
+    raw_len = _parse_content_length(request.headers.get("content-length"))
+    limit = max(settings.external_max_upload_mb, 1) * 1024 * 1024
+    if raw_len is None or raw_len > limit:
+        return
+    try:
+        fields = _extract_multipart_fields(await request.body(), ct)
+        if fields:
+            request.state.audit_params = fields
+    except Exception:  # noqa: BLE001
+        logger.debug("prefill external audit params failed", exc_info=True)
+
+
 # 外部接口审计:按 HTTP 状态码映射固定的失败摘要,便于审计筛选。
 _EXTERNAL_ERROR_BY_STATUS: dict[int, str] = {
     400: "bad request",
@@ -200,7 +401,9 @@ async def _persist_external_call(*, request, status_code: int, elapsed_ms: int) 
     """异步写一条外部接口审计记录,绝不阻塞响应。
 
     从 request.state 读取端点设置的 audit_endpoint / audit_task_id / audit_document_no
-    (401/422 等端点未执行场景下为 None)。写库失败只记日志(遵循 task_records 双写规则)。
+    (401/422 等端点未执行场景下为 None)与 audit_params(请求参数快照:端点入口
+    写入结构化版本;401/422 端点体未执行时为中间件预读的原始表单字段,超大或
+    chunked 请求可能为 None)。写库失败只记日志(遵循 task_records 双写规则)。
     """
     endpoint = getattr(request.state, "audit_endpoint", None) or "unknown"
     task_id = getattr(request.state, "audit_task_id", None)
@@ -220,6 +423,9 @@ async def _persist_external_call(*, request, status_code: int, elapsed_ms: int) 
             error=_EXTERNAL_ERROR_BY_STATUS.get(status_code),
             request_id=request_id,
             content_length=_parse_content_length(request.headers.get("content-length")),
+            request_params=_sanitize_audit_params(
+                getattr(request.state, "audit_params", None)
+            ),
         )
     except Exception:  # noqa: BLE001
         logger.exception(
@@ -506,6 +712,7 @@ async def _external_statement_response(task_id: str) -> dict:
         response = {
             "task_id": task_id,
             "document_no": document_no,
+            "document_type": task.document_type,
             "status": status,
             "stage": task.info.stage,
             "progress": task.info.progress,
@@ -521,6 +728,7 @@ async def _external_statement_response(task_id: str) -> dict:
         response = {
             "task_id": task_id,
             "document_no": document_no,
+            "document_type": rec.document_type,
             "status": status,
             "stage": "",
             "progress": 1.0 if status == "done" else 0.0,
@@ -530,7 +738,9 @@ async def _external_statement_response(task_id: str) -> dict:
             report = StatementSummaryReport.model_validate(rec.report_statement)
 
     if status == "done" and report is not None:
-        external = build_external_statement_result(task_id, document_no, report)
+        external = build_external_statement_result(
+            task_id, document_no, report, document_type=response["document_type"]
+        )
         response.update(external)
     return response
 
@@ -578,6 +788,10 @@ def create_app() -> FastAPI:
 
         request.state.request_id = uuid.uuid4().hex[:12]
         with log_context(request_id=request.state.request_id):
+            # 失败拦截兜底:预解析表单字段——401/422 发生在端点体之前,
+            # 预读的原始字段让这些请求的审计也能携带请求参数。
+            if request.method == "POST":
+                await _prefill_external_audit_params(request)
             start = time.perf_counter()
             status_code = 500
             try:
@@ -751,6 +965,7 @@ def create_app() -> FastAPI:
         # 多 worker 同步:本 worker 可能未收到 PUT,内存 settings 落后于 PG。
         ensure_llm_config_fresh()
         return {
+            "llm_api_protocol": settings.llm_api_protocol,
             "llm_api_base": settings.llm_api_base,
             "llm_api_key": _mask_key(settings.llm_api_key),
             "llm_api_key_set": bool(settings.llm_api_key),
@@ -778,6 +993,7 @@ def create_app() -> FastAPI:
             "paddleocr_timeout": settings.paddleocr_timeout,
             "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
             "paddleocr_max_retries": settings.paddleocr_max_retries,
+            "judge_api_protocol": settings.judge_api_protocol,
             "judge_api_base": settings.judge_api_base,
             "judge_api_key": _mask_key(settings.judge_api_key),
             "judge_api_key_set": bool(settings.judge_api_key),
@@ -832,7 +1048,7 @@ def create_app() -> FastAPI:
         空串则清除已保存的 key)。
         """
         allowed = {
-            "llm_api_base", "llm_api_key", "llm_model",
+            "llm_api_protocol", "llm_api_base", "llm_api_key", "llm_model",
             "llm_timeout", "llm_max_concurrency", "llm_max_retries",
             "paddleocr_api_mode", "paddleocr_api_base", "paddleocr_api_key", "paddleocr_model",
             "paddleocr_official_api_base", "paddleocr_official_access_token",
@@ -840,7 +1056,7 @@ def create_app() -> FastAPI:
             "paddleocr_paddlex_api_base", "paddleocr_paddlex_endpoint",
             "paddleocr_paddlex_api_key",
             "paddleocr_timeout", "paddleocr_max_concurrency", "paddleocr_max_retries",
-            "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
+            "judge_api_protocol", "judge_api_base", "judge_api_key", "judge_model", "judge_timeout",
             "llm_direct_diff_prompt",
             "llm_diff_no_think_enabled",
             "embed_backend", "embed_api_base", "embed_api_key",
@@ -858,6 +1074,16 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"未知字段: {sorted(unknown)}")
 
         # 类型校验
+        if "llm_api_protocol" in body and body["llm_api_protocol"] not in VALID_PROTOCOLS:
+            raise HTTPException(
+                400,
+                "llm_api_protocol 必须为 openai / openai_responses / anthropic",
+            )
+        if "judge_api_protocol" in body and body["judge_api_protocol"] not in VALID_PROTOCOLS:
+            raise HTTPException(
+                400,
+                "judge_api_protocol 必须为 openai / openai_responses / anthropic",
+            )
         if "llm_timeout" in body and body["llm_timeout"] is not None:
             try:
                 float(body["llm_timeout"])
@@ -1002,6 +1228,7 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "config": {
+                "llm_api_protocol": settings.llm_api_protocol,
                 "llm_api_base": settings.llm_api_base,
                 "llm_api_key": _mask_key(settings.llm_api_key),
                 "llm_api_key_set": bool(settings.llm_api_key),
@@ -1029,6 +1256,7 @@ def create_app() -> FastAPI:
                 "paddleocr_timeout": settings.paddleocr_timeout,
                 "paddleocr_max_concurrency": settings.paddleocr_max_concurrency,
                 "paddleocr_max_retries": settings.paddleocr_max_retries,
+                "judge_api_protocol": settings.judge_api_protocol,
                 "judge_api_base": settings.judge_api_base,
                 "judge_api_key": _mask_key(settings.judge_api_key),
                 "judge_api_key_set": bool(settings.judge_api_key),
@@ -1199,6 +1427,18 @@ def create_app() -> FastAPI:
 
         source/source_url 二选一、target/target_url 二选一;URL 模式下后端下载落盘后复用同一 pipeline。
         """
+        # 审计参数快照:记录调用方提交的原始表单参数(文件只记文件名)。
+        # 放在所有校验之前,400/413/429 等失败的审计记录同样携带参数。
+        request.state.audit_params = {
+            "source": (source.filename or None) if source is not None else None,
+            "source_url": source_url,
+            "target": (target.filename or None) if target is not None else None,
+            "target_url": target_url,
+            "document_no": document_no,
+            "original_page_count": original_page_count,
+            "callback_url": callback_url,
+            "sync": sync,
+        }
         # source:文件与 URL 二选一(都传/都不传 → 400)
         source_url = (source_url or "").strip() or None
         has_source_file = source is not None and bool(source.filename)
@@ -1381,6 +1621,7 @@ def create_app() -> FastAPI:
         request.state.audit_endpoint = "contractCompare.image"
         request.state.audit_task_id = task_id
         request.state.audit_document_no = None
+        request.state.audit_params = {"page_number": page_number}
         if page_number < 1:
             raise HTTPException(404, "image not found")
         task = task_manager.get(task_id)
@@ -1414,6 +1655,7 @@ def create_app() -> FastAPI:
         request.state.audit_endpoint = "contractCompare.sourceImage"
         request.state.audit_task_id = task_id
         request.state.audit_document_no = None
+        request.state.audit_params = {"page_number": page_number}
         if page_number < 1:
             raise HTTPException(404, "image not found")
         task = task_manager.get(task_id)
@@ -1500,6 +1742,10 @@ def create_app() -> FastAPI:
             default=[], description="对帐单 URL(http/https .pdf,可重复多次);可与 target 混合"
         ),
         document_no: str = Form(...),
+        document_type: str = Form(
+            default="1",
+            description="单据类型:1=发票(默认)/ 2=对帐单;支持中文别名",
+        ),
         callback_url: str | None = Form(default=None),
         sync: bool = Form(default=False),
         _auth: None = Depends(require_external_api_key),
@@ -1510,7 +1756,18 @@ def create_app() -> FastAPI:
         `sync=true`:同步阻塞至统计完成,响应体内直接返回完整结果。
 
         支持多 PDF:target(文件)与 target_urls(URL)可混合提交,合计至少一个。
+        document_type 标记统计对象是发票还是对帐单(1=发票、2=对帐单,缺省 1),
+        入库并在对比记录中标识,供后续按单据类型查询。
         """
+        # 审计参数快照:原始表单参数(文件只记文件名),先于校验写入。
+        request.state.audit_params = {
+            "target": [t.filename for t in target if t.filename],
+            "target_urls": list(target_urls),
+            "document_no": document_no,
+            "document_type": document_type,
+            "callback_url": callback_url,
+            "sync": sync,
+        }
         # 规范化 URL 列表(去空白、去空串)
         try:
             target_urls = _normalize_target_urls(target_urls)
@@ -1525,6 +1782,10 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "document_no 不能为空")
         if len(document_no) > 255:
             raise HTTPException(400, "document_no 不能超过 255 个字符")
+        try:
+            document_type = _normalize_document_type(document_type)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         # callback_url:异步模式必填,同步模式可选(结果随响应返回)。
         callback_url = (callback_url or "").strip() or None
         if callback_url is None and not sync:
@@ -1624,6 +1885,7 @@ def create_app() -> FastAPI:
                 ocr_backend=settings.external_ocr_backend,
                 callback_url=callback_url,
                 document_no=document_no,
+                document_type=document_type,
                 external_request=True,
                 sync_mode=sync,
             )
@@ -1661,7 +1923,12 @@ def create_app() -> FastAPI:
                     content=await _external_statement_response(task_id),
                 )
             asyncio.create_task(run_coro)
-            return {"task_id": task_id, "document_no": document_no, "status": "pending"}
+            return {
+                "task_id": task_id,
+                "document_no": document_no,
+                "document_type": document_type,
+                "status": "pending",
+            }
         finally:
             # 仅清理未被 finalize 接管的临时文件(下载后校验/并发失败时)。
             for tmp in temp_paths:
@@ -2048,17 +2315,26 @@ def create_app() -> FastAPI:
         target_urls: list[str] = Form(
             default=[], description="测试用对帐单 URL(http/https .pdf,可重复多次);可与 target 混合"
         ),
+        document_type: str = Form(
+            default="1",
+            description="单据类型:1=发票(默认)/ 2=对帐单;支持中文别名",
+        ),
     ):
         """金额统计页 API 管线测试：复用对外任务产物流程，但不发送真实回调。
 
         与 /api/v1/compare/api-test 对称：免鉴权、强制 document_no 以 `API-TEST-`
         开头(查询端点据此隔离)、不设 callback_url、OCR 走 external_ocr_backend。
-        输入与正式 amountStat 一致：target 文件与 target_urls 可混合提交。
+        输入与正式 amountStat 一致：target 文件与 target_urls 可混合提交,
+        document_type 单据类型(1=发票/2=对帐单)同样入库以便记录页联调验证。
         """
         if not external_config_enabled():
             raise HTTPException(400, "请先保存完整的外部系统 API 配置")
         try:
             target_urls = _normalize_target_urls(target_urls)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            document_type = _normalize_document_type(document_type)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         has_file = bool(target) and any(item.filename for item in target)
@@ -2147,6 +2423,7 @@ def create_app() -> FastAPI:
                 ] + [filename for _temp_path, filename in url_filename_pairs],
                 ocr_backend=settings.external_ocr_backend,
                 document_no=document_no,
+                document_type=document_type,
                 external_request=True,
             )
             # 多文件保存:上传文件段 + URL 段均连续编号，避免覆盖。
@@ -2172,7 +2449,12 @@ def create_app() -> FastAPI:
                     ocr_backend=settings.external_ocr_backend,
                 )
             )
-            return {"task_id": task_id, "document_no": document_no, "status": "pending"}
+            return {
+                "task_id": task_id,
+                "document_no": document_no,
+                "document_type": document_type,
+                "status": "pending",
+            }
         finally:
             for temp_path in temp_paths:
                 temp_path.unlink(missing_ok=True)
@@ -2305,6 +2587,7 @@ def create_app() -> FastAPI:
     async def list_tasks(
         kind: str | None = None,
         status: str | None = None,
+        document_type: str | None = None,
         q: str | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -2314,6 +2597,8 @@ def create_app() -> FastAPI:
         查询参数:
           kind   - compare | raw | statement(可选筛选)
           status - pending | running | done | failed(可选筛选)
+          document_type - 1(发票) | 2(对帐单)(可选筛选,金额统计任务的
+                          单据类型细分,用于区分统计对象)
           q      - 模糊搜索关键字,匹配 task_id / document_no / source_name / target_names
           limit  - 默认 50,上限 200
           offset - 分页偏移
@@ -2329,12 +2614,15 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "kind 必须为 compare | raw | statement")
         if status is not None and status not in ("pending", "running", "done", "failed"):
             raise HTTPException(400, "status 必须为 pending | running | done | failed")
+        if document_type is not None and document_type not in ("1", "2"):
+            raise HTTPException(400, "document_type 必须为 1(发票)或 2(对帐单)")
         # 空白 q 视为未搜索,避免空串退化为 %% 全表匹配
         q = q.strip() if q else None
 
         records, total = await asyncio.to_thread(
             db_repo.list_tasks,
-            kind=kind, status=status, q=q, limit=limit, offset=offset,
+            kind=kind, status=status, document_type=document_type,
+            q=q, limit=limit, offset=offset,
         )
         items = [db_repo.to_dict(r, include_report=False) for r in records]
         return {"items": items, "total": total}
@@ -2458,6 +2746,33 @@ def create_app() -> FastAPI:
             "items": [db_repo.external_call_to_dict(r) for r in records],
             "total": total,
         }
+
+    @app.get("/api/v1/stats/daily")
+    async def get_daily_stats(
+        days: int = Query(default=14, ge=1, le=90, description="统计天数(仅未提供 start/end 时生效,含今天)"),
+        start: str | None = Query(default=None, description="起始日期 YYYY-MM-DD(北京时间);提供后进入自由区间模式"),
+        end: str | None = Query(default=None, description="结束日期 YYYY-MM-DD(北京时间);缺省为今天,晚于今天截断到今天"),
+    ):
+        """每日调用统计(控制台看板)。
+
+        按天(北京时间)聚合三类计数:任务数(按状态/类型细分)、模型调用数
+        (成功/失败,按 kind 细分)、外部接口调用数(成功/失败,按端点细分)。
+        区间:start/end 任一提供即用显式区间(缺 end 补今天、缺 start 由 days
+        回推),均缺省时为最近 days 天。start 晚于 end、跨度超 366 天、日期
+        格式非法返回 400。缺失日期补零,series 按日期升序。控制台口令鉴权
+        自动覆盖本端点。
+        """
+        try:
+            start_d = date.fromisoformat(start) if start else None
+            end_d = date.fromisoformat(end) if end else None
+        except ValueError:
+            raise HTTPException(400, "start/end 必须为 YYYY-MM-DD 格式日期")
+        try:
+            return await asyncio.to_thread(
+                db_repo.daily_stats, days=days, start=start_d, end=end_d
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     # —— 前端静态文件(DC_STATIC_DIR 设置时启用,单容器部署用)——
     # 所有 /api、/health 路由已注册完毕,catch-all 放最后不会拦截 API。

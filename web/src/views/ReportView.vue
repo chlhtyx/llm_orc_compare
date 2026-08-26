@@ -110,7 +110,7 @@ function onSelectClause(id: string) {
         </div>
         <div class="head-actions">
         <a class="btn" :href="htmlReportUrl">导出 HTML</a>
-        <button class="btn" type="button" @click="router.push('/')">新建比对</button>
+        <button class="btn" type="button" @click="router.push('/compare')">新建比对</button>
         </div>
     </header>
 

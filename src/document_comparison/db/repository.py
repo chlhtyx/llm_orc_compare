@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, case, cast, func, or_, select
 
 from ..models import (
     StatementSummaryReport,
@@ -36,6 +37,7 @@ def create_task(
     target_names: Iterable[str] | None = None,
     ocr_backend: str | None = None,
     document_no: str | None = None,
+    document_type: str | None = None,
     external_request: bool = False,
     callback_url: str | None = None,
 ) -> None:
@@ -44,6 +46,8 @@ def create_task(
     幂等性:若已存在同 task_id(同进程内极少发生),更新而非报错。
     callback_url 存在时,初始 callback_status 置 "pending"(交付后由
     update_callback_result 改写为 success/failed);无 callback 则保持 None。
+    document_type:单据类型细分("1"=发票 | "2"=对帐单),仅
+    statement 金额统计任务使用,其他任务为 None。
     """
     targets = list(target_names) if target_names else []
     # 有回调地址即视为待交付。
@@ -56,6 +60,7 @@ def create_task(
             existing.target_names = targets
             existing.ocr_backend = ocr_backend
             existing.document_no = document_no
+            existing.document_type = document_type
             existing.external_request = external_request
             existing.callback_url = callback_url
             existing.callback_status = cb_status
@@ -69,6 +74,7 @@ def create_task(
             target_names=targets,
             ocr_backend=ocr_backend,
             document_no=document_no,
+            document_type=document_type,
             external_request=external_request,
             callback_url=callback_url,
             callback_status=cb_status,
@@ -213,6 +219,7 @@ def list_tasks(
     *,
     kind: str | None = None,
     status: str | None = None,
+    document_type: str | None = None,
     q: str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -221,6 +228,7 @@ def list_tasks(
 
     q 非空时,在 task_id / document_no / source_name / target_names(JSONB) 上
     做不区分大小写的模糊匹配;调用方应自行 strip 并判空,避免空串退化为全表扫。
+    document_type 精确过滤("1"=发票 | "2"=对帐单),供按单据类型查询。
     """
     base = select(TaskRecord)
     count_q = select(func.count()).select_from(TaskRecord)
@@ -230,6 +238,9 @@ def list_tasks(
     if status:
         base = base.where(TaskRecord.status == status)
         count_q = count_q.where(TaskRecord.status == status)
+    if document_type:
+        base = base.where(TaskRecord.document_type == document_type)
+        count_q = count_q.where(TaskRecord.document_type == document_type)
     if q:
         # target_names 是 JSONB list[str];cast 成 text 后整体 ILIKE,
         # 对 list[str] 命中足够准确,且无需展开数组的子查询开销。
@@ -312,6 +323,7 @@ def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:
         "target_names": list(rec.target_names or []),
         "ocr_backend": rec.ocr_backend,
         "document_no": rec.document_no,
+        "document_type": rec.document_type,
         "external_request": rec.external_request,
         "overall_risk": rec.overall_risk,
         "change_status": rec.change_status,
@@ -470,6 +482,7 @@ def save_external_call(
     error: str | None,
     request_id: str,
     content_length: int | None,
+    request_params: dict[str, Any] | None = None,
 ) -> None:
     """追加一条外部接口入站请求审计记录。
 
@@ -490,6 +503,7 @@ def save_external_call(
             error=error[:512] if error else None,
             request_id=request_id,
             content_length=content_length,
+            request_params=request_params,
         ))
 
 
@@ -565,5 +579,138 @@ def external_call_to_dict(rec: ExternalApiCall) -> dict[str, Any]:
         "error": rec.error,
         "request_id": rec.request_id,
         "content_length": rec.content_length,
+        "request_params": rec.request_params,
         "created_at": rec.created_at.isoformat() if rec.created_at else None,
+    }
+
+
+# —— 每日调用统计(控制台看板)——
+
+# 统计口径的「天」按北京时间切分,与外部交付报告文件名口径一致;
+# 库里 created_at 均为 UTC timestamptz,SQL 内 AT TIME ZONE 转换后按天分组。
+_STATS_TZ = "Asia/Shanghai"
+
+
+def daily_stats(
+    *,
+    days: int = 14,
+    start: date | None = None,
+    end: date | None = None,
+) -> dict[str, Any]:
+    """按天聚合区间内任务数、模型调用数、外部接口调用数(看板用)。
+
+    区间(北京时间日期):start/end 任一提供即用显式区间——缺 end 补今天,
+    缺 start 由 days 回推;end 晚于今天截断到今天。start/end 均缺省时为
+    [今天-days+1, 今天]。start 晚于(截断后)end 或跨度超过 366 天抛
+    ValueError,由 API 层转 400。
+
+    三条 GROUP BY 查询后在 Python 侧合并,缺失日期补零,series 按日期升序:
+      tasks          = {total, by_status, by_kind}
+      llm_calls      = {total, success, failed, by_kind}
+      external_calls = {total, success, failed, by_endpoint}
+
+    成功口径:模型调用 error 为空且 status_code 在 [200, 400);外部调用
+    status_code < 400。注意 task_llm_calls.created_at 是任务结束时的批量
+    落库时间,统计意义为「归属任务完成日」而非精确调用时刻。
+    """
+    tzinfo = ZoneInfo(_STATS_TZ)
+    today = datetime.now(tzinfo).date()
+    if start is None and end is None:
+        start_day = today - timedelta(days=days - 1)
+        end_day = today
+    else:
+        end_day = min(end, today) if end is not None else today
+        if start is not None:
+            start_day = start
+        else:
+            start_day = end_day - timedelta(days=days - 1)
+        if start_day > end_day:
+            raise ValueError("start 不能晚于 end(或今天)")
+        if (end_day - start_day).days > 365:
+            raise ValueError("统计区间跨度不能超过 366 天")
+    # 北京时间 start_day 00:00 对应的 UTC 时刻,作为聚合下界
+    start_dt = datetime.combine(start_day, time.min, tzinfo=tzinfo).astimezone(timezone.utc)
+
+    def _day(col: Any) -> Any:
+        # .label 后按输出列名分组(PG 特性):否则 SELECT 与 GROUP BY 里的表达式
+        # 会渲染成不同绑定参数编号,PG 无法识别为同一表达式而报 GroupingError
+        return func.to_char(col.op("AT TIME ZONE")(_STATS_TZ), "YYYY-MM-DD").label("day")
+
+    task_day = _day(TaskRecord.created_at)
+    llm_day = _day(TaskLlmCall.created_at)
+    ext_day = _day(ExternalApiCall.created_at)
+
+    llm_ok = case(
+        (
+            TaskLlmCall.error.is_(None)
+            & TaskLlmCall.status_code.isnot(None)
+            & (TaskLlmCall.status_code >= 200)
+            & (TaskLlmCall.status_code < 400),
+            1,
+        ),
+        else_=0,
+    )
+    ext_ok = case((ExternalApiCall.status_code < 400, 1), else_=0)
+
+    with session_scope() as s:
+        task_rows = s.execute(
+            select(task_day, TaskRecord.kind, TaskRecord.status, func.count())
+            .where(TaskRecord.created_at >= start_dt)
+            .group_by(task_day, TaskRecord.kind, TaskRecord.status)
+        ).all()
+        llm_rows = s.execute(
+            select(llm_day, TaskLlmCall.kind, llm_ok, func.count())
+            .where(TaskLlmCall.created_at >= start_dt)
+            .group_by(llm_day, TaskLlmCall.kind, llm_ok)
+        ).all()
+        ext_rows = s.execute(
+            select(ext_day, ExternalApiCall.endpoint, ext_ok, func.count())
+            .where(ExternalApiCall.created_at >= start_dt)
+            .group_by(ext_day, ExternalApiCall.endpoint, ext_ok)
+        ).all()
+
+    series: dict[str, dict[str, Any]] = {}
+    day = start_day
+    while day <= end_day:
+        key = day.isoformat()
+        series[key] = {
+            "date": key,
+            "tasks": {"total": 0, "by_status": {}, "by_kind": {}},
+            "llm_calls": {"total": 0, "success": 0, "failed": 0, "by_kind": {}},
+            "external_calls": {"total": 0, "success": 0, "failed": 0, "by_endpoint": {}},
+        }
+        day += timedelta(days=1)
+
+    for d, kind, status, cnt in task_rows:
+        point = series.get(d)
+        if point is None:
+            continue
+        point["tasks"]["total"] += cnt
+        point["tasks"]["by_status"][status] = point["tasks"]["by_status"].get(status, 0) + cnt
+        point["tasks"]["by_kind"][kind] = point["tasks"]["by_kind"].get(kind, 0) + cnt
+
+    for d, kind, ok, cnt in llm_rows:
+        point = series.get(d)
+        if point is None:
+            continue
+        point["llm_calls"]["total"] += cnt
+        point["llm_calls"]["success" if ok else "failed"] += cnt
+        point["llm_calls"]["by_kind"][kind] = point["llm_calls"]["by_kind"].get(kind, 0) + cnt
+
+    for d, endpoint, ok, cnt in ext_rows:
+        point = series.get(d)
+        if point is None:
+            continue
+        point["external_calls"]["total"] += cnt
+        point["external_calls"]["success" if ok else "failed"] += cnt
+        point["external_calls"]["by_endpoint"][endpoint] = (
+            point["external_calls"]["by_endpoint"].get(endpoint, 0) + cnt
+        )
+
+    return {
+        "days": (end_day - start_day).days + 1,
+        "timezone": _STATS_TZ,
+        "start": start_day.isoformat(),
+        "end": end_day.isoformat(),
+        "series": [series[k] for k in sorted(series)],
     }

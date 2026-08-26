@@ -47,6 +47,7 @@
 | `target` | File(可多个) | 与 `target_urls` 至少一个 | 对帐单/发票 PDF(`.pdf`)。同名字段重复多次即可上传多个文件 |
 | `target_urls` | string[] | 与 `target` 至少一个 | PDF URL 数组。multipart 中推荐传一个 JSON 字符串数组，如 `target_urls=["https://.../a.pdf","https://.../b.pdf"]`；同名字段重复多次仍兼容。下载超 `external_max_upload_mb` 会中断 |
 | `document_no` | string | **是** | 单据号(用于回调与审计追溯)。非空,≤ 255 字符 |
+| `document_type` | string | 否 | **单据类型**(字符串枚举):`1`=发票 / `2`=对帐单(默认 `1`)。用于区分统计对象,入库并在控制台「对比记录」中标识,支持后续按类型查询。兼容中文别名 `发票`/`对帐单`/`对账单`;其他值 → `400` |
 | `callback_url` | string | 异步必填 / 同步可选 | 结果回调地址。规则见[合同比对文档](./external-api.md#callback_url-校验规则) |
 | `sync` | bool | 否 | `true`=同步阻塞,`false`(默认)=异步受理 |
 
@@ -72,10 +73,13 @@
 curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
   -H "X-API-Key: YOUR_KEY" \
   -F "document_no=STMT-2026-0001" \
+  -F "document_type=1" \
   -F "sync=true" \
   -F "target=@statement1.pdf" \
   -F "target=@statement2.pdf"
 ```
+
+> `document_type` 可省略(默认 `1` 发票);统计对象为对帐单时传 `2`。
 
 ### 响应
 
@@ -94,6 +98,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
   -H "X-API-Key: YOUR_KEY" \
   -F "document_no=STMT-2026-0001" \
+  -F "document_type=1" \
   -F "callback_url=https://your.system/callback" \
   -F "target=@statement1.pdf"
 ```
@@ -104,6 +109,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 {
   "task_id": "9f3c4a1b7d8e2e1f",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "status": "pending"
 }
 ```
@@ -132,6 +138,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 {
   "task_id": "9f3c4a1b7d8e2e1f",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "status": "running",
   "stage": "statement_file_1",
   "progress": 0.35,
@@ -145,6 +152,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 {
   "task_id": "9f3c4a1b7d8e2e1f",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "status": "done",
   "stage": "done",
   "progress": 1.0,
@@ -169,6 +177,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 {
   "task_id": "9f3c4a1b7d8e2e1f",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "status": "failed",
   "stage": "statement_aggregate",
   "progress": 0.5,
@@ -190,6 +199,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 | --- | --- | --- |
 | `task_id` | string | 任务 ID(16 位 hex) |
 | `document_no` | string | 提交时传入的单据号 |
+| `document_type` | string \| null | 单据类型:`1`(发票)/ `2`(对帐单);区分统计对象,供后续按类型查询。历史任务可能为 `null` |
 | `status` | string | `pending` / `running` / `done` / `failed` |
 | `stage` | string | 当前阶段名(如 `statement_file_2`、`statement_aggregate`、`done`);`done`/`failed` 后为终态 stage |
 | `progress` | float | 0.0 ~ 1.0 |
@@ -226,7 +236,7 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 | --- | --- | --- |
 | **200** | 同步模式受理(无论任务成败) | 响应体 `status` 区分 |
 | **202** | 异步模式受理 | — |
-| **400** | 参数校验失败(无 PDF、后缀非 `.pdf`、`document_no` 空/超长、异步缺 `callback_url`、URL 非法、超页数、PDF 解析失败、URL 下载失败) | 校验原文 |
+| **400** | 参数校验失败(无 PDF、后缀非 `.pdf`、`document_no` 空/超长、`document_type` 非法、异步缺 `callback_url`、URL 非法、超页数、PDF 解析失败、URL 下载失败) | 校验原文 |
 | **401** | `X-API-Key` 缺失或不匹配 | `invalid external API key` |
 | **404** | task_id 不存在或非本接口创建 | `task not found` |
 | **413** | 文件超过 `external_max_upload_mb` | `第 N 个文件超过 ... MiB 上限` |
@@ -268,6 +278,7 @@ X-Event-Id: {event_id}
   "status": "done",
   "event_type": "statement.summary.completed",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "grand_total": 100000.0,
   "verdict": "clean",
   "file_totals": [
@@ -293,6 +304,7 @@ X-Event-Id: {event_id}
   "status": "failed",
   "event_type": "statement.summary.failed",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "error": "等待执行槽位超时(...)"
 }
 ```
@@ -310,4 +322,4 @@ X-Event-Id: {event_id}
 | `POST` | `/api/v1/statement/api-test` | **管线测试**(免鉴权,不触发回调,强制 `API-TEST-` 前缀) |
 | `GET` | `/api/v1/statement/api-test/{task_id}` | 查询管线测试结果(响应结构同上,仅放行 `API-TEST-` 任务) |
 
-> 管线测试端点(`api-test`)与对外端点对称,接受重复 `target` 文件和/或 `target_urls` JSON 数组(也兼容重复 URL 字段),用于本机前端在不触发真实回调、不需要 `X-API-Key` 的前提下验证整条 OCR + 表格抽取 + 求和管线。提交时 `document_no` 由服务端自动生成为 `API-TEST-{随机串}`,查询端点据此隔离真实业务任务(非 `API-TEST-` 前缀 → `404`)。这些端点不属于 `/api/v1/external/*` 前缀,**不**入审计中间件、**不**计入外部调用审计表。
+> 管线测试端点(`api-test`)与对外端点对称,接受重复 `target` 文件和/或 `target_urls` JSON 数组(也兼容重复 URL 字段),同样接受 `document_type`(1=发票 / 2=对帐单)字段,用于本机前端在不触发真实回调、不需要 `X-API-Key` 的前提下验证整条 OCR + 表格抽取 + 求和管线。提交时 `document_no` 由服务端自动生成为 `API-TEST-{随机串}`,查询端点据此隔离真实业务任务(非 `API-TEST-` 前缀 → `404`)。这些端点不属于 `/api/v1/external/*` 前缀,**不**入审计中间件、**不**计入外部调用审计表。

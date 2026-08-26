@@ -360,14 +360,19 @@ def build_external_statement_result(
     task_id: str,
     document_no: str,
     report: StatementSummaryReport,
+    *,
+    document_type: str | None = None,
 ) -> dict:
     """构造金额统计查询响应与完成回调共享的稳定结果结构。
 
     顶层放业务最关心的核心汇总字段(总金额/判定/每文件合计/计数),便于外部系统直接消费;
     与 `build_external_result` 风格一致:查询响应与回调 payload 共用同一结构。
+    document_type:单据类型细分("1"=发票 | "2"=对帐单),供外部系统
+    区分统计对象;未提供时为 None。
     """
     return {
         "document_no": document_no,
+        "document_type": document_type,
         "grand_total": report.grand_total,
         "verdict": report.verdict,
         "file_totals": [

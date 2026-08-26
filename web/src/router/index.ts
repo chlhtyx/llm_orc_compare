@@ -4,7 +4,17 @@ const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
+      // 看板为控制台默认首页(原提交页迁至 /compare)。
       path: '/',
+      redirect: '/dashboard',
+    },
+    {
+      path: '/dashboard',
+      name: 'dashboard',
+      component: () => import('@/views/DashboardView.vue'),
+    },
+    {
+      path: '/compare',
       name: 'submit',
       component: () => import('@/views/SubmitView.vue'),
     },

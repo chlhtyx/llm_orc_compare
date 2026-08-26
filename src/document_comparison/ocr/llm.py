@@ -6,8 +6,9 @@
 - 每页 PDF 渲染为 PNG,以 image_url 发多模态请求,要求 LLM 返回 JSON 版面块。
 - 输出统一为 Block(bbox 为 PDF 点坐标),与 mock 引擎一致。
 
-配置(统一持久化于 .dc_data/llm_config.json,在 UI 设置页维护):
-- llm_api_base           API 根地址(兼容 OpenAI 协议)
+配置(统一持久化于 Postgres llm_config 表,在 UI 设置页维护):
+- llm_api_protocol       接口协议(openai | openai_responses | anthropic,默认 openai)
+- llm_api_base           API 根地址(按所选协议拼 /chat/completions、/responses 或 /messages)
 - llm_api_key            API Key
 - llm_model              多模态模型名
 - llm_timeout            单次请求读取超时秒(默认 120;连接超时固定 10s)
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 from .._llm_json import extract_llm_json
 from ..config import settings
+from ..llm_protocol import build_chat_request, parse_chat_content
 from ..models import Block, PageMeta, TableStructure
 from ..observability import (
     log_model_failure,
@@ -101,6 +103,7 @@ class LLMOCREngine:
         timeout: float | None = None,
         max_concurrency: int | None = None,
         max_retries: int | None = None,
+        api_protocol: str | None = None,
     ) -> None:
         self.api_base = api_base if api_base is not None else settings.llm_api_base
         self.api_key = api_key if api_key is not None else settings.llm_api_key
@@ -111,6 +114,9 @@ class LLMOCREngine:
         )
         self.max_retries = (
             max_retries if max_retries is not None else settings.llm_max_retries
+        )
+        self.api_protocol = (
+            api_protocol if api_protocol is not None else settings.llm_api_protocol
         )
         self._dpi = settings.pdf_render_dpi
 
@@ -268,15 +274,22 @@ class LLMOCREngine:
         kind: str,
         client: httpx.Client | None = None,
     ) -> str:
-        """统一的 OpenAI 兼容 chat/completions POST + 重试骨架,返回 message content。
+        """统一的对话 LLM POST + 重试骨架,返回 assistant 文本。
+
+        payload 按 OpenAI Chat Completions 规范形态构造,发送前经
+        llm_protocol.build_chat_request 按所选协议(api_protocol)转换为
+        /chat/completions、/responses 或 /messages 的请求体。
 
         可重试瞬态故障:超时 / 网络传输错误 / 429 / 5xx。
         (httpx.TransportError 覆盖 ConnectError / ReadTimeout / NetworkError 等)
         4xx(鉴权、参数错误等)不可重试,立即抛出。
         """
-        url = self.api_base.rstrip("/") + "/chat/completions"
-        # 本地 OpenAI 兼容服务可能无需 key；空 key 时不要构造非法 Bearer 头。
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        url, headers, payload = build_chat_request(
+            api_base=self.api_base,
+            api_key=self.api_key,
+            payload=payload,
+            protocol=self.api_protocol,
+        )
         last_exc: Exception | None = None
         owns_client = client is None
         if client is None:
@@ -322,7 +335,7 @@ class LLMOCREngine:
                             raise
                         data = resp.json()
                         log_model_response(logger, kind, resp.status_code, data, request_started)
-                        return data["choices"][0]["message"]["content"]
+                        return parse_chat_content(data, protocol=self.api_protocol)
                 if attempt < self.max_retries:
                     backoff = min(2 ** attempt, 8) + random.random()
                     logger.info("%s retry after %.1fs", kind, backoff)

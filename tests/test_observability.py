@@ -173,6 +173,38 @@ def test_image_base64_scrubbed(quiet_logger):
     assert "AAAA" not in str(recs[0].payload), "原始 base64 不应出现在 payload"
 
 
+def test_anthropic_base64_image_source_scrubbed(quiet_logger):
+    """Anthropic 协议的裸 base64(source.data,不以 data: 开头)同样脱敏。"""
+    big_b64 = "Q" * 5000
+    payload = {
+        "model": "claude-sonnet",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": big_b64,
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    with llm_call_collector() as recs:
+        t = log_model_request(quiet_logger, "ocr", "http://x/v1/messages", payload, 1)
+        log_model_response(quiet_logger, "ocr", 200, {"ok": True}, t)
+    source = recs[0].payload["messages"][0]["content"][0]["source"]
+    assert source["media_type"] == "image/png"
+    assert isinstance(source["data"], dict)
+    assert source["data"]["base64_chars"] == 5000
+    assert len(source["data"]["sha256"]) == 64
+    assert "QQQQ" not in str(recs[0].payload), "原始 base64 不应出现在 payload"
+
+
 def test_model_log_summary_does_not_include_contract_text():
     """文件日志只保留可关联摘要，合同正文仍仅存在受控的调用审计记录中。"""
     secret_clause = "甲方应于2026年8月1日前支付987654元"
@@ -327,6 +359,69 @@ def test_log_context_is_scoped_and_restored():
             assert get_log_context() == {"task_id": "task-a", "request_id": "req-b"}
         assert get_log_context() == {"task_id": "task-a"}
     assert get_log_context() == {}
+
+
+def test_set_log_fields_merges_and_removes():
+    """set_log_fields 即时合并字段,None 移除;仅影响当前执行链。"""
+    from document_comparison.observability import get_log_context, set_log_fields
+
+    assert get_log_context() == {}
+    with log_context(task_id="task-a", task_kind="compare"):
+        set_log_fields(step="ocr")
+        assert get_log_context() == {"task_id": "task-a", "task_kind": "compare", "step": "ocr"}
+        set_log_fields(step="align")  # 覆盖同名
+        assert get_log_context()["step"] == "align"
+        set_log_fields(step=None)  # None 移除
+        assert "step" not in get_log_context()
+    assert get_log_context() == {}
+
+
+def test_log_format_renders_biz_step_tag(caplog):
+    """日志行带【业务-步骤】标注:任务阶段日志 biz-step,任务级仅业务,其它为 -。"""
+    import logging as _logging
+
+    from document_comparison.logging_config import _ContextFilter, _FMT
+
+    formatter = _logging.Formatter(_FMT)
+    record = _logging.LogRecord(
+        "doc.test", _logging.INFO, __file__, 1, "hello", None, None
+    )
+    _ContextFilter().filter(record)
+    assert formatter.format(record).count("【-】") == 1  # 无上下文
+
+    with log_context(task_id="t1", task_kind="compare"):
+        with log_context(step="ocr"):
+            record = _logging.LogRecord(
+                "doc.test", _logging.INFO, __file__, 1, "hello", None, None
+            )
+            _ContextFilter().filter(record)
+            assert "【compare-ocr】" in formatter.format(record)
+        record = _logging.LogRecord(
+            "doc.test", _logging.INFO, __file__, 1, "hello", None, None
+        )
+        _ContextFilter().filter(record)
+        assert "【compare】" in formatter.format(record)
+
+
+def test_step_label_maps_pipeline_stages():
+    """进度 stage 名 → 步骤标签:主映射沿用计时桶,对帐单细分,任务级不切换。"""
+    from document_comparison.tasks import _step_label
+
+    assert _step_label("word_parsing") == "word"
+    assert _step_label("ocr") == "ocr"
+    assert _step_label("structure_done") == "structure"
+    assert _step_label("align") == "align"
+    assert _step_label("compare") == "compare"
+    assert _step_label("normalize") == "normalize"
+    assert _step_label("diff") == "diff"
+    assert _step_label("statement_start") == "start"
+    assert _step_label("statement_aggregate") == "aggregate"
+    assert _step_label("statement_file_2") == "file-2"
+    assert _step_label("statement_file_3_done") == "file-3"
+    # 任务级事件不切换步骤
+    assert _step_label("start") is None
+    assert _step_label("done") is None
+    assert _step_label("failed") is None
 
 
 # —— response 截断 ——

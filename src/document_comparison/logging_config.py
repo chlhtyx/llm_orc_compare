@@ -19,7 +19,10 @@ from logging.handlers import RotatingFileHandler
 from .config import settings
 from .observability import get_log_context
 
-_FMT = "%(asctime)s | %(levelname)-7s | %(name)s | task=%(task_id)s req=%(request_id)s | %(message)s"
+_FMT = (
+    "%(asctime)s | %(levelname)-7s | %(name)s | 【%(biz_tag)s】 "
+    "task=%(task_id)s req=%(request_id)s | %(message)s"
+)
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 # 噪音较大的第三方库统一压到 WARNING
@@ -29,12 +32,24 @@ _configured = False
 
 
 class _ContextFilter(logging.Filter):
-    """为每条日志补齐 task/request 标识，未关联时显式显示为 ``-``。"""
+    """为每条日志补齐业务/步骤标注与 task/request 标识，未关联时显式显示为 ``-``。
+
+    业务取 log_context 的 ``task_kind``(compare/raw/statement,TaskManager 注入);
+    步骤取 ``step``(流水线进度回调按阶段切换)。两者拼接为 ``【compare-ocr】``
+    形式的 biz_tag:只有业务无步骤时仅显示业务(任务级日志),均无时为 ``-``
+    (启动/API 等非任务日志)。
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         context = get_log_context()
         record.task_id = context.get("task_id", "-")
         record.request_id = context.get("request_id", "-")
+        biz = context.get("task_kind") or ""
+        step = context.get("step") or ""
+        if biz and step:
+            record.biz_tag = f"{biz}-{step}"
+        else:
+            record.biz_tag = biz or step or "-"
         return True
 
 

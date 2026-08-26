@@ -152,6 +152,17 @@ def test_submit_success_records_audit_with_task_and_document(external_client, mo
     assert rec.api_key_sha256 == expected_fp
     assert rec.error is None
     assert rec.elapsed_ms is not None and rec.elapsed_ms >= 0
+    # 请求参数快照:表单字段 + 文件名(不记文件内容)
+    assert rec.request_params == {
+        "source": "source.docx",
+        "source_url": None,
+        "target": "target.pdf",
+        "target_url": None,
+        "document_no": "BILL-AUDIT-1",
+        "original_page_count": None,
+        "callback_url": "http://internal/callback",
+        "sync": False,
+    }
     # 响应头携带 request_id,与审计记录一致
     assert response.headers.get("X-Request-Id") == rec.request_id
 
@@ -184,6 +195,8 @@ def test_result_query_records_audit(external_client, monkeypatch, tmp_path):
     assert rec.method == "GET"
     assert rec.status_code == 200
     assert rec.error is None
+    # 结果查询无额外参数(task_id 已有专列),无快照
+    assert rec.request_params is None
 
 
 def test_image_request_records_audit(external_client, monkeypatch, tmp_path):
@@ -212,14 +225,28 @@ def test_image_request_records_audit(external_client, monkeypatch, tmp_path):
     )
     rec = next(c for c in _all_calls() if c.task_id == task_id and c.endpoint == "contractCompare.image")
     assert rec.status_code == 200
+    assert rec.request_params == {"page_number": 1}
 
 
 def test_auth_failure_401_records_audit_without_task_id(external_client):
-    """401 鉴权失败:端点未执行,task_id 为 None,但审计仍记录。"""
-    external_client.get(
-        "/api/v1/external/contractCompare/nonexistent",
+    """401 鉴权失败:端点未执行,task_id 为 None,但审计仍记录。
+
+    请求参数由审计中间件预读兜底:multipart 里的非文件字段原样记录,
+    文件字段只记文件名。
+    """
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
         headers={"X-API-Key": "wrong-key"},
+        data={
+            "document_no": "BILL-401",
+            "callback_url": "http://internal/callback",
+        },
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
     )
+    assert response.status_code == 401
     wrong_fp = hashlib.sha256(b"wrong-key").hexdigest()
 
     def _has_401() -> bool:
@@ -236,6 +263,55 @@ def test_auth_failure_401_records_audit_without_task_id(external_client):
     assert rec.document_no is None
     assert rec.error == "invalid external API key"
     assert rec.api_key_sha256 == wrong_fp
+    # 中间件预读的原始表单字段(端点体未执行)
+    assert rec.request_params == {
+        "source": "source.docx",
+        "target": "target.pdf",
+        "document_no": "BILL-401",
+        "callback_url": "http://internal/callback",
+    }
+
+
+def test_auth_failure_401_skips_prefill_for_oversized_body(external_client, monkeypatch):
+    """401 + Content-Length 超过外部上传上限:预读跳过(防内存放大),无参数快照。"""
+    monkeypatch.setattr(settings, "external_max_upload_mb", 1)
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "wrong-key"},
+        data={"document_no": "BILL-401-BIG", "callback_url": "http://internal/callback"},
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", io.BytesIO(b"x" * (1024 * 1024 + 1)), "application/pdf"),
+        },
+    )
+    assert response.status_code == 401
+    _wait_for_call_count(lambda: any(c.status_code == 401 for c in _all_calls()))
+    rec = next(c for c in _all_calls() if c.status_code == 401)
+    assert rec.request_params is None
+
+
+def test_422_validation_failure_records_audit_with_prefilled_params(external_client):
+    """422(缺必填 document_no,FastAPI 校验失败,端点体未执行):审计记录,
+    请求参数来自中间件预读(调用方已提交的字段仍在)。"""
+    response = external_client.post(
+        "/api/v1/external/contractCompare",
+        headers={"X-API-Key": "external-test-key"},
+        data={"callback_url": "http://internal/callback"},
+        files={
+            "source": ("source.docx", _docx_bytes(), "application/octet-stream"),
+            "target": ("target.pdf", _pdf_bytes(), "application/pdf"),
+        },
+    )
+    assert response.status_code == 422
+    _wait_for_call_count(lambda: any(c.status_code == 422 for c in _all_calls()))
+    rec = next(c for c in _all_calls() if c.status_code == 422)
+    assert rec.error == "validation error"
+    assert rec.task_id is None
+    assert rec.request_params == {
+        "source": "source.docx",
+        "target": "target.pdf",
+        "callback_url": "http://internal/callback",
+    }
 
 
 def test_413_upload_limit_records_audit(external_client, monkeypatch):
@@ -258,6 +334,10 @@ def test_413_upload_limit_records_audit(external_client, monkeypatch):
     assert rec.error == "payload too large"
     # 413 发生在 task 创建之前
     assert rec.task_id is None
+    # 参数快照在端点入口写入,校验失败仍携带
+    assert rec.request_params is not None
+    assert rec.request_params["source"] == "source.docx"
+    assert rec.request_params["document_no"] == "BILL-BIG"
 
 
 def test_per_task_endpoint_and_to_dict(external_client, monkeypatch):
@@ -295,7 +375,7 @@ def test_per_task_endpoint_and_to_dict(external_client, monkeypatch):
     assert item["status_code"] == 202
     assert item["document_no"] == "BILL-EP"
     # to_dict 序列化字段齐全
-    for key in ("id", "method", "client_ip", "api_key_sha256", "elapsed_ms", "request_id", "created_at"):
+    for key in ("id", "method", "client_ip", "api_key_sha256", "elapsed_ms", "request_id", "request_params", "created_at"):
         assert key in item
 
 
@@ -410,6 +490,15 @@ def test_statement_submit_and_result_record_audit(external_client, monkeypatch):
     assert rec.status_code == 202
     assert rec.document_no == "STMT-AUDIT-1"
     assert rec.error is None
+    # 请求参数快照:多文件只记文件名列表;document_type 记调用方原始提交值
+    assert rec.request_params == {
+        "target": ["a.pdf"],
+        "target_urls": [],
+        "document_no": "STMT-AUDIT-1",
+        "document_type": "1",
+        "callback_url": "http://internal/callback",
+        "sync": False,
+    }
     assert submit.headers.get("X-Request-Id") == rec.request_id
 
     # 查询端点

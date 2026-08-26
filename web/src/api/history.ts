@@ -17,6 +17,8 @@ export interface TaskListItem {
   ocr_backend: string | null
   /** 单据号(仅外部接口核对请求携带,普通提交为 null)。 */
   document_no: string | null
+  /** 单据类型细分(金额统计任务,字符串枚举):'1'=发票 | '2'=对帐单;其他任务为 null。 */
+  document_type: '1' | '2' | null
   /** 是否外部接口提交的任务(携带 document_no)。 */
   external_request: boolean
   overall_risk: OverallRisk | null
@@ -108,12 +110,18 @@ export interface ExternalCallItem {
   /** 与响应头 X-Request-Id / 响应体 request_id 一致 */
   request_id: string
   content_length: number | null
+  /** 请求参数快照:提交类含表单字段(文件只记文件名)与 callback_url/sync 等,
+   *  图片类含 page_number;401/422 端点体未执行时为中间件预读的原始字段
+   *  (chunked 或超大 body 未预读时为 null) */
+  request_params: Record<string, unknown> | null
   created_at: string | null    // ISO
 }
 
 export interface ListTasksParams {
   kind?: TaskKind
   status?: TaskStatus
+  /** 单据类型筛选('1'=发票 | '2'=对帐单),金额统计任务的细分。 */
+  document_type?: '1' | '2'
   /** 模糊搜索关键字,后端匹配 task_id/document_no/source_name/target_names。 */
   q?: string
   limit?: number
@@ -129,6 +137,7 @@ export function listTasks(params: ListTasksParams = {}): Promise<ListTasksRespon
   const qs = new URLSearchParams()
   if (params.kind) qs.set('kind', params.kind)
   if (params.status) qs.set('status', params.status)
+  if (params.document_type) qs.set('document_type', params.document_type)
   // trim 后非空才作为搜索条件,空串等同未搜索
   const q = params.q?.trim()
   if (q) qs.set('q', q)

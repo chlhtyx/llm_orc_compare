@@ -99,6 +99,22 @@ def get_log_context() -> dict[str, str]:
     """供 logging handler 读取当前关联上下文，返回副本避免被意外修改。"""
     return dict(current_log_context.get())
 
+
+def set_log_fields(**fields: str | None) -> None:
+    """在当前执行链即时合并日志字段(无作用域的 ``log_context`` 变体)。
+
+    供流水线进度回调按阶段切换 ``step`` 使用:pipeline 在单个工作线程内顺序
+    执行,回调里 set 只影响该线程 context(及其后创建的 OCR 孙线程),主协程
+    与其它任务不受影响。value 为 None 的字段从上下文移除。
+    """
+    current = dict(current_log_context.get())
+    for key, value in fields.items():
+        if value is None:
+            current.pop(key, None)
+        else:
+            current[key] = value
+    current_log_context.set(current)
+
 # 任务级模型/OCR 审计 kind 白名单;embedding 不收集(文本→向量,量太大)。
 _COLLECTED_KINDS = frozenset(
     {
@@ -168,11 +184,33 @@ def _safe_model_value(value: Any) -> Any:
 
     将 ``data:image/...;base64,<...>`` 替换为 ``{data_url, base64_chars, sha256}``,
     既保留可识别性(sha256 可用于跨记录比对同一张图),又避免几 MB base64 撑爆 JSONB。
+
+    Anthropic Messages 协议的图片是裸 base64(source.data,不以 ``data:`` 开头),
+    在 dict 分支单独识别脱敏;OpenAI 协议的 data URL 由字符串分支覆盖。
     """
     copied = deepcopy(value)
 
     def scrub(item: Any) -> Any:
         if isinstance(item, dict):
+            source = item.get("source")
+            if (
+                isinstance(source, dict)
+                and source.get("type") == "base64"
+                and isinstance(source.get("data"), str)
+            ):
+                encoded = source["data"]
+                item = {
+                    **item,
+                    "source": {
+                        **source,
+                        "data": {
+                            "base64_chars": len(encoded),
+                            "sha256": hashlib.sha256(
+                                encoded.encode("ascii")
+                            ).hexdigest(),
+                        },
+                    },
+                }
             return {key: scrub(val) for key, val in item.items()}
         if isinstance(item, list):
             return [scrub(val) for val in item]

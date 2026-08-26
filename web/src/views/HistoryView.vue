@@ -51,6 +51,13 @@ const kindText: Record<TaskKind, string> = {
   statement: '对帐单统计',
 }
 
+/** 金额统计任务的单据类型细分('1'=发票 / '2'=对帐单,字符串枚举)。
+ *  字段上线前的历史任务与内部提交未携带该值(null),不显示标签。 */
+const documentTypeText: Record<'1' | '2', string> = {
+  '1': '发票',
+  '2': '对帐单',
+}
+
 const statusText: Record<TaskStatus, string> = {
   pending: '排队中',
   running: '处理中',
@@ -320,6 +327,19 @@ function formatMs(ms: number | null): string {
   return `${(ms / 1000).toFixed(2)} s`
 }
 
+/** 请求参数快照 → 「k=v」条目(null 值显示 —;对象/数组走 JSON)。 */
+function paramEntries(params: Record<string, unknown> | null): Array<[string, string]> {
+  if (!params) return []
+  return Object.entries(params).map(([key, value]) => [
+    key,
+    value == null
+      ? '—'
+      : typeof value === 'string'
+        ? value
+        : JSON.stringify(value),
+  ])
+}
+
 /** 把对象渲染成可读 JSON(回调 tab 展示 callback_payload;LLM 卡片的展示在 LlmCallList 组件内)。 */
 function jsonPreview(value: unknown): string {
   try {
@@ -416,6 +436,13 @@ onMounted(refresh)
                 <td class="mono small">{{ formatTime(item.created_at) }}</td>
                 <td>
                   <span class="kind-tag" :data-kind="item.kind">{{ kindText[item.kind] }}</span>
+                  <span
+                    v-if="item.kind === 'statement' && item.document_type != null"
+                    class="doc-type-tag"
+                    :data-doc-type="item.document_type"
+                  >
+                    {{ documentTypeText[item.document_type] }}
+                  </span>
                 </td>
                 <td class="id-cell">
                   <div class="doc-no" :title="item.document_no ?? ''">
@@ -557,6 +584,20 @@ onMounted(refresh)
                             </span>
                             <span class="muted">请求 ID:</span>
                             <span class="mono">{{ call.request_id }}</span>
+                          </div>
+                          <div
+                            v-if="paramEntries(call.request_params).length"
+                            class="ext-params small"
+                          >
+                            <span class="muted">请求参数:</span>
+                            <span
+                              v-for="[key, val] in paramEntries(call.request_params)"
+                              :key="key"
+                              class="ext-param"
+                            >
+                              <span class="muted">{{ key }}</span>
+                              <span class="mono">{{ val }}</span>
+                            </span>
                           </div>
                         </li>
                      </ul>
@@ -792,6 +833,23 @@ table.task-table {
 .kind-tag[data-kind='raw'] { background: var(--risk-low-bg); color: var(--risk-low); }
 .kind-tag[data-kind='statement'] { background: var(--risk-medium-bg); color: var(--risk-medium); }
 
+/* 金额统计任务的单据类型细分(发票 / 对帐单),与 kind 标签同列分行展示 */
+.doc-type-tag {
+  display: block;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.doc-type-tag[data-doc-type='2'] {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
 .status-tag {
   display: inline-block;
   padding: 2px 8px;
@@ -953,6 +1011,16 @@ table.task-table {
   padding: 6px 12px;
   color: var(--risk-high);
   background: var(--risk-high-bg);
+}
+.ext-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 0 12px 6px;
+}
+.ext-param {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .llm-block-title {
   margin-bottom: 4px;

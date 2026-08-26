@@ -19,3 +19,4 @@ htmlcov/
 !tests/fixtures/*
 .zcode/
 .DS_Store
+.playwright-mcp

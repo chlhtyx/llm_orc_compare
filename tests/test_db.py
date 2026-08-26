@@ -120,6 +120,124 @@ def test_save_milestone_event_orphan_skipped(db_isolated):
     assert db_repo.get_task_events("ghost") == []
 
 
+def test_daily_stats_buckets_by_beijing_day(db_isolated):
+    """daily_stats:按北京时间切天聚合任务/模型调用/外部调用,缺失日期补零。"""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    from document_comparison.db.models import ExternalApiCall, TaskLlmCall
+
+    beijing = ZoneInfo("Asia/Shanghai")
+    now_bj = datetime.now(beijing)
+    yst = now_bj - timedelta(days=1)
+    # 北京时间昨天 01:00 与 23:00 —— 对应两个不同 UTC 日但同属一个北京日,
+    # 用于验证天边界按北京时间而非 UTC 切分
+    yst_0100 = yst.replace(hour=1, minute=0, second=0, microsecond=0)
+    yst_2300 = yst.replace(hour=23, minute=0, second=0, microsecond=0)
+
+    with db_repo.session_scope() as s:
+        s.add_all([
+            TaskRecord(task_id="d-t1", kind="compare", status="done", created_at=now_bj),
+            TaskRecord(task_id="d-t2", kind="raw", status="failed", created_at=now_bj),
+            TaskRecord(task_id="d-t3", kind="statement", status="done", created_at=yst_0100),
+            TaskRecord(task_id="d-t4", kind="compare", status="running", created_at=yst_2300),
+        ])
+        # TaskRecord 与 TaskLlmCall 之间无 ORM relationship,先 flush 保证 FK 顺序
+        s.flush()
+        s.add_all([
+            TaskLlmCall(task_id="d-t1", kind="ocr", status_code=200, payload={}),
+            TaskLlmCall(task_id="d-t1", kind="judge", status_code=500, payload={}),
+            TaskLlmCall(task_id="d-t1", kind="ocr", status_code=None, error="timeout", payload={}),
+        ])
+        s.add_all([
+            ExternalApiCall(
+                task_id="d-t1", endpoint="contractCompare.submit", method="POST",
+                status_code=200, request_id="req-ok",
+            ),
+            ExternalApiCall(
+                task_id=None, endpoint="contractCompare.submit", method="POST",
+                status_code=401, error="bad api key", request_id="req-401",
+            ),
+        ])
+
+    stats = db_repo.daily_stats(days=7)
+    assert stats["days"] == 7
+    assert stats["timezone"] == "Asia/Shanghai"
+    dates = [p["date"] for p in stats["series"]]
+    assert len(dates) == 7
+    assert dates == sorted(dates)
+
+    today_key = now_bj.date().isoformat()
+    yesterday_key = yst.date().isoformat()
+    today = next(p for p in stats["series"] if p["date"] == today_key)
+    yesterday = next(p for p in stats["series"] if p["date"] == yesterday_key)
+
+    # 同一北京日的两个不同 UTC 时刻任务都落在昨天桶
+    assert yesterday["tasks"] == {
+        "total": 2,
+        "by_status": {"done": 1, "running": 1},
+        "by_kind": {"statement": 1, "compare": 1},
+    }
+    assert today["tasks"] == {
+        "total": 2,
+        "by_status": {"done": 1, "failed": 1},
+        "by_kind": {"compare": 1, "raw": 1},
+    }
+    assert today["llm_calls"] == {
+        "total": 3, "success": 1, "failed": 2, "by_kind": {"ocr": 2, "judge": 1},
+    }
+    assert today["external_calls"] == {
+        "total": 2, "success": 1, "failed": 1,
+        "by_endpoint": {"contractCompare.submit": 2},
+    }
+    # 无数据的日期补零,序列仍连续
+    for p in stats["series"]:
+        if p["date"] not in (today_key, yesterday_key):
+            assert p["tasks"]["total"] == 0
+            assert p["llm_calls"]["total"] == 0
+            assert p["external_calls"]["total"] == 0
+
+
+def test_daily_stats_explicit_range_and_validation(db_isolated):
+    """daily_stats:start/end 显式区间、未来 end 截断、非法区间抛 ValueError。"""
+    from datetime import date, timedelta
+    from zoneinfo import ZoneInfo
+
+    beijing = ZoneInfo("Asia/Shanghai")
+    today = datetime.now(beijing).date()
+
+    db_repo.create_task("dr-1", "compare", target_names=["t.pdf"])
+    db_repo.update_task_status("dr-1", "done", finished=True)
+
+    stats = db_repo.daily_stats(start=today - timedelta(days=3), end=today)
+    assert [p["date"] for p in stats["series"]] == [
+        (today - timedelta(days=i)).isoformat() for i in (3, 2, 1, 0)
+    ]
+    assert stats["days"] == 4
+    assert stats["series"][-1]["tasks"]["total"] == 1
+
+    # 只给 start:end 补今天
+    stats = db_repo.daily_stats(start=today - timedelta(days=2))
+    assert stats["series"][-1]["date"] == today.isoformat()
+    assert len(stats["series"]) == 3
+
+    # 只给 end:start 由 days 回推
+    stats = db_repo.daily_stats(end=today - timedelta(days=1), days=5)
+    assert stats["series"][0]["date"] == (today - timedelta(days=5)).isoformat()
+    assert stats["series"][-1]["date"] == (today - timedelta(days=1)).isoformat()
+
+    # end 晚于今天:截断到今天
+    stats = db_repo.daily_stats(end=today + timedelta(days=5))
+    assert stats["series"][-1]["date"] == today.isoformat()
+
+    with pytest.raises(ValueError):
+        db_repo.daily_stats(start=today + timedelta(days=1))  # start 晚于今天
+    with pytest.raises(ValueError):
+        db_repo.daily_stats(start=today, end=today - timedelta(days=1))  # start > end
+    with pytest.raises(ValueError):
+        db_repo.daily_stats(start=today - timedelta(days=400), end=today)  # 跨度超限
+
+
 def test_get_task_events_after_incremental(db_isolated):
     """get_task_events_after 按 last_id 增量返回(id 升序)。"""
     db_repo.create_task("ea1", "compare")
@@ -211,6 +329,41 @@ def test_list_tasks_filter_and_pagination(db_isolated):
     assert len(page1) == 2
     assert len(page2) == 2
     assert {r.task_id for r in page1}.isdisjoint({r.task_id for r in page2})
+
+
+def test_list_tasks_document_type_filter(db_isolated):
+    """document_type 精确过滤("1"=发票 / "2"=对帐单);NULL 行不参与匹配。"""
+    db_repo.create_task(
+        "dt-c0", "statement", target_names=["a.pdf"], document_type="1",
+        document_no="DT-TYPE-1", external_request=True,
+    )
+    db_repo.create_task(
+        "dt-s0", "statement", target_names=["b.pdf"], document_type="2",
+        document_no="DT-TYPE-2", external_request=True,
+    )
+    db_repo.create_task("dt-n0", "statement", target_names=["c.pdf"])
+    db_repo.create_task("dt-x0", "compare", target_names=["d.pdf"])
+
+    recs, total = db_repo.list_tasks(document_type="1")
+    assert total == 1
+    assert [r.task_id for r in recs] == ["dt-c0"]
+    assert recs[0].document_type == "1"
+
+    recs, total = db_repo.list_tasks(document_type="2")
+    assert total == 1
+    assert recs[0].task_id == "dt-s0"
+
+    # 与 kind 组合过滤
+    recs, total = db_repo.list_tasks(kind="statement", document_type="1")
+    assert total == 1
+    assert recs[0].task_id == "dt-c0"
+
+    # to_dict 序列化带 document_type;未设置的任务为 None
+    serialized = db_repo.to_dict(recs[0])
+    assert serialized["document_type"] == "1"
+    rec_n0 = db_repo.get_task("dt-n0")
+    assert rec_n0 is not None
+    assert db_repo.to_dict(rec_n0)["document_type"] is None
 
 
 def test_list_tasks_q_search(db_isolated):

@@ -24,7 +24,7 @@ from .models import TaskInfo, TamperReport, TextDiffReport, StatementSummaryRepo
 from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
 from .statement_pipeline import run_statement_pipeline
-from .observability import llm_call_collector, log_context
+from .observability import llm_call_collector, log_context, set_log_fields
 from .external_api import (
     build_external_result,
     build_external_statement_result,
@@ -78,6 +78,28 @@ _MILESTONE_STAGES: frozenset[str] = frozenset({
 _MILESTONE_STAGE_PREFIX = "statement_file_"  # 对帐单单文件里程碑(statement_file_N_done)
 
 
+def _step_label(stage: str) -> str | None:
+    """把流水线进度 stage 名映射为日志【业务-步骤】标注的步骤名。
+
+    与 ``_STAGE_TIMING_KEY`` 的计时桶共用主映射(word/ocr/structure/align/
+    compare/normalize/diff);对帐单动态 stage 细分为 file-N / start / aggregate。
+    任务级事件(start/done/failed/report)返回 None——不切换步骤,
+    日志保留上一阶段或仅显示业务名。
+    """
+    if stage.startswith(_MILESTONE_STAGE_PREFIX):
+        core = stage[len(_MILESTONE_STAGE_PREFIX):]
+        if core.endswith("_done"):
+            core = core[: -len("_done")]
+        return f"file-{core}" if core else None
+    if stage == "statement_start":
+        return "start"
+    if stage == "statement_aggregate":
+        return "aggregate"
+    if stage in _STAGE_TIMING_KEY:
+        return _STAGE_TIMING_KEY[stage]
+    return None
+
+
 def _is_milestone(stage: str) -> bool:
     if stage in _MILESTONE_STAGES:
         return True
@@ -108,6 +130,8 @@ class Task:
     done: asyncio.Event = field(default_factory=asyncio.Event)
     callback_url: str | None = None
     document_no: str | None = None
+    # 单据类型细分(statement 金额统计任务):"1"=发票 | "2"=对帐单
+    document_type: str | None = None
     external_request: bool = False
     sync_mode: bool = False  # 外部接口同步模式:webhook 后台发送,不阻塞 HTTP 响应
     pending_callbacks: list = field(default_factory=list)  # sync 模式后台 webhook 任务
@@ -165,12 +189,15 @@ class TaskManager:
         ocr_backend: str | None = None,
         callback_url: str | None = None,
         document_no: str | None = None,
+        document_type: str | None = None,
         external_request: bool = False,
         sync_mode: bool = False,
     ) -> str:
         """创建任务:内存登记 + PG 写入 pending 记录。
 
         kind 必填(compare/raw/statement),决定后续报告写入哪一列。
+        document_type:单据类型细分("1"=发票 | "2"=对帐单),
+        仅 statement 任务使用,用于记录标识与后续查询。
         sync_mode 标记外部接口同步提交:webhook 改后台发送,不阻塞 HTTP 响应。
         """
         task_id = uuid.uuid4().hex[:16]
@@ -179,6 +206,7 @@ class TaskManager:
             kind=kind,
             callback_url=callback_url,
             document_no=document_no,
+            document_type=document_type,
             external_request=external_request,
             sync_mode=sync_mode,
         )
@@ -195,6 +223,7 @@ class TaskManager:
             target_names=target_names,
             ocr_backend=ocr_backend,
             document_no=document_no,
+            document_type=document_type,
             external_request=external_request,
             callback_url=callback_url,
         )
@@ -557,11 +586,13 @@ class TaskManager:
             )
             if task.external_request and task.document_no:
                 external = build_external_statement_result(
-                    task_id, task.document_no, report
+                    task_id, task.document_no, report,
+                    document_type=task.document_type,
                 )
                 payload = {
                     "event_type": "statement.summary.completed",
                     "document_no": task.document_no,
+                    "document_type": task.document_type,
                 }
                 payload.update(external)
                 await self._fire_or_schedule_callback(task_id, "done", payload)
@@ -586,6 +617,7 @@ class TaskManager:
                 await self._fire_or_schedule_callback(task_id, "failed", {
                     "event_type": "statement.summary.failed",
                     "document_no": task.document_no,
+                    "document_type": task.document_type,
                     "error": str(e),
                 })
             else:
@@ -608,8 +640,17 @@ class TaskManager:
 
         pipeline 的进度回调是同步函数(在线程池里调用),PG 写入同样同步,
         避免引入 event loop 跨线程调度复杂度。
+
+        阶段变化时同步切换日志上下文的 ``step``:pipeline 在单个工作线程内
+        顺序执行,set 只影响该线程(及其后创建的 OCR 孙线程),后续阶段日志
+        带上【业务-步骤】标注;主协程的任务级日志不受影响。
         """
+        last_stage: list[str | None] = [None]
+
         def _cb(stage: str, frac: float) -> None:
+            if stage != last_stage[0]:
+                last_stage[0] = stage
+                set_log_fields(step=_step_label(stage))
             task.push_event(stage, frac)
             self._record_milestone(task, stage, frac)
         return _cb

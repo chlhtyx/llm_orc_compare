@@ -28,6 +28,7 @@ import httpx
 
 from .._llm_json import LLMJsonParseError, extract_llm_json_strict
 from ..config import settings
+from ..llm_protocol import build_chat_request, parse_chat_content
 from ..models import (
     Diff,
     DiffSegment,
@@ -176,29 +177,33 @@ def llm_text_diff(
 
 
 def _post_judge_chat(system_prompt: str, user_content: str) -> str:
-    """发一次 OpenAI 兼容 chat/completions 请求,返回 message content。
+    """发一次对话 LLM 请求,返回 assistant 文本。
 
-    复用 judge_* 配置;重试语义与 judge.py、ocr/llm.py 一致:
+    复用 judge_* 配置(协议由 judge_api_protocol 决定:
+    openai / openai_responses / anthropic);重试语义与 judge.py、ocr/llm.py 一致:
     TransportError / 429 / 5xx 重试,4xx 立即抛出。
     """
-    url = settings.judge_api_base.rstrip("/") + "/chat/completions"
-    payload: dict[str, Any] = {
-        "model": settings.judge_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0,
-        # 不带 response_format=json_object:部分推理服务(SiliconFlow 等)在
-        # json_object 约束解码 + 长输入下会触发服务端 500/超时。改为纯 prompt
-        # 约束 + 后端 _extract_json 容错(支持 markdown 围栏 / 夹杂文本)。
-        # chat_template_kwargs.enable_thinking=False:Qwen3 系列默认输出 <think> 思考链,
-        # 这些 token 不进结果但严重拖慢生成(逐行比对是确定性任务,无需思考)。必须嵌进
-        # chat_template_kwargs 才会被 vLLM 应用到 chat template;顶层 enable_thinking
-        # 字段在多数 vLLM 版本被忽略(见 vllm#35574)。非 Qwen3 模型按兼容约定忽略。
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    headers = {"Authorization": f"Bearer {settings.judge_api_key}"}
+    url, headers, payload = build_chat_request(
+        api_base=settings.judge_api_base,
+        api_key=settings.judge_api_key,
+        payload={
+            "model": settings.judge_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            # 不带 response_format=json_object:部分推理服务(SiliconFlow 等)在
+            # json_object 约束解码 + 长输入下会触发服务端 500/超时。改为纯 prompt
+            # 约束 + 后端 _extract_json 容错(支持 markdown 围栏 / 夹杂文本)。
+            # chat_template_kwargs.enable_thinking=False:Qwen3 系列默认输出 <think> 思考链,
+            # 这些 token 不进结果但严重拖慢生成(逐行比对是确定性任务,无需思考)。必须嵌进
+            # chat_template_kwargs 才会被 vLLM 应用到 chat template;顶层 enable_thinking
+            # 字段在多数 vLLM 版本被忽略(见 vllm#35574)。非 Qwen3 模型按兼容约定忽略。
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        protocol=settings.judge_api_protocol,
+    )
     timeout = httpx.Timeout(settings.judge_timeout, connect=10.0)
     max_retries = settings.llm_max_retries
 
@@ -242,7 +247,7 @@ def _post_judge_chat(system_prompt: str, user_content: str) -> str:
                         raise
                     data = resp.json()
                     log_model_response(logger, "llm-diff", resp.status_code, data, request_started)
-                    return data["choices"][0]["message"]["content"]
+                    return parse_chat_content(data, protocol=settings.judge_api_protocol)
             if attempt < max_retries:
                 backoff = min(2 ** attempt, 8) + random.random()
                 logger.info("llm-diff retry after %.1fs", backoff)

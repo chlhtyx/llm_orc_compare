@@ -1,9 +1,13 @@
 // LLM 模型配置读写,对齐后端 GET/PUT /api/v1/config/llm。
 import { request } from './client'
 
+/** 对话型 LLM 接口协议:openai=Chat Completions(默认)、openai_responses=OpenAI 新版 Responses API、anthropic=Anthropic Messages */
+export type LlmApiProtocol = 'openai' | 'openai_responses' | 'anthropic'
+
 /** 后端返回的生效配置(GET)。api_key 已脱敏。 */
 export interface LlmConfig {
   // —— llm 引擎(通用 VL 模型)——
+  llm_api_protocol: LlmApiProtocol
   llm_api_base: string
   llm_api_key: string // 脱敏,如 ****5678
   llm_api_key_set: boolean
@@ -29,6 +33,7 @@ export interface LlmConfig {
   paddleocr_max_concurrency: number
   paddleocr_max_retries: number
   // —— LLM 辅助说明服务(纯文本 LLM)——
+  judge_api_protocol: LlmApiProtocol
   judge_api_base: string
   judge_api_key: string // 脱敏
   judge_api_key_set: boolean
@@ -76,6 +81,7 @@ export interface LlmConfig {
 /** 更新请求(PUT)。全部可选;不传的字段不修改。 */
 export interface LlmConfigUpdate {
   // —— llm 引擎 ——
+  llm_api_protocol?: LlmApiProtocol
   llm_api_base?: string
   /** 传空串清除已保存 key;传 "********" 表示不修改 */
   llm_api_key?: string
@@ -96,6 +102,7 @@ export interface LlmConfigUpdate {
   paddleocr_timeout?: number
   paddleocr_max_concurrency?: number
   // —— LLM 辅助说明服务 ——
+  judge_api_protocol?: LlmApiProtocol
   judge_api_base?: string
   judge_api_key?: string
   judge_model?: string

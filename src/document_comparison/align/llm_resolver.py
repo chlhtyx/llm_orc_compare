@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from .._llm_json import extract_llm_json
 from ..config import settings
+from ..llm_protocol import build_chat_request, parse_chat_content
 from ..models import RawAlignmentBlock, RawAlignmentPlan
 from ..observability import log_model_failure, log_model_request, log_model_response
 
@@ -96,20 +97,19 @@ def _request_alignment_json(
     timeout_override: float | None = None,
 ) -> dict[str, Any]:
     """调用共享纯文本模型并返回 JSON；所有失败均安全返回空字典。"""
-    url = settings.judge_api_base.rstrip("/") + "/chat/completions"
-    payload: dict[str, Any] = {
-        "model": settings.judge_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-    }
-    headers = (
-        {"Authorization": f"Bearer {settings.judge_api_key}"}
-        if settings.judge_api_key
-        else {}
+    url, headers, payload = build_chat_request(
+        api_base=settings.judge_api_base,
+        api_key=settings.judge_api_key,
+        payload={
+            "model": settings.judge_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        },
+        protocol=settings.judge_api_protocol,
     )
     timeout = httpx.Timeout(
         timeout_override or settings.judge_timeout,
@@ -155,7 +155,9 @@ def _request_alignment_json(
                 else:
                     try:
                         data = response.json()
-                        content = data["choices"][0]["message"]["content"]
+                        content = parse_chat_content(
+                            data, protocol=settings.judge_api_protocol
+                        )
                     except (ValueError, KeyError, IndexError, TypeError) as exc:
                         last_error = f"invalid response: {exc}"
                         log_model_failure(

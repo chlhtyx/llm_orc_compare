@@ -756,6 +756,49 @@ def test_llm_config_rejects_unknown_paddleocr_api_mode(client):
     assert "paddleocr_api_mode" in response.json()["message"]
 
 
+def test_llm_config_persists_api_protocol(client):
+    """接口协议字段持久化到 PG 并立即生效(llm 与 judge 两组独立)。"""
+    from document_comparison.config import settings
+    from document_comparison.db import repository as db_repo
+
+    db_repo.save_llm_config({})
+    response = client.put(
+        "/api/v1/config/llm",
+        json={
+            "llm_api_protocol": "anthropic",
+            "judge_api_protocol": "openai_responses",
+        },
+    )
+
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["llm_api_protocol"] == "anthropic"
+    assert config["judge_api_protocol"] == "openai_responses"
+    assert settings.llm_api_protocol == "anthropic"
+    assert settings.judge_api_protocol == "openai_responses"
+    persisted = db_repo.get_llm_config()
+    assert persisted["llm_api_protocol"] == "anthropic"
+    assert persisted["judge_api_protocol"] == "openai_responses"
+
+    fetched = client.get("/api/v1/config/llm").json()
+    assert fetched["llm_api_protocol"] == "anthropic"
+    assert fetched["judge_api_protocol"] == "openai_responses"
+
+
+def test_llm_config_rejects_unknown_api_protocol(client):
+    response = client.put(
+        "/api/v1/config/llm", json={"llm_api_protocol": "rest"}
+    )
+    assert response.status_code == 400
+    assert "llm_api_protocol" in response.json()["message"]
+
+    response = client.put(
+        "/api/v1/config/llm", json={"judge_api_protocol": "grpc"}
+    )
+    assert response.status_code == 400
+    assert "judge_api_protocol" in response.json()["message"]
+
+
 def test_llm_config_rejects_unknown_paddleocr_official_model(client):
     response = client.put(
         "/api/v1/config/llm",
@@ -1018,6 +1061,45 @@ def test_tasks_listing_rejects_bad_kind(client):
     assert r.status_code == 400
 
 
+def test_tasks_listing_filter_by_document_type(client):
+    """document_type 过滤(1=发票 / 2=对帐单)生效,且序列化带该字段。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task(
+        "list-sc1", "statement", target_names=["t.pdf"], document_type="1"
+    )
+    db_repo.create_task(
+        "list-ss1", "statement", target_names=["t.pdf"], document_type="2"
+    )
+    db_repo.create_task("list-sn1", "statement", target_names=["t.pdf"])
+    db_repo.create_task("list-cn1", "compare", target_names=["t.pdf"])
+
+    r = client.get("/api/v1/tasks?document_type=1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] >= 1
+    assert all(it["document_type"] == "1" for it in body["items"])
+    assert any(it["task_id"] == "list-sc1" for it in body["items"])
+
+    r = client.get("/api/v1/tasks?document_type=2")
+    assert r.status_code == 200
+    ids = {it["task_id"] for it in r.json()["items"]}
+    assert "list-ss1" in ids
+    assert "list-sc1" not in ids  # 发票任务不混入
+
+    # 序列化字段:compare 任务与未设置的 statement 任务为 None
+    r = client.get("/api/v1/tasks")
+    items = {it["task_id"]: it for it in r.json()["items"]}
+    assert items["list-cn1"]["document_type"] is None
+    assert items["list-sn1"]["document_type"] is None
+    assert items["list-sc1"]["document_type"] == "1"
+
+
+def test_tasks_listing_rejects_bad_document_type(client):
+    r = client.get("/api/v1/tasks?document_type=3")
+    assert r.status_code == 400
+
+
 def test_get_compare_result_survives_no_inmemory_task(client):
     """进程重启模拟:清空内存 task_manager._tasks 后,GET 应从 PG 回兜返回 done 状态。"""
     from document_comparison.db import repository as db_repo
@@ -1183,3 +1265,65 @@ def test_compare_rejects_429_when_pg_count_at_limit(client, monkeypatch):
     )
     assert r.status_code == 429
     assert "并发" in r.json()["message"]
+
+
+# —— 每日调用统计端点(/api/v1/stats/daily)——
+
+def test_daily_stats_endpoint(client):
+    """/api/v1/stats/daily 返回按天聚合序列,days 越界(0 或 91)被 422 拒绝。"""
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("stats-1", "compare", target_names=["t.pdf"])
+    db_repo.update_task_status("stats-1", "done", finished=True)
+
+    r = client.get("/api/v1/stats/daily")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["days"] == 14
+    assert len(body["series"]) == 14
+    assert [p["date"] for p in body["series"]] == sorted(p["date"] for p in body["series"])
+    # 刚创建的任务落在最后一个(北京时间今天)桶
+    last = body["series"][-1]
+    assert last["tasks"]["total"] == 1
+    assert last["tasks"]["by_kind"].get("compare") == 1
+    assert last["tasks"]["by_status"].get("done") == 1
+
+    assert client.get("/api/v1/stats/daily?days=0").status_code == 422
+    assert client.get("/api/v1/stats/daily?days=91").status_code == 422
+
+
+def test_daily_stats_custom_range(client):
+    """/api/v1/stats/daily?start=&end= 自由区间;非法格式/区间/跨度返回 400。"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from document_comparison.db import repository as db_repo
+
+    beijing = ZoneInfo("Asia/Shanghai")
+    today = datetime.now(beijing).date()
+    db_repo.create_task("csr-1", "compare", target_names=["t.pdf"])
+
+    r = client.get(
+        f"/api/v1/stats/daily?start={(today - timedelta(days=2)).isoformat()}"
+        f"&end={today.isoformat()}"
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["days"] == 3
+    assert [p["date"] for p in body["series"]] == [
+        (today - timedelta(days=i)).isoformat() for i in (2, 1, 0)
+    ]
+    assert body["series"][-1]["tasks"]["total"] == 1
+
+    # 未来 end 截断到今天(浏览器本地时区晚于北京时的容错)
+    r = client.get(f"/api/v1/stats/daily?end={(today + timedelta(days=3)).isoformat()}")
+    assert r.status_code == 200
+    assert r.json()["series"][-1]["date"] == today.isoformat()
+
+    assert client.get("/api/v1/stats/daily?start=2026/08/01").status_code == 400
+    assert client.get(
+        f"/api/v1/stats/daily?start={today.isoformat()}&end={(today - timedelta(days=1)).isoformat()}"
+    ).status_code == 400
+    assert client.get(
+        f"/api/v1/stats/daily?start={(today - timedelta(days=400)).isoformat()}"
+    ).status_code == 400

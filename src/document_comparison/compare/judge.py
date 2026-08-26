@@ -3,9 +3,10 @@
 规则引擎(`classify_diff`)确认字符变化,对 `modified` 条款调 LLM 补充解释和
 严重度建议。LLM 无权撤销变化裁决，也不能降低确定性规则的严重度下限。
 
-使用独立的 judge_* 配置(judge_api_base / judge_api_key / judge_model),
-与 OCR 服务分开:OCR 需多模态 VL 模型(看图),复核需纯文本 LLM(判语义)。
-走 OpenAI 兼容 Chat Completions 协议。temperature=0 + response_format=json_object
+使用独立的 judge_* 配置(judge_api_base / judge_api_key / judge_model /
+judge_api_protocol),与 OCR 服务分开:OCR 需多模态 VL 模型(看图),复核需纯文本
+LLM(判语义)。协议可选 openai / openai_responses / anthropic(默认 openai 走
+Chat Completions)。temperature=0 + response_format=json_object
 保证结构化输出。未配置 judge_* 时自动回退规则判定。
 """
 from __future__ import annotations
@@ -13,12 +14,12 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Any
 
 import httpx
 
 from .._llm_json import extract_llm_json
 from ..config import settings
+from ..llm_protocol import build_chat_request, parse_chat_content
 from ..models import DiffSegment, RiskLevel
 from ..observability import (
     log_model_failure,
@@ -83,27 +84,30 @@ def llm_judge_diff(
         f"请复核并输出 JSON。"
     )
 
-    url = settings.judge_api_base.rstrip("/") + "/chat/completions"
-    payload: dict[str, Any] = {
-        "model": settings.judge_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": _JUDGE_SYSTEM_PROMPT
-                + (_NO_THINK_SUFFIX if settings.llm_diff_no_think_enabled else ""),
-            },
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        # chat_template_kwargs.enable_thinking=False:关闭 Qwen3 系列默认输出的
-        # <think> 思考链 token(风险复核是确定性判断,这些 token 不进结果但严重拖慢
-        # 生成)。必须嵌进 chat_template_kwargs 才会被 vLLM 应用到 chat template;
-        # 顶层 enable_thinking 字段在多数 vLLM 版本被忽略(见 vllm#35574)。
-        # 非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    headers = {"Authorization": f"Bearer {settings.judge_api_key}"}
+    url, headers, payload = build_chat_request(
+        api_base=settings.judge_api_base,
+        api_key=settings.judge_api_key,
+        payload={
+            "model": settings.judge_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": _JUDGE_SYSTEM_PROMPT
+                    + (_NO_THINK_SUFFIX if settings.llm_diff_no_think_enabled else ""),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            # chat_template_kwargs.enable_thinking=False:关闭 Qwen3 系列默认输出的
+            # <think> 思考链 token(风险复核是确定性判断,这些 token 不进结果但严重拖慢
+            # 生成)。必须嵌进 chat_template_kwargs 才会被 vLLM 应用到 chat template;
+            # 顶层 enable_thinking 字段在多数 vLLM 版本被忽略(见 vllm#35574)。
+            # 非 Qwen3 模型按 OpenAI 兼容约定忽略未知参数,不报错。
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        protocol=settings.judge_api_protocol,
+    )
     timeout = httpx.Timeout(settings.judge_timeout, connect=10.0)
 
     last_exc: Exception | None = None
@@ -137,7 +141,7 @@ def llm_judge_diff(
                         raise
                     data = resp.json()
                     log_model_response(logger, "judge", resp.status_code, data, request_started)
-                    content = data["choices"][0]["message"]["content"]
+                    content = parse_chat_content(data, protocol=settings.judge_api_protocol)
                     parsed = extract_llm_json(content)
                     risk = parsed.get("risk_level", "").strip().lower()
                     reason = (parsed.get("reason") or "").strip()

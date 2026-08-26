@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref, watch } from 'vue'
 import { useModelConfigStore } from '@/stores/modelConfig'
-import type { LlmConfig } from '@/api/config'
+import type { LlmApiProtocol, LlmConfig } from '@/api/config'
 
 const store = useModelConfigStore()
 
 const form = reactive({
   // —— llm 引擎(通用 VL 模型)——
+  llm_api_protocol: 'openai' as LlmApiProtocol,
   llm_api_base: '',
   llm_api_key: '',
   llm_model: '',
@@ -26,6 +27,7 @@ const form = reactive({
   paddleocr_timeout: 300,
   paddleocr_max_concurrency: 4,
   // —— LLM 辅助说明服务 ——
+  judge_api_protocol: 'openai' as LlmApiProtocol,
   judge_api_base: '',
   judge_api_key: '',
   judge_model: '',
@@ -53,6 +55,7 @@ const saveError = ref<string | null>(null)
 
 function syncFromConfig(c: LlmConfig | null): void {
   if (!c) return
+  form.llm_api_protocol = c.llm_api_protocol || 'openai'
   form.llm_api_base = c.llm_api_base || ''
   form.llm_api_key = c.llm_api_key || ''
   form.llm_model = c.llm_model || ''
@@ -70,6 +73,7 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.paddleocr_paddlex_api_key = c.paddleocr_paddlex_api_key || ''
   form.paddleocr_timeout = c.paddleocr_timeout ?? 300
   form.paddleocr_max_concurrency = c.paddleocr_max_concurrency ?? 4
+  form.judge_api_protocol = c.judge_api_protocol || 'openai'
   form.judge_api_base = c.judge_api_base || ''
   form.judge_api_key = c.judge_api_key || ''
   form.judge_model = c.judge_model || ''
@@ -127,6 +131,7 @@ async function onSave(): Promise<void> {
   saved.value = false
   const payload: Record<string, unknown> = {
     // —— llm 引擎 ——
+    llm_api_protocol: form.llm_api_protocol,
     llm_api_base: form.llm_api_base.trim(),
     llm_model: form.llm_model.trim(),
     llm_timeout: Number(form.llm_timeout),
@@ -158,6 +163,7 @@ async function onSave(): Promise<void> {
 
   // LLM 辅助说明服务(独立于 OCR,填了才提交)
   if (form.judge_api_base.trim() || form.judge_model.trim()) {
+    payload.judge_api_protocol = form.judge_api_protocol
     payload.judge_api_base = form.judge_api_base.trim()
     payload.judge_model = form.judge_model.trim()
     payload.judge_timeout = Number(form.judge_timeout)
@@ -196,16 +202,50 @@ async function onReset(): Promise<void> {
     <section class="card">
       <h2 class="page-title">llm 引擎(通用 VL 模型)</h2>
       <p class="muted page-desc">
-        识别 PDF 扫描件版面的多模态 VL 模型。兼容 OpenAI Chat Completions 协议,
-        适配能返回结构化 JSON 的通用对话 VL 模型(Qwen-VL-Max / Qwen3-VL / GPT-4o 等)。
+        识别 PDF 扫描件版面的多模态 VL 模型。支持三种接口协议:OpenAI 兼容
+        Chat Completions(默认)、OpenAI 新版 Responses API、Anthropic Messages
+        (官方 Claude 或兼容网关),适配能返回结构化 JSON 的通用对话 VL 模型
+        (Qwen-VL-Max / Qwen3-VL / GPT-4o / Claude 等)。
         在“合同比对 API”页选择「llm」或其他流程指定该引擎时使用本配置。
       </p>
 
       <div class="form-grid">
+        <div class="field span-2">
+          <label>接口协议</label>
+          <div class="radio-row">
+            <label class="radio">
+              <input v-model="form.llm_api_protocol" type="radio" value="openai" />
+              <span>OpenAI 兼容(/chat/completions)</span>
+            </label>
+            <label class="radio">
+              <input v-model="form.llm_api_protocol" type="radio" value="openai_responses" />
+              <span>OpenAI Responses(/responses)</span>
+            </label>
+            <label class="radio">
+              <input v-model="form.llm_api_protocol" type="radio" value="anthropic" />
+              <span>Anthropic Messages(/messages)</span>
+            </label>
+          </div>
+          <span class="hint">
+            Anthropic 协议时 API Base 填官方或兼容网关根地址(含 /v1,如
+            https://api.anthropic.com/v1);Responses 面向新版 OpenAI 协议网关(vLLM 0.10+)
+          </span>
+        </div>
+
         <div class="field">
           <label>API Base</label>
-          <input v-model="form.llm_api_base" class="input" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
-          <span class="hint">OpenAI 兼容根地址(vLLM / SGLang / SiliconFlow / DashScope 等均可)</span>
+          <input
+            v-model="form.llm_api_base"
+            class="input"
+            :placeholder="form.llm_api_protocol === 'anthropic'
+              ? 'https://api.anthropic.com/v1'
+              : 'https://dashscope.aliyuncs.com/compatible-mode/v1'"
+          />
+          <span class="hint">
+            {{ form.llm_api_protocol === 'anthropic'
+              ? 'Anthropic 协议根地址,需含 /v1(按所选协议拼 /messages)'
+              : 'OpenAI 兼容根地址(vLLM / SGLang / SiliconFlow / DashScope 等均可)' }}
+          </span>
         </div>
 
         <div class="field">
@@ -425,15 +465,47 @@ async function onReset(): Promise<void> {
         同一纯文本 LLM 可基于 DOCX 段落和 PDF OCR 块的字符区间联合分段与对齐，
         也可对已确认「modified」条款补充严重度建议和解释；
         联合计划必须通过全覆盖、无重叠和单调校验，LLM 不得撤销变化或降低规则下限。
-        需<b>纯文本 LLM</b>(如 Qwen3.5),与 OCR 的多模态 VL 模型分开配置。
+        需<b>纯文本 LLM</b>(如 Qwen3.5 / Claude),与 OCR 的多模态 VL 模型分开配置;
+        接口协议可选 OpenAI 兼容 / OpenAI Responses / Anthropic Messages。
         “合同比对 API”页分别启用联合对齐或辅助说明后生效；未配置时回退原 Clause 向量与规则链路。
       </p>
 
       <div class="form-grid">
+        <div class="field span-2">
+          <label>接口协议</label>
+          <div class="radio-row">
+            <label class="radio">
+              <input v-model="form.judge_api_protocol" type="radio" value="openai" />
+              <span>OpenAI 兼容(/chat/completions)</span>
+            </label>
+            <label class="radio">
+              <input v-model="form.judge_api_protocol" type="radio" value="openai_responses" />
+              <span>OpenAI Responses(/responses)</span>
+            </label>
+            <label class="radio">
+              <input v-model="form.judge_api_protocol" type="radio" value="anthropic" />
+              <span>Anthropic Messages(/messages)</span>
+            </label>
+          </div>
+          <span class="hint">
+            协议同时作用于联合对齐、辅助说明与 LLM 直接比对三条通道;Anthropic 根地址需含 /v1
+          </span>
+        </div>
+
         <div class="field">
           <label>API Base</label>
-          <input v-model="form.judge_api_base" class="input" placeholder="https://api.siliconflow.cn/v1" />
-          <span class="hint">OpenAI 兼容根地址(可与 OCR 服务相同或不同)</span>
+          <input
+            v-model="form.judge_api_base"
+            class="input"
+            :placeholder="form.judge_api_protocol === 'anthropic'
+              ? 'https://api.anthropic.com/v1'
+              : 'https://api.siliconflow.cn/v1'"
+          />
+          <span class="hint">
+            {{ form.judge_api_protocol === 'anthropic'
+              ? 'Anthropic 协议根地址,需含 /v1(可与 OCR 服务相同或不同)'
+              : 'OpenAI 兼容根地址(可与 OCR 服务相同或不同)' }}
+          </span>
         </div>
 
         <div class="field">

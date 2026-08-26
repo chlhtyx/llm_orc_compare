@@ -158,8 +158,23 @@ LLM/OCR 配置统一在 UI 设置页维护，并持久化到 Postgres(`llm_confi
 | --- | --- | --- |
 | OCR | 扫描页文字与版面识别 | `llm`；`paddleocr` 可切换 vLLM 兼容调用/官方 SDK/自建 PaddleX serving |
 | Embedding | 无编号条款的语义对齐 | `qwen`、`bge`、`mock` |
-| Judge | 对疑似修改条款做语义复核 | OpenAI 兼容的纯文本模型 |
+| Judge | 对疑似修改条款做语义复核 | 纯文本模型,协议三选一(见下) |
 | LLM 直接比对提示词 | 「LLM 直接比对」(无标注版管线 / `enable_llm_direct_diff` 分支)的系统提示词 | 复用 Judge 的纯文本模型；设置页可自定义，留空用内置默认规则 |
+
+「llm 引擎」与「LLM 联合分段对齐与辅助说明服务」两组配置各有一个**接口协议**选项
+(`llm_api_protocol` / `judge_api_protocol`,持久化到 Postgres,保存后立即生效):
+
+| 协议 | 端点 | 适用 |
+| --- | --- | --- |
+| OpenAI 兼容(默认) | `{base}/chat/completions` | vLLM / SGLang / DashScope / SiliconFlow 等 |
+| OpenAI Responses | `{base}/responses` | OpenAI 新版 Responses API 网关(vLLM 0.10+) |
+| Anthropic Messages | `{base}/messages` | 官方 Claude API 或 Anthropic 兼容网关 |
+
+注意事项:Anthropic 协议的 API Base 需含 `/v1`(如 `https://api.anthropic.com/v1`);
+`max_tokens` 默认 8192(超出会在调用记录中留截断告警)。Responses / Anthropic 两条
+通道不发送 `response_format` 与 vLLM 专属的 `chat_template_kwargs`(JSON 输出由提示词
+约束 + 容错解析保证,思考链由 `<think>` 块剥离兜底)。向量引擎与 PaddleOCR 不受该
+选项影响(Anthropic 无 embeddings API;PaddleOCR 固定走各自的三种调用方式)。
 
 PaddleOCR 的“官方 API / SDK”模式使用 AI Studio Access Token。填写官方示例提供的
 完整 `/layout-parsing` 地址时，使用与网页端一致的同步版面解析 API；API 地址留空时
@@ -183,8 +198,12 @@ API”页提供多 PDF 的统计管线测试。两类测试都不发送真实回
 
 服务端基础配置仍通过环境变量提供：
 
-日志同时写入控制台和 `${DC_STORAGE_DIR}/logs/app.log`。每条日志都带 `task` 和
-`req` 关联标识，可按任务或外部接口请求串联排障；模型请求/响应在文件日志中仅记录
+日志同时写入控制台和 `${DC_STORAGE_DIR}/logs/app.log`。每条日志都带【业务-步骤】
+标注与 `task` 和 `req` 关联标识:任务执行期日志标注业务与所处流水线阶段(如
+`【compare-ocr】`、`【statement-file-2】`,业务 = compare/raw/statement,阶段由进度
+回调自动切换),任务级日志只标业务(`【compare】`),非任务日志(启动、API 请求)
+显示 `【-】`;可按标注快速过滤某业务某步骤的日志,也可按任务号或外部请求串联排障。
+模型请求/响应在文件日志中仅记录
 模型、状态、耗时、长度和 SHA-256 摘要，不记录合同原文。需要查看受控调用明细时，使用
 任务的模型/OCR记录接口。标准比对、无标注比对和金额统计都会额外保存最终被流水线采用的
 OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-256 和受限文本预览；单块预览
@@ -268,11 +287,12 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `GET` | `/api/v1/external/amountStat/{task_id}` | 外部系统查询金额统计结果(扁平汇总字段 + 完整明细 `report`) |
 | `GET` | `/api/v1/config/llm` | 获取当前模型配置（Key 脱敏） |
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
-| `GET` | `/api/v1/tasks?kind=&status=&limit=&offset=` | 查询任务历史(支持按类型/状态筛选 + 分页) |
+| `GET` | `/api/v1/tasks?kind=&status=&document_type=&limit=&offset=` | 查询任务历史(支持按类型/状态/单据类型筛选 + 分页;`document_type` 为金额统计任务的发票(1)/对帐单(2)细分) |
 | `GET` | `/api/v1/tasks/{task_id}/events` | 查询单任务的里程碑事件时间线 |
 | `GET` | `/api/v1/tasks/{task_id}/llm-calls` | 查询单任务的模型调用与最终 OCR 解析结果明细(OCR/judge/llm-diff/ocr-result 等) |
 | `GET` | `/api/v1/tasks/{task_id}/external-calls` | 查询单任务的外部接口入站调用审计记录 |
 | `GET` | `/api/v1/external-calls?endpoint=&status_code=&document_no=&q=&limit=&offset=` | 全局外部接口调用审计列表(含 401/422 等无 task_id 的失败调用) |
+| `GET` | `/api/v1/stats/daily?days=14` / `?start=&end=` | 每日调用统计(看板):按天(北京时间)聚合任务数、模型调用数、外部接口调用数,含成功/失败与类型细分,缺失日期补零;`start`/`end`(YYYY-MM-DD)任一提供即自由选区间(缺省侧由今天/`days` 补齐,跨度上限 366 天) |
 
 ### 外部合同比对调用示例
 
@@ -424,12 +444,15 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 - `client_ip`（取 `X-Forwarded-For[0]` / `X-Real-IP` / `client.host`）
 - `api_key_sha256`（X-API-Key 的 sha256 指纹，**不存明文 Key**）
 - `document_no`、`task_id`（提交成功时关联；401/422 等任务创建前失败为 `null`，且**不加外键**——任务删除不会清除审计记录）
+- `request_params`（请求参数快照：提交类记录表单字段与 `callback_url`/`sync` 等，**文件只记文件名**；图片类记录 `page_number`。**失败拦截同样记录**——401 鉴权失败、422 参数校验失败发生在端点执行前，由审计中间件预读表单字段兜底。敏感 key 脱敏、超长字符串截断；chunked 无 Content-Length 或 body 超过上传上限的请求不预读，为 `null`）
 - `error`（按状态码映射固定摘要，如 `invalid external API key`）、`request_id`、`content_length`、`created_at`
 
 审计通过 HTTP 中间件统一写入，**异步落库、绝不阻塞响应**；写库失败只记日志。
 每个响应都会带 `X-Request-Id` 响应头（与响应体 `request_id` 一致），便于调用方与服务端联查。
 查询入口：按任务 `GET /api/v1/tasks/{task_id}/external-calls`（前端「比对记录 → 外部调用」tab），
 或全局 `GET /api/v1/external-calls`（支持按端点/状态码/单据号筛选）。
+每日调用量的汇总视图见控制台「看板」页（`/dashboard`，数据来自 `GET /api/v1/stats/daily`，
+按天聚合任务数、模型调用数与外部接口调用数）。
 
 ### 外部金额统计调用示例
 
@@ -440,6 +463,7 @@ curl -H 'X-API-Key: <YOUR_API_KEY>' \
 | `target` | 与 `target_urls` 至少一个 | 对帐单/发票 `.pdf`（文件，可重复多次上传多个） |
 | `target_urls` | 与 `target` 至少一个 | 对帐单 URL 数组（`http`/`https` `.pdf`）；multipart 推荐传 JSON 字符串数组，也兼容同名字段重复，可与 `target` 混合提交 |
 | `document_no` | 是 | 外部单据号（≤255 字符） |
+| `document_type` | 否 | **单据类型**（字符串枚举）：`1`=发票（默认）/ `2`=对帐单；用于区分统计对象，入库并在控制台「对比记录」中标识，支持后续按类型查询；兼容中文别名（发票/对帐单），非法值 → `400` |
 | `callback_url` | 异步必填，同步可选 | HTTP/HTTPS 完成回调地址 |
 | `sync` | 否 | `true` 同步模式；缺省=`false` 异步模式 |
 
@@ -451,6 +475,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
   -F 'target=@./statement-1.pdf' \
   -F 'target=@./statement-2.pdf' \
   -F 'document_no=STMT-2026-0001' \
+  -F 'document_type=1' \
   -F 'callback_url=https://business.example.com/callbacks/amount-stat'
 ```
 
@@ -462,6 +487,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
 {
   "task_id": "a1b2c3d4e5f6",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "status": "pending"
 }
 ```
@@ -491,6 +517,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
 {
   "task_id": "a1b2c3d4e5f6",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "status": "done",
   "stage": "done",
   "progress": 1.0,
@@ -525,6 +552,7 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
   "status": "done",
   "event_type": "statement.summary.completed",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "grand_total": 100000.0,
   "verdict": "clean",
   "file_totals": [
@@ -548,13 +576,14 @@ curl -X POST 'https://compare.example.com/api/v1/external/amountStat' \
   "status": "failed",
   "event_type": "statement.summary.failed",
   "document_no": "STMT-2026-0001",
+  "document_type": "1",
   "error": "OCR 解析失败"
 }
 ```
 
 #### 管线测试（免鉴权）
 
-与合同比对页对称，金额统计也提供免鉴权的管线测试端点，支持重复 `target` 文件和/或 `target_urls` JSON 数组（兼容重复 HTTP/HTTPS PDF URL 字段），供本机前端在不触发真实回调的前提下验证整条 OCR + 表格抽取 + 求和管线（强制 `document_no` 以 `API-TEST-` 开头，查询端点据此隔离真实任务）：
+与合同比对页对称，金额统计也提供免鉴权的管线测试端点，支持重复 `target` 文件和/或 `target_urls` JSON 数组（兼容重复 HTTP/HTTPS PDF URL 字段），同样接受 `document_type`（合同/对帐单）字段，供本机前端在不触发真实回调的前提下验证整条 OCR + 表格抽取 + 求和管线（强制 `document_no` 以 `API-TEST-` 开头，查询端点据此隔离真实任务）：
 
 ```bash
 # 提交(无需 X-API-Key,可多选 PDF)
