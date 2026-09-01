@@ -41,6 +41,8 @@ const form = reactive({
   embed_model: '',
   embed_timeout: 60,
   pdf_render_dpi: 200,
+  seal_recovery_enabled: false,
+  seal_recovery_dpi: 300,
   max_pdf_pages: 0,
 })
 
@@ -85,6 +87,8 @@ function syncFromConfig(c: LlmConfig | null): void {
   form.embed_model = c.embed_model || ''
   form.embed_timeout = c.embed_timeout ?? 60
   form.pdf_render_dpi = c.pdf_render_dpi ?? 200
+  form.seal_recovery_enabled = c.seal_recovery_enabled ?? false
+  form.seal_recovery_dpi = c.seal_recovery_dpi ?? 300
   form.max_pdf_pages = c.max_pdf_pages ?? 0
   keyDirty.value = false
   paddleKeyDirty.value = false
@@ -156,6 +160,8 @@ async function onSave(): Promise<void> {
       : '********',
     // —— 全局 ——
     pdf_render_dpi: Number(form.pdf_render_dpi),
+    seal_recovery_enabled: form.seal_recovery_enabled,
+    seal_recovery_dpi: Number(form.seal_recovery_dpi),
     max_pdf_pages: Number(form.max_pdf_pages),
     embed_backend: form.embed_backend,
     llm_diff_no_think_enabled: form.llm_diff_no_think_enabled,
@@ -455,6 +461,20 @@ async function onReset(): Promise<void> {
           <label>最大页数</label>
           <input v-model.number="form.max_pdf_pages" class="input" type="number" min="0" />
           <span class="hint">提交时若扫描件 PDF 页数超过此值,直接拒绝(暂不支持),不进入比对流程;0 表示不限制</span>
+        </div>
+
+        <div class="field">
+          <label class="radio">
+            <input v-model="form.seal_recovery_enabled" type="checkbox" />
+            <span>启用红章遮挡恢复</span>
+          </label>
+          <span class="hint">检测到红色印章时，仅对对应页面增加一次颜色抑制 OCR；结果冲突自动标记待复核</span>
+        </div>
+
+        <div class="field">
+          <label>印章恢复 DPI</label>
+          <input v-model.number="form.seal_recovery_dpi" class="input" type="number" min="200" max="600" />
+          <span class="hint">仅用于检测到印章的页面，默认 300；过高会增加 OCR 耗时和图片体积</span>
         </div>
       </div>
     </section>

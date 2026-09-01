@@ -42,8 +42,14 @@ from ..observability import (
     log_model_request,
     log_model_response,
 )
-from ..parsing.pdf import render_pages
+from ..parsing.pdf import render_page, render_pages
 from .base import ProgressCb
+from .seal import (
+    PreparedSealVariant,
+    SealRecoveryDiagnostic,
+    merge_seal_ocr_blocks,
+    prepare_seal_variant,
+)
 
 # 要求 LLM 返回的 JSON 结构:
 # {"blocks": [{"label": ..., "content": ..., "bbox": [x1,y1,x2,y2], "table": {"headers":[...], "rows":[...]}}]}
@@ -119,6 +125,7 @@ class LLMOCREngine:
             api_protocol if api_protocol is not None else settings.llm_api_protocol
         )
         self._dpi = settings.pdf_render_dpi
+        self.last_seal_diagnostics: dict[int, SealRecoveryDiagnostic] = {}
 
     # —— 公共接口 ——
     def recognize(
@@ -129,6 +136,7 @@ class LLMOCREngine:
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
         self._validate_config()
+        self.last_seal_diagnostics = {}
         images = render_pages(pdf_path, dpi=self._dpi)
         if not images:
             logger.info("ocr recognize pages=0 (empty pdf)")
@@ -137,6 +145,33 @@ class LLMOCREngine:
             "ocr recognize pages=%s dpi=%s concurrency=%s model=%s",
             len(images), self._dpi, self.max_concurrency, self.model,
         )
+
+        seal_inputs: list[tuple[PreparedSealVariant, PageMeta] | None] = [
+            None
+        ] * len(images)
+        if getattr(settings, "seal_recovery_enabled", False):
+            recovery_dpi = max(
+                self._dpi, int(getattr(settings, "seal_recovery_dpi", 300))
+            )
+            for page_index, image in enumerate(images):
+                prepared = prepare_seal_variant(image)
+                if prepared is None:
+                    continue
+                if recovery_dpi != self._dpi:
+                    high_res = render_page(
+                        pdf_path, page_index, dpi=recovery_dpi
+                    )
+                    prepared = prepare_seal_variant(high_res) or prepared
+                seal_inputs[page_index] = (
+                    prepared,
+                    PageMeta(
+                        page_index=page_index,
+                        width_px=prepared.width_px,
+                        height_px=prepared.height_px,
+                        pdf_width_pt=page_metas[page_index].pdf_width_pt,
+                        pdf_height_pt=page_metas[page_index].pdf_height_pt,
+                    ),
+                )
 
         # Pre-warm certifi CA bundle before spawning threads — certifi.where()
         # uses an unlocked global guard that races under concurrent access.
@@ -158,10 +193,13 @@ class LLMOCREngine:
         with httpx.Client(timeout=timeout, limits=limits) as client:
             with _BoundedConcurrency(self.max_concurrency) as pool:
                 for i, img in enumerate(images):
+                    seal_input = seal_inputs[i]
                     pool.submit(
                         self._recognize_page,
                         i, img, page_metas[i], results,
                         on_progress, total, done_count, client,
+                        seal_input[0] if seal_input else None,
+                        seal_input[1] if seal_input else None,
                     )
 
         return results
@@ -177,10 +215,43 @@ class LLMOCREngine:
         total_pages: int = 1,
         done_count: list[int] | None = None,
         client: httpx.Client | None = None,
+        prepared_seal: PreparedSealVariant | None = None,
+        recovery_meta: PageMeta | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
         content = self._chat(data_url, client=client)
         blocks = _parse_blocks(content, page_index, meta)
+        if getattr(settings, "seal_recovery_enabled", False):
+            prepared = prepared_seal or prepare_seal_variant(png_bytes)
+            if prepared is not None:
+                variant_meta = recovery_meta or meta
+                try:
+                    recovered_content = self._chat(
+                        _to_data_url(prepared.png_bytes), client=client
+                    )
+                    recovered_blocks = _parse_blocks(
+                        recovered_content, page_index, variant_meta
+                    )
+                except Exception as exc:  # noqa: BLE001 -- 原图 OCR 已成功
+                    logger.warning(
+                        "seal recovery ocr failed page=%s error_type=%s",
+                        page_index,
+                        type(exc).__name__,
+                    )
+                    blocks = [b for b in blocks if b.label != "seal"]
+                    self.last_seal_diagnostics[page_index] = (
+                        SealRecoveryDiagnostic(
+                            reliable=False,
+                            reasons=("检测到印章，但二次 OCR 失败",),
+                            region_count=len(prepared.regions_px),
+                        )
+                    )
+                else:
+                    merged = merge_seal_ocr_blocks(
+                        blocks, recovered_blocks, prepared, variant_meta
+                    )
+                    blocks = list(merged.blocks)
+                    self.last_seal_diagnostics[page_index] = merged.diagnostic
         out[page_index] = blocks
         if on_progress:
             done_count[0] += 1

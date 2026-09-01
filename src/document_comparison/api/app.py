@@ -1008,6 +1008,8 @@ def create_app() -> FastAPI:
             "embed_model": settings.embed_model,
             "embed_timeout": settings.embed_timeout,
             "pdf_render_dpi": settings.pdf_render_dpi,
+            "seal_recovery_enabled": settings.seal_recovery_enabled,
+            "seal_recovery_dpi": settings.seal_recovery_dpi,
             "max_pdf_pages": settings.max_pdf_pages,
             "external_api_key": _mask_key(settings.external_api_key),
             "external_api_key_set": bool(settings.external_api_key),
@@ -1039,7 +1041,8 @@ def create_app() -> FastAPI:
         paddleocr_timeout, paddleocr_max_concurrency, paddleocr_max_retries,
         judge_api_base, judge_api_key, judge_model, judge_timeout,
         embed_backend, embed_api_base, embed_api_key, embed_model, embed_timeout,
-        pdf_render_dpi, max_pdf_pages, external_api_key,
+        pdf_render_dpi, seal_recovery_enabled, seal_recovery_dpi,
+        max_pdf_pages, external_api_key,
         external_public_base_url, external_max_upload_mb, external_image_dpi,
         external_ocr_backend, external_enable_llm_judge, external_enable_llm_alignment,
         external_enable_risk_assessment, external_truncate_to_original_pages,
@@ -1060,7 +1063,8 @@ def create_app() -> FastAPI:
             "llm_direct_diff_prompt",
             "llm_diff_no_think_enabled",
             "embed_backend", "embed_api_base", "embed_api_key",
-            "embed_model", "embed_timeout", "pdf_render_dpi", "max_pdf_pages",
+            "embed_model", "embed_timeout", "pdf_render_dpi",
+            "seal_recovery_enabled", "seal_recovery_dpi", "max_pdf_pages",
             "external_api_key", "external_public_base_url",
             "external_max_upload_mb", "external_image_dpi",
             "external_ocr_backend", "external_enable_llm_judge",
@@ -1162,6 +1166,16 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, "pdf_render_dpi 必须为整数")
             if not 72 <= dpi <= 600:
                 raise HTTPException(400, "pdf_render_dpi 取值范围 72-600")
+        if "seal_recovery_enabled" in body:
+            if not isinstance(body["seal_recovery_enabled"], bool):
+                raise HTTPException(400, "seal_recovery_enabled 必须为布尔值")
+        if "seal_recovery_dpi" in body and body["seal_recovery_dpi"] is not None:
+            try:
+                seal_dpi = int(body["seal_recovery_dpi"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "seal_recovery_dpi 必须为整数")
+            if not 200 <= seal_dpi <= 600:
+                raise HTTPException(400, "seal_recovery_dpi 取值范围 200-600")
         if "max_pdf_pages" in body and body["max_pdf_pages"] is not None:
             try:
                 pages = int(body["max_pdf_pages"])
@@ -1270,6 +1284,8 @@ def create_app() -> FastAPI:
                 "embed_model": settings.embed_model,
                 "embed_timeout": settings.embed_timeout,
                 "pdf_render_dpi": settings.pdf_render_dpi,
+                "seal_recovery_enabled": settings.seal_recovery_enabled,
+                "seal_recovery_dpi": settings.seal_recovery_dpi,
                 "max_pdf_pages": settings.max_pdf_pages,
                 "external_api_key": _mask_key(settings.external_api_key),
                 "external_api_key_set": bool(settings.external_api_key),

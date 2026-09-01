@@ -58,6 +58,9 @@ class TrustedPDFReader:
             truncated_fallback_pages = set(
                 getattr(self.fallback, "last_truncated_pages", set())
             )
+            seal_diagnostics = dict(
+                getattr(self.fallback, "last_seal_diagnostics", {}) or {}
+            )
             for local_index, original_index in enumerate(fallback_indexes):
                 remapped = [
                     block.model_copy(
@@ -72,6 +75,24 @@ class TrustedPDFReader:
                 diagnostic = assess_fallback_page(
                     remapped, original_index
                 )
+                seal_diagnostic = seal_diagnostics.get(local_index)
+                if seal_diagnostic is not None:
+                    diagnostic = diagnostic.model_copy(
+                        update={
+                            "reliable": (
+                                diagnostic.reliable
+                                and bool(seal_diagnostic.reliable)
+                            ),
+                            "reasons": list(
+                                dict.fromkeys(
+                                    [
+                                        *diagnostic.reasons,
+                                        *seal_diagnostic.reasons,
+                                    ]
+                                )
+                            ),
+                        }
+                    )
                 if local_index in truncated_fallback_pages:
                     diagnostic = diagnostic.model_copy(
                         update={

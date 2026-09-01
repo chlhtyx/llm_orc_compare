@@ -656,6 +656,38 @@ def test_llm_config_rejects_negative_max_pdf_pages(client):
     assert r.status_code == 400
 
 
+def test_llm_config_persists_seal_recovery_settings(client):
+    from document_comparison.db import repository as db_repo
+
+    db_repo.save_llm_config({})
+    response = client.put(
+        "/api/v1/config/llm",
+        json={"seal_recovery_enabled": True, "seal_recovery_dpi": 320},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["seal_recovery_enabled"] is True
+    assert response.json()["config"]["seal_recovery_dpi"] == 320
+    assert settings.seal_recovery_enabled is True
+    assert settings.seal_recovery_dpi == 320
+    persisted = db_repo.get_llm_config()
+    assert persisted["seal_recovery_enabled"] is True
+    assert persisted["seal_recovery_dpi"] == 320
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"seal_recovery_enabled": "true"},
+        {"seal_recovery_dpi": 199},
+        {"seal_recovery_dpi": 601},
+    ],
+)
+def test_llm_config_rejects_invalid_seal_recovery_settings(client, payload):
+    response = client.put("/api/v1/config/llm", json=payload)
+    assert response.status_code == 400
+
+
 def test_llm_config_persists_llm_direct_diff_prompt(client, monkeypatch):
     """PUT 应把 llm_direct_diff_prompt 写入 PG、应用到 settings 并在 GET 中回读一致。"""
     from document_comparison.db import repository as db_repo

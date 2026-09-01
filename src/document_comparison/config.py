@@ -191,6 +191,10 @@ class Settings:
     # 200 是 OCR 速度/质量的甜点(实测较 300 提速约 27%、token 减半,质量无损);
     # 过低(如 100)会让密集文字识别变差甚至更慢。
     pdf_render_dpi: int = 200
+    # 红色印章遮挡恢复默认关闭，生产环境可在设置页按需开启。只对检测到
+    # 印章的视觉 OCR 页面增加一次颜色抑制识别，不影响可靠原生文字层页面。
+    seal_recovery_enabled: bool = False
+    seal_recovery_dpi: int = 300
 
     # —— DOCX 原件可视化标注 ——
     # DOCX 比对仍由 python-docx 结构化解析完成；LibreOffice 仅生成派生 PDF 以取得
@@ -360,6 +364,8 @@ _LLM_CONFIG_FIELDS = (
     "embed_model",
     "embed_timeout",
     "pdf_render_dpi",
+    "seal_recovery_enabled",
+    "seal_recovery_dpi",
     "max_pdf_pages",
     "external_api_key",
     "external_public_base_url",
@@ -411,6 +417,8 @@ _LLM_DEFAULTS: dict = {
     "embed_model": "",
     "embed_timeout": 60,
     "pdf_render_dpi": 200,
+    "seal_recovery_enabled": False,
+    "seal_recovery_dpi": 300,
     "max_pdf_pages": 0,
     # 服务管理端可持久化覆盖；环境变量仍作为首次启动/灾备默认值。
     "external_api_key": settings.external_api_key,
@@ -548,6 +556,13 @@ def apply_llm_overrides() -> None:
     if "pdf_render_dpi" in cfg:
         try:
             settings.pdf_render_dpi = int(cfg["pdf_render_dpi"])
+        except (TypeError, ValueError):
+            pass
+    if "seal_recovery_enabled" in cfg:
+        settings.seal_recovery_enabled = bool(cfg["seal_recovery_enabled"])
+    if "seal_recovery_dpi" in cfg:
+        try:
+            settings.seal_recovery_dpi = int(cfg["seal_recovery_dpi"])
         except (TypeError, ValueError):
             pass
     if "max_pdf_pages" in cfg:

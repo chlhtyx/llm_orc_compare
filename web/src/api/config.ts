@@ -58,6 +58,10 @@ export interface LlmConfig {
   embed_timeout: number
   /** PDF 渲染 DPI(OCR 用),200 为速度/质量甜点 */
   pdf_render_dpi: number
+  /** 检测到红色印章后，对该页执行颜色抑制二次 OCR */
+  seal_recovery_enabled: boolean
+  /** 印章二次 OCR 的局部重渲染 DPI */
+  seal_recovery_dpi: number
   /** PDF 页数上限(0 表示不限制);提交超过此页数的扫描件会被直接拒绝 */
   max_pdf_pages: number
   // —— 外部系统 API ——
@@ -118,6 +122,8 @@ export interface LlmConfigUpdate {
   embed_model?: string
   embed_timeout?: number
   pdf_render_dpi?: number
+  seal_recovery_enabled?: boolean
+  seal_recovery_dpi?: number
   max_pdf_pages?: number
   external_api_key?: string
   external_public_base_url?: string

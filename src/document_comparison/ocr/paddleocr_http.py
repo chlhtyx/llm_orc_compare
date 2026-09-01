@@ -56,9 +56,15 @@ except ImportError:  # pragma: no cover
 from ..config import settings
 from ..models import Block, PageMeta, TableStructure
 from ..observability import log_model_failure, log_model_request, log_model_response
-from ..parsing.pdf import render_pages
+from ..parsing.pdf import render_page, render_pages
 from ..structure.normalize import normalize_text
 from .base import ProgressCb
+from .seal import (
+    PreparedSealVariant,
+    SealRecoveryDiagnostic,
+    merge_seal_ocr_blocks,
+    prepare_seal_variant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +237,7 @@ class PaddleOCREngine:
         # 页号使用本次 recognize 输入中的局部索引；TrustedPDFReader 会再映射
         # 回原 PDF 页号。每次识别开始时都会重置，避免任务间串数据。
         self.last_truncated_pages: set[int] = set()
+        self.last_seal_diagnostics: dict[int, SealRecoveryDiagnostic] = {}
 
     # —— 公共接口(与 LLMOCREngine 对称)——
     def recognize(
@@ -241,6 +248,7 @@ class PaddleOCREngine:
         on_progress: ProgressCb | None = None,
     ) -> list[list[Block]]:
         self.last_truncated_pages = set()
+        self.last_seal_diagnostics = {}
         if self.api_mode in ("official_sdk", "paddlex_serving"):
             return self._recognize_official_document(
                 pdf_path, page_metas, on_progress=on_progress
@@ -259,6 +267,33 @@ class PaddleOCREngine:
             len(images), self._dpi, self.max_concurrency, self.model,
         )
 
+        seal_inputs: list[tuple[PreparedSealVariant, PageMeta] | None] = [
+            None
+        ] * len(images)
+        if getattr(settings, "seal_recovery_enabled", False):
+            recovery_dpi = max(
+                self._dpi, int(getattr(settings, "seal_recovery_dpi", 300))
+            )
+            for page_index, image in enumerate(images):
+                prepared = prepare_seal_variant(image)
+                if prepared is None:
+                    continue
+                if recovery_dpi != self._dpi:
+                    high_res = render_page(
+                        pdf_path, page_index, dpi=recovery_dpi
+                    )
+                    prepared = prepare_seal_variant(high_res) or prepared
+                seal_inputs[page_index] = (
+                    prepared,
+                    PageMeta(
+                        page_index=page_index,
+                        width_px=prepared.width_px,
+                        height_px=prepared.height_px,
+                        pdf_width_pt=page_metas[page_index].pdf_width_pt,
+                        pdf_height_pt=page_metas[page_index].pdf_height_pt,
+                    ),
+                )
+
         # Pre-warm certifi CA bundle(避免并发竞争)
         import certifi
         certifi.where()
@@ -270,10 +305,13 @@ class PaddleOCREngine:
 
         with _BoundedConcurrency(self.max_concurrency) as pool:
             for i, img in enumerate(images):
+                seal_input = seal_inputs[i]
                 pool.submit(
                     self._recognize_page,
                     i, img, page_metas[i], results,
                     on_progress, total, done_count, truncated_flags,
+                    seal_input[0] if seal_input else None,
+                    seal_input[1] if seal_input else None,
                 )
 
         self.last_truncated_pages = {
@@ -304,18 +342,85 @@ class PaddleOCREngine:
                 len(page_metas),
                 len(pages),
             )
+        rendered_pages = (
+            render_pages(pdf_path, dpi=self._dpi)
+            if getattr(settings, "seal_recovery_enabled", False)
+            else []
+        )
         blocks_by_page: list[list[Block]] = []
         for page_index, meta in enumerate(page_metas):
             if page_index < len(pages):
                 blocks = _parse_official_page(pages[page_index], page_index, meta)
             else:
                 blocks = []
+            if page_index < len(rendered_pages):
+                prepared = prepare_seal_variant(rendered_pages[page_index])
+                if prepared is not None:
+                    recovery_dpi = max(
+                        self._dpi,
+                        int(getattr(settings, "seal_recovery_dpi", 300)),
+                    )
+                    if recovery_dpi != self._dpi:
+                        high_res = render_page(
+                            pdf_path, page_index, dpi=recovery_dpi
+                        )
+                        prepared = prepare_seal_variant(high_res) or prepared
+                    variant_meta = PageMeta(
+                        page_index=page_index,
+                        width_px=prepared.width_px,
+                        height_px=prepared.height_px,
+                        pdf_width_pt=meta.pdf_width_pt,
+                        pdf_height_pt=meta.pdf_height_pt,
+                    )
+                    try:
+                        recovered_result = self._parse_seal_variant_document(
+                            prepared.png_bytes
+                        )
+                        recovered_pages = list(
+                            getattr(recovered_result, "pages", []) or []
+                        )
+                        recovered_blocks = (
+                            _parse_official_page(
+                                recovered_pages[0], page_index, variant_meta
+                            )
+                            if recovered_pages
+                            else []
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- 原 PDF OCR 已成功
+                        logger.warning(
+                            "paddleocr seal recovery failed page=%s error_type=%s",
+                            page_index,
+                            type(exc).__name__,
+                        )
+                        blocks = [b for b in blocks if b.label != "seal"]
+                        self.last_seal_diagnostics[page_index] = (
+                            SealRecoveryDiagnostic(
+                                reliable=False,
+                                reasons=("检测到印章，但二次 OCR 失败",),
+                                region_count=len(prepared.regions_px),
+                            )
+                        )
+                    else:
+                        merged = merge_seal_ocr_blocks(
+                            blocks, recovered_blocks, prepared, variant_meta
+                        )
+                        blocks = list(merged.blocks)
+                        self.last_seal_diagnostics[page_index] = merged.diagnostic
             blocks_by_page.append(blocks)
             if on_progress:
                 on_progress(
                     "ocr", 0.10 + ((page_index + 1) / max(1, len(page_metas))) * 0.60
                 )
         return blocks_by_page
+
+    def _parse_seal_variant_document(self, png_bytes: bytes):
+        """按当前 Paddle 传输模式识别单页红章抑制图。"""
+        with tempfile.TemporaryDirectory(prefix="dc-seal-ocr-") as temp_dir:
+            image_path = Path(temp_dir) / "page.png"
+            image_path.write_bytes(png_bytes)
+            if self.api_mode == "paddlex_serving":
+                return self._paddlex_parse_document(image_path)
+            return self._official_parse_document(image_path)
 
     # —— 单页识别 ——
     def _recognize_page(
@@ -328,8 +433,11 @@ class PaddleOCREngine:
         total_pages: int = 1,
         done_count: list[int] | None = None,
         truncated_flags: list[bool] | None = None,
+        prepared_seal: PreparedSealVariant | None = None,
+        recovery_meta: PageMeta | None = None,
     ) -> None:
         data_url = _to_data_url(png_bytes)
+        location_data_url = data_url
         content = self._chat(data_url, prompt="OCR:")
         if getattr(content, "truncated", False):
             blocks, still_truncated = self._recover_truncated_page(
@@ -338,12 +446,59 @@ class PaddleOCREngine:
         else:
             blocks = _parse_content(content, page_index, meta)
             still_truncated = False
+        if getattr(settings, "seal_recovery_enabled", False):
+            prepared = prepared_seal or prepare_seal_variant(png_bytes)
+            if prepared is not None:
+                variant_meta = recovery_meta or meta
+                recovered_data_url = _to_data_url(prepared.png_bytes)
+                try:
+                    recovered_content = self._chat(
+                        recovered_data_url, prompt="OCR:"
+                    )
+                    if getattr(recovered_content, "truncated", False):
+                        recovered_blocks, recovered_truncated = (
+                            self._recover_truncated_page(
+                                page_index,
+                                prepared.png_bytes,
+                                variant_meta,
+                                recovered_content,
+                            )
+                        )
+                    else:
+                        recovered_blocks = _parse_content(
+                            recovered_content, page_index, variant_meta
+                        )
+                        recovered_truncated = False
+                except Exception as exc:  # noqa: BLE001 -- 原图 OCR 已成功
+                    logger.warning(
+                        "paddleocr seal recovery failed page=%s error_type=%s",
+                        page_index,
+                        type(exc).__name__,
+                    )
+                    blocks = [b for b in blocks if b.label != "seal"]
+                    self.last_seal_diagnostics[page_index] = (
+                        SealRecoveryDiagnostic(
+                            reliable=False,
+                            reasons=("检测到印章，但二次 OCR 失败",),
+                            region_count=len(prepared.regions_px),
+                        )
+                    )
+                else:
+                    merged = merge_seal_ocr_blocks(
+                        blocks, recovered_blocks, prepared, variant_meta
+                    )
+                    blocks = list(merged.blocks)
+                    self.last_seal_diagnostics[page_index] = merged.diagnostic
+                    still_truncated = still_truncated or recovered_truncated
+                    location_data_url = recovered_data_url
         if truncated_flags is not None:
             truncated_flags[page_index] = still_truncated
         coverage = _bbox_coverage(blocks)
         if self.enable_spotting and coverage < _COMPLETE_BBOX_COVERAGE:
             try:
-                spotting_content = self._chat(data_url, prompt="Spotting:")
+                spotting_content = self._chat(
+                    location_data_url, prompt="Spotting:"
+                )
             except Exception as exc:  # noqa: BLE001
                 # 坐标补全属于报告增强；失败不能让已成功的 OCR 内容比对失败。
                 logger.warning(

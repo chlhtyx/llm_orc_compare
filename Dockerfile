@@ -52,6 +52,8 @@ RUN pip install --no-cache-dir \
     "pydantic>=2.6" \
     "python-docx>=1.1" \
     "PyMuPDF>=1.24" \
+    "Pillow>=10.0" \
+    "numpy>=1.24" \
     "httpx>=0.27" \
     "requests>=2.31" \
     "paddleocr>=3.7,<3.8" \

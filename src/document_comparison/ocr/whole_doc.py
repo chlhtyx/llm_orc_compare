@@ -32,8 +32,9 @@ except ImportError:  # pragma: no cover
 from ..config import settings
 from ..models import PageRecognitionDiagnostic
 from ..observability import timed_stage
-from ..parsing.pdf import render_pages
+from ..parsing.pdf import render_page, render_pages
 from .native import read_native_page
+from .seal import prepare_seal_variant, seal_texts_agree
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,21 @@ def ocr_whole_document(
 
     total = len(images)
     results: list[str | None] = [None] * total
+    seal_variants: list[bytes | None] = [None] * total
+    seal_reliable: list[bool | None] = [None] * total
+    if getattr(settings, "seal_recovery_enabled", False):
+        recovery_dpi = max(
+            settings.pdf_render_dpi,
+            int(getattr(settings, "seal_recovery_dpi", 300)),
+        )
+        for page_index, image in enumerate(images):
+            prepared = prepare_seal_variant(image)
+            if prepared is None:
+                continue
+            if recovery_dpi != settings.pdf_render_dpi:
+                high_res = render_page(path, page_index, dpi=recovery_dpi)
+                prepared = prepare_seal_variant(high_res) or prepared
+            seal_variants[page_index] = prepared.png_bytes
     done_count = [0]  # mutable counter for threads
 
     # 共享连接池:httpx.Client 跨线程可复用 TCP/TLS 连接,避免每页重新握手。
@@ -163,6 +179,7 @@ def ocr_whole_document(
                     _recognize_page_text,
                     i, img, results, ocr_engine, client,
                     on_progress, total, done_count,
+                    seal_variants[i], seal_reliable,
                 )
 
     page_texts = [t for t in results if t]
@@ -172,11 +189,21 @@ def ocr_whole_document(
     reasons: list[str] = []
     if char_count == 0:
         reasons.append("整篇 OCR 未返回任何文本")
+    conflicting_seal_pages = [
+        page_index + 1
+        for page_index, item in enumerate(seal_reliable)
+        if item is False
+    ]
+    if conflicting_seal_pages:
+        reasons.append(
+            "检测到印章，二次 OCR 与原图不一致或失败，页码:"
+            + ",".join(str(page) for page in conflicting_seal_pages)
+        )
     logger.info(
         "whole-doc ocr done pages=%s chars=%s engine=%s",
         total, char_count, type(ocr_engine).__name__,
     )
-    reliable = char_count > 0
+    reliable = char_count > 0 and not conflicting_seal_pages
     return WholeDocRead(
         text=text,
         reliable=reliable,
@@ -201,9 +228,30 @@ def _recognize_page_text(
     on_progress=None,
     total_pages: int = 1,
     done_count: list[int] | None = None,
+    seal_variant: bytes | None = None,
+    seal_reliable: list[bool | None] | None = None,
 ) -> None:
     """单页 OCR 取纯文本,写入 out[page_index]。并发任务的工作单元。"""
     text = ocr_engine.recognize_text(png_bytes, client=client)
+    if seal_variant is not None:
+        try:
+            recovered_text = ocr_engine.recognize_text(
+                seal_variant, client=client
+            )
+        except Exception as exc:  # noqa: BLE001 -- 原图 OCR 已成功，二次恢复只降级
+            logger.warning(
+                "whole-doc seal recovery failed page=%s error_type=%s",
+                page_index,
+                type(exc).__name__,
+            )
+            if seal_reliable is not None:
+                seal_reliable[page_index] = False
+        else:
+            if seal_reliable is not None:
+                seal_reliable[page_index] = seal_texts_agree(
+                    text, recovered_text
+                )
+            text = recovered_text
     out[page_index] = text or ""
     if on_progress:
         done_count[0] += 1
