@@ -336,6 +336,72 @@ def test_html_report_download_embeds_highlight_pages_and_clause_navigation(clien
     assert "row.dataset.targetPage" in response.text
 
 
+def test_pdf_report_download_generates_then_reuses(client, monkeypatch, tmp_path):
+    """report.pdf 首次下载按需生成(与 HTML 导出同款管线),再次下载复用盘上产物。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    from document_comparison.api.app import task_manager
+    from document_comparison.external_api import external_pdf_report_path
+    from document_comparison.models import Diff, PageRegion, TamperReport
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare", document_no="WEB-PDF-001")
+    task = task_manager.get(task_id)
+    assert task is not None
+    for role in ("source", "target"):
+        path = settings.uploads_dir / f"{task_id}-{role}.pdf"
+        pdf = fitz.open()
+        pdf.new_page(width=300, height=400)
+        pdf.save(path)
+        pdf.close()
+    task.report = TamperReport(
+        source="source.pdf",
+        target="target.pdf",
+        change_status="changed",
+        source_annotation_status="available",
+        diffs=[Diff(
+            alignment_id="pdf-dl",
+            status="modified",
+            page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+            source_page_regions=[PageRegion(page_index=0, bbox=[0.1, 0.1, 0.5, 0.2])],
+        )],
+    )
+
+    response = client.get(f"/api/v1/compare/{task_id}/report.pdf")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    disposition = response.headers["content-disposition"]
+    assert "attachment;" in disposition
+    assert "filename*=UTF-8''" in disposition
+    assert disposition.endswith(".pdf")
+    assert response.content.startswith(b"%PDF")
+    with fitz.open(stream=response.content, filetype="pdf") as doc:
+        assert len(doc) >= 1
+    assert external_pdf_report_path(task_id).is_file()
+
+    again = client.get(f"/api/v1/compare/{task_id}/report.pdf")
+    assert again.status_code == 200
+    assert again.content == response.content
+
+
+def test_pdf_report_download_404_without_report(client, monkeypatch, tmp_path):
+    """任务无报告(未完成/未知)时下载返回 404。"""
+    from document_comparison.api.app import task_manager
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare")
+    r = client.get(f"/api/v1/compare/{task_id}/report.pdf")
+    assert r.status_code == 404
+    unknown = client.get("/api/v1/compare/does-not-exist/report.pdf")
+    assert unknown.status_code == 404
+
+
 def test_original_pdf_preview_and_source_annotated_report(client, monkeypatch, tmp_path):
     """原件为 PDF 时，内部接口能独立预览和下载原件侧标注。"""
     try:

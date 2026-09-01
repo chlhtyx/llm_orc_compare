@@ -5,7 +5,7 @@ import ProgressTracker from '@/components/ProgressTracker.vue'
 import DiffComparisonTable from '@/components/DiffComparisonTable.vue'
 import KeyElementTable from '@/components/KeyElementTable.vue'
 import PdfViewer from '@/components/PdfViewer.vue'
-import { ApiError, getHtmlReportUrl, getOriginalPdfUrl, getSourcePdfUrl } from '@/api/compare'
+import { ApiError, getHtmlReportUrl, getOriginalPdfUrl, getPdfReportUrl, getSourcePdfUrl } from '@/api/compare'
 import { useTaskStore } from '@/stores/task'
 import { useReportStore } from '@/stores/report'
 import type { Diff, TamperReport } from '@/api/types'
@@ -82,6 +82,7 @@ return getSourcePdfUrl(props.taskId)
 })
 const originalPdfUrl = computed(() => getOriginalPdfUrl(props.taskId))
 const htmlReportUrl = computed(() => getHtmlReportUrl(props.taskId))
+const pdfReportUrl = computed(() => getPdfReportUrl(props.taskId))
 
 /** 点击条款 → 选中 + 展开 PDF 预览 + 滚动到对应页 */
 function onSelectClause(id: string) {
@@ -109,6 +110,7 @@ function onSelectClause(id: string) {
         />
         </div>
         <div class="head-actions">
+        <a class="btn" :href="pdfReportUrl">下载 PDF 报告</a>
         <a class="btn" :href="htmlReportUrl">导出 HTML</a>
         <button class="btn" type="button" @click="router.push('/compare')">新建比对</button>
         </div>

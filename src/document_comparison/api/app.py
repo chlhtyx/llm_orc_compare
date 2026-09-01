@@ -88,6 +88,7 @@ from ..external_api import (
     validate_callback_url,
     validate_public_base_url,
     write_external_html_report,
+    write_external_pdf_report,
 )
 from ..tasks import task_manager
 
@@ -2176,6 +2177,52 @@ def create_app() -> FastAPI:
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
             },
+        )
+
+    @app.get("/api/v1/compare/{task_id}/report.pdf")
+    async def download_pdf_report(task_id: str):
+        """下载自包含 PDF 比对报告(概要+差异明细+逐页高亮图)。
+
+        与外部 ``result_url`` 指向同一份产物。外部/api-test 任务完成时已落盘,
+        直接返回;控制台自建任务首次下载时按需生成(先补齐每页高亮 PNG,
+        与 HTML 导出同款,再渲染 PDF),生成后驻留盘上供后续下载复用。
+        """
+        task = task_manager.get(task_id)
+        document_no = task.document_no if task else None
+        report = task.report if task else None
+        if report is None:
+            # 从 PG JSONB 还原(进程重启或内存未就绪)
+            rec = await asyncio.to_thread(db_repo.get_task, task_id)
+            if rec is not None and rec.report_compare is not None:
+                report = TamperReport.model_validate(rec.report_compare)
+            if document_no is None and rec is not None:
+                document_no = rec.document_no
+        if report is None:
+            raise HTTPException(404, "report not ready")
+        document_no = document_no or task_id
+
+        path = external_pdf_report_path(task_id)
+        if not path.is_file():
+            target_pdf = effective_target_path(task_id)
+            if target_pdf is None:
+                raise HTTPException(404, "回收件 PDF 文件已过期,无法生成 PDF 报告")
+            source_path = upload_path(task_id, "source")
+            source_pdf = (
+                source_path
+                if source_path is not None and source_path.suffix.lower() == ".pdf"
+                else rendered_source_pdf_path(task_id)
+            )
+            render_args: tuple[Any, ...] = (task_id, target_pdf, report)
+            if source_pdf.is_file():
+                render_args = (*render_args, source_pdf)
+            await asyncio.to_thread(render_external_highlight_images, *render_args)
+            path = await asyncio.to_thread(
+                write_external_pdf_report, task_id, document_no, report
+            )
+        return _attachment_file_response(
+            path,
+            "application/pdf",
+            external_report_filename(document_no, None, suffix=".pdf"),
         )
 
     @app.get(

@@ -73,6 +73,11 @@ export function getHtmlReportUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/report?format=html`)
 }
 
+/** 下载自包含 PDF 比对报告（概要+差异明细+逐页高亮图）；缺失时服务端按需生成。 */
+export function getPdfReportUrl(taskId: string): string {
+  return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/report.pdf`)
+}
+
 export interface ProgressHandlers {
   onEvent: (ev: ProgressEvent) => void
   onDone?: (status: TaskStatus) => void
