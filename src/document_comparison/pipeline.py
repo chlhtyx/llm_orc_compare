@@ -39,6 +39,65 @@ logger = logging.getLogger(__name__)
 ProgressCb = Callable[[str, float], None]
 
 
+def resolve_truncated_pdf(
+    word_path: str | Path,
+    pdf_path: str | Path,
+    *,
+    original_page_count: int | None,
+    output_path: str | Path | None,
+) -> tuple[Path, TruncationRecord | None]:
+    """按原件页数截取回收件 PDF,返回(参与比对的 PDF 路径, 截取留痕)。
+
+    截取用于剥离回收件被追加的多余页;基准页数按优先级取:
+    显式 ``original_page_count`` > PDF 原件真实页数 > DOCX OOXML 估算。
+    估算返回 0(DOCX 无任何分页证据,页数未知)时跳过截取——按臆测
+    页数截取会物理截掉真实内容,使差异结果整体失真(回收件被裁掉的
+    页面会整体表现为"删除")。
+    """
+    if original_page_count is not None and original_page_count <= 0:
+        raise ValueError("original_page_count 必须 >= 1")
+    doc_source = "explicit" if original_page_count is not None else "estimated"
+    orig_pages = (
+        original_page_count
+        if original_page_count is not None
+        # .docx 用 OOXML 估算;PDF source 直接读页数(PDF 无需估算)。
+        else (
+            count_pages(word_path)
+            if Path(word_path).suffix.lower() == ".pdf"
+            else estimate_page_count(word_path)
+        )
+    )
+    try:
+        pdf_pages = count_pages(pdf_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("count pdf pages failed, skip truncation: %s", exc)
+        return Path(pdf_path), None
+    if orig_pages < 1:
+        logger.info(
+            "original page count unavailable, skip truncation: pdf=%s original=%s",
+            pdf_pages, orig_pages,
+        )
+        return Path(pdf_path), None
+    if pdf_pages <= orig_pages:
+        logger.info(
+            "truncate option on but no truncation needed: pdf=%s original=%s",
+            pdf_pages, orig_pages,
+        )
+        return Path(pdf_path), None
+    logger.info(
+        "truncate recovered pdf to original pages: pdf=%s original=%s -> slice",
+        pdf_pages, orig_pages,
+    )
+    sliced = slice_pdf(pdf_path, orig_pages, output_path=output_path)
+    record = TruncationRecord(
+        original_pdf_page_count=pdf_pages,
+        truncated_pdf_page_count=orig_pages,
+        original_doc_page_count=orig_pages,
+        doc_page_count_source=doc_source,
+    )
+    return sliced, record
+
+
 def _enforce_ocr_page_indexes(pages_blocks: list[list[Block]]) -> list[list[Block]]:
     """以 OCR 返回的外层页序为准，校正块中错误的页号。
 
@@ -203,46 +262,14 @@ def run_pipeline(
     pdf_path = Path(pdf_path)
     truncation: TruncationRecord | None = None
     if truncate_to_original_pages:
-        if original_page_count is not None and original_page_count <= 0:
-            raise ValueError("original_page_count 必须 >= 1")
-        doc_source = "explicit" if original_page_count is not None else "estimated"
-        orig_pages = (
-            original_page_count
-            if original_page_count is not None
-            # .docx 用 OOXML 估算;PDF source 直接读页数(PDF 无需估算)。
-            else (
-                count_pages(word_path)
-                if Path(word_path).suffix.lower() == ".pdf"
-                else estimate_page_count(word_path)
-            )
+        pdf_path, truncation = resolve_truncated_pdf(
+            word_path,
+            pdf_path,
+            original_page_count=original_page_count,
+            output_path=truncated_pdf_output_path,
         )
-        try:
-            pdf_pages = count_pages(pdf_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("count pdf pages failed, skip truncation: %s", exc)
-            pdf_pages = 0
-        if pdf_pages > orig_pages:
-            logger.info(
-                "truncate recovered pdf to original pages: pdf=%s original=%s -> slice",
-                pdf_pages, orig_pages,
-            )
-            pdf_path = slice_pdf(
-                pdf_path,
-                orig_pages,
-                output_path=truncated_pdf_output_path,
-            )
-            truncation = TruncationRecord(
-                original_pdf_page_count=pdf_pages,
-                truncated_pdf_page_count=orig_pages,
-                original_doc_page_count=orig_pages,
-                doc_page_count_source=doc_source,
-            )
+        if truncation is not None:
             _progress("pdf_truncated", 0.09)
-        else:
-            logger.info(
-                "truncate option on but no truncation needed: pdf=%s original=%s",
-                pdf_pages, orig_pages,
-            )
 
     # —— LLM 直接比对分支(可选)——
     # 开启后跳过条款切分/对齐/裁决,把 Word 与 PDF 各自解析成纯文本后,

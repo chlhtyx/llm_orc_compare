@@ -54,9 +54,11 @@ def _set_saved_page_count(path: Path, page_count: int) -> None:
             archive.writestr(name, content)
 
 
-def test_no_breaks_is_one_page(tmp_path: Path):
+def test_no_evidence_returns_zero(tmp_path: Path):
+    """无有效保存页数(Pages=0)且无分页标记时返回 0(页数未知,调用方必须跳过截取)。"""
     path = _save(tmp_path)
-    assert estimate_page_count(path) == 1
+    _set_saved_page_count(path, 0)
+    assert estimate_page_count(path) == 0
 
 
 def test_saved_word_page_count_is_used_without_break_markers(tmp_path: Path):

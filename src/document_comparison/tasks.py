@@ -34,7 +34,7 @@ from .external_api import (
 )
 from .storage import compared_pdf_path, effective_target_path
 from .storage import rendered_source_pdf_path
-from .parsing import DocxRenderError, render_docx_to_pdf
+from .parsing import DocxRenderError, count_pages, render_docx_to_pdf
 from . import webhook
 
 logger = logging.getLogger(__name__)
@@ -341,6 +341,22 @@ class TaskManager:
                                 # DOCX 可视化标注是增强能力；渲染失败不应阻止原始的
                                 # 结构化文本比对，报告会明确标记原件侧不可用。
                                 logger.warning("source DOCX rendering unavailable: %s", exc)
+                            if (
+                                truncate_to_original_pages
+                                and original_page_count is None
+                                and source_annotation_pdf_path is not None
+                            ):
+                                # 渲染出的原件 PDF 页数是真实排过版的页数,远比
+                                # OOXML 估算可靠;估算在无分页证据时只能返回 0
+                                # (页数未知→管线跳过截取),按臆测页数截取会截掉
+                                # 回收件真实内容,使差异整体失真。
+                                original_page_count = await asyncio.to_thread(
+                                    count_pages, source_annotation_pdf_path
+                                )
+                                logger.info(
+                                    "truncation base from rendered source pdf pages=%s",
+                                    original_page_count,
+                                )
                         report = await asyncio.to_thread(
                             run_pipeline, word_path, pdf_path, settings,
                             on_progress=self._make_progress_cb(task),

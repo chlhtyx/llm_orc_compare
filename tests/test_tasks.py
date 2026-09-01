@@ -127,6 +127,9 @@ async def test_external_task_renders_persisted_truncated_pdf(monkeypatch, tmp_pa
     captured: dict[str, Path] = {}
 
     def _pipeline(*_args, **kwargs):
+        captured["path"] = Path(kwargs["truncated_pdf_output_path"])
+        # 渲染失败("source.docx" 不存在)时不得臆造截取基准
+        assert kwargs["original_page_count"] is None
         compared = Path(kwargs["truncated_pdf_output_path"])
         compared.parent.mkdir(parents=True, exist_ok=True)
         compared.write_bytes(b"truncated")
@@ -150,6 +153,71 @@ async def test_external_task_renders_persisted_truncated_pdf(monkeypatch, tmp_pa
     await manager.run(task_id, "source.docx", "uploaded-full.pdf", truncate_to_original_pages=True)
 
     assert captured["path"] == compared_pdf_path(task_id)
+
+
+async def test_truncation_base_uses_rendered_source_pages(monkeypatch, tmp_path: Path):
+    """DOCX 渲染成功且未显式传页数时,以渲染出的原件 PDF 页数作截取基准。"""
+    from document_comparison import tasks as tasks_module
+    from document_comparison.config import settings
+    from document_comparison.models import TamperReport
+    from document_comparison.tasks import TaskManager
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    captured: dict[str, object] = {}
+
+    def _pipeline(*_args, **kwargs):
+        captured["original_page_count"] = kwargs["original_page_count"]
+        return TamperReport(source="source.docx", target="target.pdf")
+
+    def _render(_source, output_path, **_kwargs):
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        doc = fitz.open()
+        for _ in range(5):
+            doc.new_page(width=595, height=842)
+        doc.save(str(out))
+        doc.close()
+        return out
+
+    monkeypatch.setattr(tasks_module, "run_pipeline", _pipeline)
+    monkeypatch.setattr(tasks_module, "render_docx_to_pdf", _render)
+    monkeypatch.setattr(
+        tasks_module, "render_external_highlight_images", lambda *_a, **_kw: []
+    )
+    monkeypatch.setattr(
+        tasks_module, "write_external_html_report", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr(
+        tasks_module, "write_external_pdf_report", lambda *_a, **_kw: None
+    )
+    delivered: dict = {}
+
+    async def _deliver(_url, _raw, _event_id, **_kwargs):
+        return {"success": True, "http_status": 200, "error": None}
+
+    monkeypatch.setattr(tasks_module.webhook, "deliver", _deliver)
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_compare_report", "save_llm_calls_batch",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+
+    manager = TaskManager()
+    task_id = manager.create(
+        "compare",
+        callback_url="http://internal/hook",
+        external_request=True,
+    )
+    await manager.run(
+        task_id, "source.docx", "target.pdf", truncate_to_original_pages=True
+    )
+
+    assert captured["original_page_count"] == 5
 
 
 async def test_external_image_failure_sends_failed_callback(monkeypatch):

@@ -178,8 +178,10 @@ def estimate_page_count(path: str | Path) -> int:
     - `<w:lastRenderedPageBreak/>`:Word 上次保存时记录的软分页位置
       (仅由 Word 写入,LibreOffice 等不一定生成,缺失时估算会偏少)。
 
-    分页标记页数 = 命中数 + 1(末尾内容默认占一页),最小钳制为 1。
-    这只是近似值;调用方已知真实页数时应直接传 original_page_count 覆盖。
+    分页标记页数 = 命中数 + 1(末尾内容默认占一页)。
+    两者都缺失时返回 0 表示"无法估算"(此时按 1 截取会截掉真实内容,
+    调用方必须跳过截取而非采信);调用方已知真实页数时应直接传
+    original_page_count 覆盖。
     """
     from docx.oxml.ns import qn  # type: ignore[import-untyped]
 
@@ -192,8 +194,8 @@ def estimate_page_count(path: str | Path) -> int:
         elif child.tag == qn("w:lastRenderedPageBreak"):
             breaks += 1
     saved_pages = _saved_word_page_count(path)
-    break_pages = breaks + 1
-    selected_pages = max(1, break_pages, saved_pages)
+    break_pages = breaks + 1 if breaks else 0
+    selected_pages = max(break_pages, saved_pages)
     logger.info(
         "docx page count resolved saved_pages=%s break_pages=%s selected=%s",
         saved_pages,
