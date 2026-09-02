@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">比对差异</title>
+  <desc id="desc">两份文档的内容对比标识</desc>
+  <path d="M27 22c-6.627 0-12 5.373-12 12v58c0 6.627 5.373 12 12 12h39c6.627 0 12-5.373 12-12V34c0-6.627-5.373-12-12-12H27Z" fill="#EAFBF1"/>
+  <path d="M27 22c-6.627 0-12 5.373-12 12v58c0 6.627 5.373 12 12 12h39c6.627 0 12-5.373 12-12V34c0-6.627-5.373-12-12-12H27Z" stroke="#219653" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M36 47h21M36 64h21M36 81h13" stroke="#219653" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="89" cy="86" r="29" fill="#27AE60" stroke="white" stroke-width="7"/>
+  <path d="m73 86 11 11 22-24" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

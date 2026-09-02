@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">有差异</title>
+  <desc id="desc">发现内容变化的状态标识</desc>
+  <path d="M28 17h52c7.18 0 13 5.82 13 13v68c0 7.18-5.82 13-13 13H28c-7.18 0-13-5.82-13-13V30c0-7.18 5.82-13 13-13Z" fill="#FFF1F2"/>
+  <path d="M28 17h52c7.18 0 13 5.82 13 13v68c0 7.18-5.82 13-13 13H28c-7.18 0-13-5.82-13-13V30c0-7.18 5.82-13 13-13Z" stroke="#D92D20" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M34 45h32M34 62h20" stroke="#D92D20" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="90" cy="87" r="25" fill="#D92D20" stroke="white" stroke-width="7"/>
+  <path d="m79 76 22 22M101 76 79 98" stroke="white" stroke-width="8" stroke-linecap="round"/>
+</svg>

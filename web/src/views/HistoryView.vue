@@ -388,7 +388,6 @@ onMounted(refresh)
           <select v-model="kindFilter" class="input" @change="onFilterChange">
             <option value="">全部</option>
             <option value="compare">合同比对</option>
-            <option value="raw">无标注比对</option>
             <option value="statement">对帐单统计</option>
           </select>
         </div>
