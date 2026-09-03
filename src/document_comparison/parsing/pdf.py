@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import tempfile
 from pathlib import Path
 
@@ -19,6 +20,62 @@ except ImportError:  # pragma: no cover
 from ..models import Block, PageMeta
 
 logger = logging.getLogger(__name__)
+
+# Pillow 对单张图片的默认安全阈值约为 8,948 万像素；但印章恢复还会创建
+# RGB、int16 通道和掩码等多个副本。因此在渲染阶段采用更保守的预算，避免
+# PNG 已生成后才由 Pillow 的 decompression-bomb 保护中断任务。
+DEFAULT_MAX_RENDER_PIXELS = 30_000_000
+
+
+def _page_render_scale(
+    width_pt: float,
+    height_pt: float,
+    dpi: int,
+    max_pixels: int | None,
+) -> tuple[float, bool]:
+    """返回单页安全渲染比例及是否因像素预算而降采样。"""
+    requested_scale = dpi / 72.0
+    if max_pixels is None:
+        return requested_scale, False
+    if max_pixels <= 0:
+        raise ValueError("max_pixels 必须为正整数或 None")
+
+    requested_pixels = width_pt * requested_scale * height_pt * requested_scale
+    if requested_pixels <= max_pixels:
+        return requested_scale, False
+
+    # 先落到整数目标尺寸，再按较短边反推等比比例。PyMuPDF 最终按向上取整
+    # 生成像素，故额外留出极小余量，确保实际 PNG 也不会越过预算。
+    target_width = max(1, math.floor(math.sqrt(max_pixels * width_pt / height_pt)))
+    target_height = max(1, math.floor(max_pixels / target_width))
+    safe_scale = min(target_width / width_pt, target_height / height_pt)
+    return safe_scale * (1 - 1e-9), True
+
+
+def _page_pixel_size(
+    width_pt: float,
+    height_pt: float,
+    scale: float,
+) -> tuple[int, int]:
+    """与 PyMuPDF matrix 渲染对应的页面像素尺寸。"""
+    return max(1, round(width_pt * scale)), max(1, round(height_pt * scale))
+
+
+def _render_page_pixmap(page, dpi: int, max_pixels: int | None):
+    scale, reduced = _page_render_scale(
+        page.rect.width, page.rect.height, dpi, max_pixels
+    )
+    if reduced:
+        effective_dpi = scale * 72.0
+        logger.warning(
+            "pdf page render dpi reduced page=%s requested_dpi=%s effective_dpi=%.1f "
+            "max_pixels=%s",
+            page.number + 1,
+            dpi,
+            effective_dpi,
+            max_pixels,
+        )
+    return page.get_pixmap(matrix=fitz.Matrix(scale, scale))
 
 
 def count_pages(path: str | Path) -> int:
@@ -74,18 +131,23 @@ def slice_pdf(
     return out_path
 
 
-def get_page_metas(path: str | Path, dpi: int = 300) -> list[PageMeta]:
+def get_page_metas(
+    path: str | Path,
+    dpi: int = 300,
+    max_pixels: int | None = DEFAULT_MAX_RENDER_PIXELS,
+) -> list[PageMeta]:
     """获取每页尺寸(pt 与渲染像素)。"""
-    scale = dpi / 72.0
     metas: list[PageMeta] = []
     with fitz.open(str(path)) as doc:
         for i, page in enumerate(doc):
             w_pt, h_pt = page.rect.width, page.rect.height
+            scale, _ = _page_render_scale(w_pt, h_pt, dpi, max_pixels)
+            width_px, height_px = _page_pixel_size(w_pt, h_pt, scale)
             metas.append(
                 PageMeta(
                     page_index=i,
-                    width_px=round(w_pt * scale),
-                    height_px=round(h_pt * scale),
+                    width_px=width_px,
+                    height_px=height_px,
                     pdf_width_pt=w_pt,
                     pdf_height_pt=h_pt,
                 )
@@ -93,32 +155,37 @@ def get_page_metas(path: str | Path, dpi: int = 300) -> list[PageMeta]:
     return metas
 
 
-def render_pages(path: str | Path, dpi: int = 300) -> list[bytes]:
+def render_pages(
+    path: str | Path,
+    dpi: int = 300,
+    max_pixels: int | None = DEFAULT_MAX_RENDER_PIXELS,
+) -> list[bytes]:
     """渲染每页为 PNG 字节流(交给真实 OCR 引擎)。
 
     一次性打开文档遍历所有页,适合需要全部页面的场景(如 OCR)。
     若只需某一页,用 render_page 避免全量渲染。
     """
-    scale = dpi / 72.0
-    matrix = fitz.Matrix(scale, scale)
     images: list[bytes] = []
     with fitz.open(str(path)) as doc:
         for page in doc:
-            pix = page.get_pixmap(matrix=matrix)
+            pix = _render_page_pixmap(page, dpi, max_pixels)
             images.append(pix.tobytes("png"))
     return images
 
 
-def render_page(path: str | Path, page_index: int, dpi: int = 300) -> bytes:
+def render_page(
+    path: str | Path,
+    page_index: int,
+    dpi: int = 300,
+    max_pixels: int | None = DEFAULT_MAX_RENDER_PIXELS,
+) -> bytes:
     """渲染指定页为 PNG 字节流(惰性按页渲染)。
 
     供 LLM 兜底等「只需个别页面」的场景调用,避免对整份 PDF 做全量渲染。
     """
-    scale = dpi / 72.0
-    matrix = fitz.Matrix(scale, scale)
     with fitz.open(str(path)) as doc:
         page = doc.load_page(page_index)
-        pix = page.get_pixmap(matrix=matrix)
+        pix = _render_page_pixmap(page, dpi, max_pixels)
         return pix.tobytes("png")
 
 
