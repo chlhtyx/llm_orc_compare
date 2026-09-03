@@ -3,7 +3,13 @@ from datetime import datetime, timezone
 
 import pymupdf
 
-from document_comparison.models import Diff, DiffSegment, PageRegion, TamperReport
+from document_comparison.models import (
+    Diff,
+    DiffSegment,
+    PageRecognitionDiagnostic,
+    PageRegion,
+    TamperReport,
+)
 from document_comparison.report.pdf_report import render_pdf_report
 
 
@@ -89,6 +95,33 @@ def test_render_pdf_report_empty_diffs_shows_placeholder(tmp_path):
     doc = pymupdf.open(str(out))
     text = "".join(page.get_text() for page in doc)
     assert "未发现内容变化" in text
+    doc.close()
+
+
+def test_pdf_report_explains_seal_review_in_business_language(tmp_path):
+    report = TamperReport(
+        source="s.pdf",
+        target="t.pdf",
+        change_status="needs_review",
+        recognition_status="needs_review",
+        recognition_diagnostics=[PageRecognitionDiagnostic(
+            page_index=1,
+            source="fallback",
+            reliable=False,
+            reasons=["检测到印章，覆盖区二次 OCR 与原图结果不一致"],
+        )],
+    )
+    out = tmp_path / "seal-review.pdf"
+
+    render_pdf_report("BILL-SEAL", report, datetime.now(timezone.utc), out)
+
+    doc = pymupdf.open(str(out))
+    text = "".join(page.get_text() for page in doc)
+    assert "请人工核对" in text
+    assert "第2页：检测到印章遮挡" in text
+    assert "两次识别结果无法相互确认" in text
+    assert "未识别到可确认的内容变化" in text
+    assert "覆盖区二次 OCR 与原图结果不一致" not in text
     doc.close()
 
 

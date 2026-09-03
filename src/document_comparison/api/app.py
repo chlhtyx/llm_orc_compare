@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -2701,6 +2702,24 @@ def create_app() -> FastAPI:
             "task_id": task_id,
             "items": [db_repo.event_to_dict(e) for e in events],
         }
+
+    @app.get("/api/v1/tasks/{task_id}/source/download")
+    async def download_task_source_file(task_id: str):
+        """下载历史任务的原始上传件，不使用 DOCX 派生的预览 PDF。"""
+        record = await asyncio.to_thread(db_repo.get_task, task_id)
+        if record is None:
+            raise HTTPException(404, "task not found")
+        if not record.source_name:
+            raise HTTPException(404, "该任务没有可下载的原始文件")
+
+        path = upload_path(task_id, "source")
+        if path is None or not path.is_file():
+            raise HTTPException(404, "原始文件已过期,无法下载")
+
+        # 仅使用持久化展示名的 basename，避免把调用方传入的路径片段带入下载响应头。
+        filename = Path(record.source_name.replace("\\", "/")).name or f"source{path.suffix}"
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        return _attachment_file_response(path, media_type, filename)
 
     @app.post("/api/v1/tasks/{task_id}/redeliver-callback")
     async def redeliver_callback(task_id: str):

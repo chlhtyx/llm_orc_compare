@@ -278,8 +278,8 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `POST` | `/api/v1/compare` | 提交标准条款比对(默认仅列举差异;`options.enable_risk_assessment=true` 开启风险判别) |
 | `GET` | `/api/v1/compare/{task_id}` | 查询任务状态和结果 |
 | `GET` | `/api/v1/compare/{task_id}/events` | 订阅 SSE 进度 |
-| `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|html` | 下载报告；HTML 为自包含文件，差异行可跳转到高亮页 |
-| `GET` | `/api/v1/compare/{task_id}/report.pdf` | 下载自包含 PDF 比对报告（概要+差异明细+逐页高亮图，与外部 `result_url` 同一产物）；盘上缺失时按需生成 |
+| `GET` | `/api/v1/compare/{task_id}/report?format=json\|pdf\|html` | 下载报告；HTML 为自包含文件，差异行可跳转到高亮页；待人工核对时会列出业务可读的核对事项 |
+| `GET` | `/api/v1/compare/{task_id}/report.pdf` | 下载自包含 PDF 比对报告（概要+差异明细+逐页高亮图，与外部 `result_url` 同一产物）；待人工核对时会列出业务可读的核对事项；盘上缺失时按需生成 |
 | `GET` | `/api/v1/compare/{task_id}/report?format=pdf&side=source` | 下载原件侧标注；DOCX 使用 LibreOffice 派生 PDF，默认 `side=target` 为回收件 |
 | `GET` | `/api/v1/compare/{task_id}/original-pdf` | 预览原件 PDF，或 DOCX 的 LibreOffice 派生 PDF（仅用于视觉标注） |
 | `POST` | `/api/v1/external/contractCompare` | 外部系统提交标准合同比对(`X-API-Key`);默认异步,`sync=true` 同步返回结果 |
@@ -298,6 +298,7 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `GET` | `/api/v1/config/llm` | 获取当前模型配置（Key 脱敏） |
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 | `GET` | `/api/v1/tasks?kind=&status=&document_type=&limit=&offset=` | 查询任务历史(支持按类型/状态/单据类型筛选 + 分页;`document_type` 为金额统计任务的发票(1)/对帐单(2)细分) |
+| `GET` | `/api/v1/tasks/{task_id}/source/download` | 下载历史任务的原始上传文件(保留 `.docx`/`.pdf` 原格式；文件清理后返回 404) |
 | `GET` | `/api/v1/tasks/{task_id}/events` | 查询单任务的里程碑事件时间线 |
 | `GET` | `/api/v1/tasks/{task_id}/llm-calls` | 查询单任务的模型调用与最终 OCR 解析结果明细(OCR/judge/llm-diff/ocr-result 等) |
 | `GET` | `/api/v1/tasks/{task_id}/external-calls` | 查询单任务的外部接口入站调用审计记录 |

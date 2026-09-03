@@ -7,6 +7,7 @@ import {
   getTaskEvents,
   getTaskExternalCalls,
   getTaskLlmCalls,
+  getTaskSourceDownloadUrl,
   listTasks,
   reportRouteFor,
   redeliverCallback,
@@ -482,6 +483,12 @@ onMounted(refresh)
                <td>{{ formatElapsed(item.elapsed) }}</td>
                <td class="col-actions" @click.stop>
                  <button class="chip" type="button" @click="viewReport(item)">查看报告</button>
+                 <a
+                   v-if="item.source_name"
+                   class="chip chip-link"
+                   :href="getTaskSourceDownloadUrl(item.task_id)"
+                   @click.stop
+                 >下载原文件</a>
                  <button
                    v-if="canRedeliver(item)"
                    class="chip chip-cb"
@@ -790,6 +797,11 @@ table.task-table {
 }
 .task-table .col-actions .chip {
   margin-left: 6px;
+}
+.task-table .col-actions .chip-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
 }
 .file-cell {
   max-width: 260px;

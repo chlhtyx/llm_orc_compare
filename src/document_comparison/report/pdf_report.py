@@ -13,6 +13,7 @@ from pathlib import Path
 import pymupdf
 
 from ..models import Diff, TamperReport
+from .review_notice import empty_diff_message, review_notice_intro, review_notice_messages
 
 # 富文本片段:(文本, 颜色, 删除线)。
 _Run = tuple[str, tuple[float, float, float], bool]
@@ -302,6 +303,18 @@ def _section_title(layout: _Layout, title: str) -> None:
     layout.y += 26
 
 
+def _review_notice_block(layout: _Layout, report: TamperReport) -> None:
+    """在 PDF 概要后输出业务可读的人工核对事项。"""
+    intro = review_notice_intro(report)
+    if not intro:
+        return
+    _section_title(layout, "请人工核对")
+    layout.draw_runs([(intro, _NOTE, False)], fontsize=10, leading=1.7)
+    for index, message in enumerate(review_notice_messages(report), start=1):
+        layout.draw_runs([(f"{index}. {message}", _INK, False)], fontsize=10, leading=1.7)
+        layout.gap(2)
+
+
 def _image_pages(
     doc: pymupdf.Document,
     title: str,
@@ -409,6 +422,7 @@ def render_pdf_report(
     _meta_line(layout, "高亮定位", location)
     _meta_line(layout, "差异数量", str(len(diffs)))
     _meta_line(layout, "生成时间", stamp)
+    _review_notice_block(layout, report)
 
     # —— 差异明细 ——
     _section_title(layout, "差异明细")
@@ -417,7 +431,7 @@ def render_pdf_report(
             _diff_block(layout, index, diff)
     else:
         layout.draw_runs(
-            [("未发现内容变化", _MUTED, False)], fontsize=10.5, leading=2.2
+            [(empty_diff_message(report), _MUTED, False)], fontsize=10.5, leading=2.2
         )
 
     layout.gap(10)

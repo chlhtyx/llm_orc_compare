@@ -489,6 +489,27 @@ def test_docx_rendered_pdf_preview_and_source_annotated_report(client, monkeypat
     assert source.read_bytes() == b"uploaded docx remains unchanged"
 
 
+def test_history_source_download_returns_uploaded_original_file(client, monkeypatch, tmp_path):
+    """比对记录下载的是原上传 DOCX，不是原件侧预览用的派生 PDF。"""
+    from document_comparison.api.app import task_manager
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create("compare", source_name="采购合同.docx")
+    source = settings.uploads_dir / f"{task_id}-source.docx"
+    source.write_bytes(b"original-docx-bytes")
+
+    response = client.get(f"/api/v1/tasks/{task_id}/source/download")
+
+    assert response.status_code == 200
+    assert response.content == b"original-docx-bytes"
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert "attachment" in response.headers["content-disposition"]
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+
+
 def test_compare_rejects_nonpositive_original_page_count(client):
     """original_page_count 必须 >= 1(0 / 负数返回 400)。"""
     import io

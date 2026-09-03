@@ -16,7 +16,7 @@ const props = defineProps<{
   side?: 'source' | 'target'
   /** 双栏预览时按容器宽度缩小页面，避免窄屏退化为单栏或横向溢出。 */
   fitToContainer?: boolean
-  /** 双栏预览共用的缩放倍率；不传时仍由组件独立管理。 */
+  /** 双栏预览共用的缩放倍率；1 表示适宽，放大后可在页面内横向滚动查看。 */
   zoomLevel?: number
   selectedClauseId?: string | null
 }>()
@@ -37,7 +37,6 @@ const pages = ref<{
   meta: PageMeta | null
 }[]>([])
 const viewerRoot = ref<HTMLElement | null>(null)
-const fittedScale = ref(1)
 let resizeObserver: ResizeObserver | null = null
 let renderedContainerWidth = 0
 
@@ -139,7 +138,7 @@ const localZoom = ref(1.0)
 const zoom = computed(() => props.zoomLevel ?? localZoom.value)
 
 function setZoom(nextZoom: number): void {
-  const boundedZoom = Math.max(0.5, Math.min(3, nextZoom))
+  const boundedZoom = Math.max(0.5, Math.min(4, nextZoom))
   if (props.zoomLevel == null) {
     localZoom.value = boundedZoom
     void renderPdf()
@@ -205,7 +204,6 @@ async function renderPdf() {
     const newPages: typeof pages.value = []
     const availableWidth = viewerRoot.value?.clientWidth ?? 0
     renderedContainerWidth = availableWidth
-    let smallestFit = 1
 
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i)
@@ -216,7 +214,6 @@ async function renderPdf() {
       const fit = props.fitToContainer && availableWidth > 0
         ? Math.min(1, Math.max(0.2, (availableWidth - 8) / baseViewport.width))
         : 1
-      smallestFit = Math.min(smallestFit, fit)
       const scale = dpr.value * zoom.value * fit
       const viewport = page.getViewport({ scale })
       const canvas = document.createElement('canvas')
@@ -236,7 +233,6 @@ async function renderPdf() {
     }
 
     pages.value = newPages
-    fittedScale.value = smallestFit
     // 首次由条款列表展开预览时 selectedClauseId 已存在，等 ref 完整挂载后再跳转。
     await nextTick()
     scrollToSelectedClause()
@@ -278,24 +274,23 @@ onBeforeUnmount(() => {
     <!-- 缩放控件 -->
     <div v-if="pages.length" class="pv-toolbar">
       <button class="chip" @click="setZoom(zoom - 0.25)">-</button>
-      <span class="zoom-label">{{ Math.round(zoom * fittedScale * 100) }}%</span>
+      <span class="zoom-label">{{ Math.round(zoom * 100) }}%</span>
       <button class="chip" @click="setZoom(zoom + 0.25)">+</button>
+      <button class="chip pv-fit-button" :disabled="zoom === 1" @click="setZoom(1)">适宽</button>
     </div>
 
-    <div
-      v-if="pages.length"
-      class="pv-pages"
-    >
-      <div
-        v-for="(p, pi) in pages"
-        :key="p.pageNum"
-        :ref="(el) => setPageRef(pi, el as Element)"
-        class="pv-page"
-        :style="{
-          width: `${p.width}px`,
-          aspectRatio: `${p.width} / ${p.height}`,
-        }"
-      >
+    <div v-if="pages.length" class="pv-pages-viewport">
+      <div class="pv-pages">
+        <div
+          v-for="(p, pi) in pages"
+          :key="p.pageNum"
+          :ref="(el) => setPageRef(pi, el as Element)"
+          class="pv-page"
+          :style="{
+            width: `${p.width}px`,
+            aspectRatio: `${p.width} / ${p.height}`,
+          }"
+        >
         <!-- canvas 层 -->
         <div class="pv-canvas-wrap" :ref="(el) => el && mountCanvas(p.canvas, el as HTMLElement)" />
 
@@ -323,7 +318,8 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 页码 -->
-        <span class="pv-page-num">{{ p.pageNum }}</span>
+          <span class="pv-page-num">{{ p.pageNum }}</span>
+        </div>
       </div>
     </div>
 
@@ -372,9 +368,18 @@ onBeforeUnmount(() => {
   text-align: center;
   color: var(--text-muted);
 }
-.pv-pages {
+.pv-fit-button {
+  margin-left: 4px;
+}
+.pv-pages-viewport {
   width: 100%;
-  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+}
+.pv-pages {
+  width: max-content;
+  min-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 16px;

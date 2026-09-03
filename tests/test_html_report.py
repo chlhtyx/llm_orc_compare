@@ -5,7 +5,13 @@ from document_comparison.external_api import (
     external_report_filename,
     safe_filename_stem,
 )
-from document_comparison.models import Diff, DiffSegment, PageRegion, TamperReport
+from document_comparison.models import (
+    Diff,
+    DiffSegment,
+    PageRecognitionDiagnostic,
+    PageRegion,
+    TamperReport,
+)
 from document_comparison.report import render_html_report
 
 
@@ -68,6 +74,29 @@ def test_render_html_report_empty_diffs_shows_placeholder():
     report = TamperReport(source="s", target="t", change_status="clean", diffs=[])
     html = render_html_report("BILL-002", report, datetime.now(timezone.utc))
     assert "未发现内容变化" in html
+
+
+def test_html_report_explains_seal_review_in_business_language():
+    report = TamperReport(
+        source="s.pdf",
+        target="t.pdf",
+        change_status="needs_review",
+        recognition_status="needs_review",
+        recognition_diagnostics=[PageRecognitionDiagnostic(
+            page_index=1,
+            source="fallback",
+            reliable=False,
+            reasons=["检测到印章，覆盖区二次 OCR 与原图结果不一致"],
+        )],
+    )
+
+    rendered = render_html_report("BILL-SEAL", report, datetime.now(timezone.utc))
+
+    assert "请人工核对" in rendered
+    assert "第2页：检测到印章遮挡" in rendered
+    assert "两次识别结果无法相互确认" in rendered
+    assert "未识别到可确认的内容变化" in rendered
+    assert "覆盖区二次 OCR 与原图结果不一致" not in rendered
 
 
 def test_render_html_report_includes_unmatched_clauses():

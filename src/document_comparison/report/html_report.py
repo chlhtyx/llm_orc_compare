@@ -9,6 +9,7 @@ import html
 from datetime import datetime
 
 from ..models import Diff, DiffSegment, TamperReport
+from .review_notice import empty_diff_message, review_notice_intro, review_notice_messages
 
 # —— 文案映射(与 external_api.build_result_text 保持一致)——
 _CONCLUSION = {
@@ -93,6 +94,8 @@ tbody tr.report-row-selected{outline:2px solid #2c7be5;outline-offset:-2px;backg
 footer{margin-top:20px;color:#adb5bd;font-size:12px;text-align:center}
 .pages-title{font-size:16px;margin:24px 0 10px;border-left:4px solid #2c7be5;padding-left:8px}
 .pages-note{grid-column:1 / -1;margin:0;background:#fff8e6;border:1px solid #f1e3b6;border-radius:4px;padding:8px 12px;color:#8a5a00;font-size:13px}
+.review-notice{margin:16px 0;background:#fff8e6;border:1px solid #f1e3b6;border-left:4px solid #e6a23c;border-radius:4px;padding:12px 16px;color:#5d4700}
+.review-notice h2{font-size:16px;margin:0 0 8px}.review-notice p{margin:0 0 8px;line-height:1.6}.review-notice ul{margin:0;padding-left:20px}.review-notice li{margin:5px 0;line-height:1.6}
 .pages{display:flex;flex-direction:column;gap:16px}
 .pages figure{margin:0;background:#fff;border:1px solid #e3e3e5;border-radius:4px;padding:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .pages figcaption{font-size:12px;color:#868e96;margin-bottom:6px}
@@ -179,6 +182,8 @@ def render_html_report(
     recognition = _RECOGNITION.get(report.recognition_status, report.recognition_status)
     location = _LOCATION.get(report.location_status, report.location_status)
     stamp = generated_at.strftime("%Y-%m-%d %H:%M")
+    review_intro = review_notice_intro(report)
+    review_messages = review_notice_messages(report)
 
     rows: list[str] = []
     empty_cell = '<span class="empty">（无）</span>'
@@ -214,8 +219,17 @@ def render_html_report(
         )
 
     rows_html = "\n".join(rows) if rows else (
-        '<tr><td colspan="5" class="empty" style="text-align:center">未发现内容变化</td></tr>'
+        f'<tr><td colspan="5" class="empty" style="text-align:center">'
+        f"{html.escape(empty_diff_message(report))}</td></tr>"
     )
+    review_html = ""
+    if review_intro:
+        review_html = (
+            '<section class="review-notice"><h2>请人工核对</h2>'
+            f"<p>{html.escape(review_intro)}</p><ul>"
+            + "".join(f"<li>{html.escape(message)}</li>" for message in review_messages)
+            + "</ul></section>"
+        )
 
     def _page_figures(images: list[str], side: str, dom_prefix: str) -> str:
         figures = "\n".join(
@@ -281,6 +295,7 @@ def render_html_report(
   <div><b>差异数量:</b>{len(diffs)}</div>
   <div><b>生成时间:</b>{html.escape(stamp)}</div>
 </div>
+{review_html}
 <table>
 <thead><tr><th class="idx">#</th><th class="col-status">状态</th><th>条款</th><th>采购部合同</th><th>供应商合同</th></tr></thead>
 <tbody>

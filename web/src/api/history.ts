@@ -1,7 +1,7 @@
 // 比对记录历史端点封装,对齐 src/document_comparison/api/app.py 的 /api/v1/tasks。
 // 与 api/compare.ts / raw.ts / statement.ts 平级,不依赖具体报告 store。
 import type { OverallRisk, TaskStatus } from './types'
-import { ApiError, request } from './client'
+import { ApiError, apiUrl, request } from './client'
 
 export { ApiError }
 
@@ -159,6 +159,11 @@ export function getTaskExternalCalls(
   taskId: string,
 ): Promise<{ task_id: string; items: ExternalCallItem[] }> {
   return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/external-calls`)
+}
+
+/** 下载任务提交时保存的原始文件；DOCX 保持 DOCX，不会替换为预览用派生 PDF。 */
+export function getTaskSourceDownloadUrl(taskId: string): string {
+  return apiUrl(`/api/v1/tasks/${encodeURIComponent(taskId)}/source/download`)
 }
 
 /** 按 kind 推导该任务对应的「查看报告」路由路径。 */
