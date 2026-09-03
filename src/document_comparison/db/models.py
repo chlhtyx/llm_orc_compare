@@ -56,6 +56,11 @@ class TaskRecord(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None, index=True
     )
+    # 控制台对运行中任务发起的协作式停止请求。同步流水线无法安全强杀线程，
+    # 因此 worker 在当前阶段返回后读取此标记并落为 failed。
+    stop_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     # 文件名(供记录页展示;不存文件内容,文件仍在 .dc_data/uploads)
     source_name: Mapped[str] = mapped_column(String(512), default="")

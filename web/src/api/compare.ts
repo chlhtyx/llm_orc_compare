@@ -68,6 +68,16 @@ export function getOriginalPdfUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/original-pdf`)
 }
 
+/** 下载采购部合同的原始上传文件；DOCX 保持 DOCX，不会替换为预览用 PDF。 */
+export function getSourceFileDownloadUrl(taskId: string): string {
+  return apiUrl(`/api/v1/tasks/${encodeURIComponent(taskId)}/source/download`)
+}
+
+/** 下载供应商合同的原始上传 PDF，不会替换为页数截断后的比对文件。 */
+export function getTargetFileDownloadUrl(taskId: string): string {
+  return apiUrl(`/api/v1/tasks/${encodeURIComponent(taskId)}/target/download`)
+}
+
 /** 下载自包含 HTML 报告；包含差异表和可联动跳转的高亮页面。 */
 export function getHtmlReportUrl(taskId: string): string {
   return apiUrl(`/api/v1/compare/${encodeURIComponent(taskId)}/report?format=html`)

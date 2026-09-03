@@ -1,7 +1,7 @@
 // 比对记录历史端点封装,对齐 src/document_comparison/api/app.py 的 /api/v1/tasks。
 // 与 api/compare.ts / raw.ts / statement.ts 平级,不依赖具体报告 store。
 import type { OverallRisk, TaskStatus } from './types'
-import { ApiError, apiUrl, request } from './client'
+import { ApiError, request } from './client'
 
 export { ApiError }
 
@@ -12,6 +12,8 @@ export interface TaskListItem {
   task_id: string
   kind: TaskKind
   status: TaskStatus
+  /** true 表示运行中任务已收到协作式停止请求，等待当前处理阶段返回。 */
+  stop_requested: boolean
   source_name: string
   target_names: string[]
   ocr_backend: string | null
@@ -46,6 +48,16 @@ export interface RedeliverResult {
   callback_http_status: number | null
   callback_error: string | null
 }
+
+export interface RecoverTaskResult {
+  task_id: string
+  status: 'pending'
+  message: string
+}
+
+export type StopTaskResult =
+  | { task_id: string; status: 'failed'; message: string }
+  | { task_id: string; status: 'running'; stop_requested: true; message: string }
 
 /** 单任务里程碑事件(后端 repository.event_to_dict)。 */
 export interface TaskEventItem {
@@ -161,11 +173,6 @@ export function getTaskExternalCalls(
   return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/external-calls`)
 }
 
-/** 下载任务提交时保存的原始文件；DOCX 保持 DOCX，不会替换为预览用派生 PDF。 */
-export function getTaskSourceDownloadUrl(taskId: string): string {
-  return apiUrl(`/api/v1/tasks/${encodeURIComponent(taskId)}/source/download`)
-}
-
 /** 按 kind 推导该任务对应的「查看报告」路由路径。 */
 export function reportRouteFor(item: Pick<TaskListItem, 'task_id' | 'kind'>): string {
   switch (item.kind) {
@@ -183,4 +190,14 @@ export function redeliverCallback(taskId: string): Promise<RedeliverResult> {
   return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/redeliver-callback`, {
     method: 'POST',
   })
+}
+
+/** 将保留输入文件和队列参数的失败任务重新入队。 */
+export function recoverTask(taskId: string): Promise<RecoverTaskResult> {
+  return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/recover`, { method: 'POST' })
+}
+
+/** 停止排队任务，或对运行中任务登记协作式停止请求。 */
+export function stopTask(taskId: string): Promise<StopTaskResult> {
+  return request(`/api/v1/tasks/${encodeURIComponent(taskId)}/stop`, { method: 'POST' })
 }

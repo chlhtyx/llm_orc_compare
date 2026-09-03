@@ -7,10 +7,11 @@ import {
   getTaskEvents,
   getTaskExternalCalls,
   getTaskLlmCalls,
-  getTaskSourceDownloadUrl,
   listTasks,
+  recoverTask,
   reportRouteFor,
   redeliverCallback,
+  stopTask,
   type ExternalCallItem,
   type LlmCallItem,
   type TaskEventItem,
@@ -29,6 +30,9 @@ const loadError = ref<string | null>(null)
 // 重新推送回调:per-task 进行中状态 + 最近一次结果反馈
 const redelivering = ref<Record<string, boolean>>({})
 const redeliverMsg = ref<Record<string, string>>({})
+// 人工任务处置:恢复 / 停止的单任务进行中状态与结果反馈。
+const taskAction = ref<Record<string, 'recover' | 'stop' | undefined>>({})
+const taskActionMsg = ref<Record<string, string>>({})
 
 const kindFilter = ref<TaskKind | ''>('')
 const statusFilter = ref<TaskStatus | ''>('')
@@ -292,6 +296,67 @@ function canRedeliver(item: TaskListItem): boolean {
   return !!item.callback_url && (item.status === 'done' || item.status === 'failed')
 }
 
+function canRecover(item: TaskListItem): boolean {
+  return item.status === 'failed'
+}
+
+function canStop(item: TaskListItem): boolean {
+  return (item.status === 'pending' || item.status === 'running') && !item.stop_requested
+}
+
+function setTaskActionMessage(taskId: string, message: string): void {
+  taskActionMsg.value = { ...taskActionMsg.value, [taskId]: message }
+  setTimeout(() => {
+    taskActionMsg.value = { ...taskActionMsg.value, [taskId]: '' }
+  }, 5000)
+}
+
+async function recover(item: TaskListItem): Promise<void> {
+  if (taskAction.value[item.task_id]) return
+  taskAction.value = { ...taskAction.value, [item.task_id]: 'recover' }
+  try {
+    const result = await recoverTask(item.task_id)
+    item.status = result.status
+    item.stop_requested = false
+    item.error = null
+    item.finished_at = null
+    setTaskActionMessage(item.task_id, result.message)
+    await refresh()
+  } catch (e) {
+    setTaskActionMessage(
+      item.task_id,
+      e instanceof ApiError ? e.message : `恢复失败:${(e as Error).message}`,
+    )
+  } finally {
+    taskAction.value = { ...taskAction.value, [item.task_id]: undefined }
+  }
+}
+
+async function stop(item: TaskListItem): Promise<void> {
+  if (taskAction.value[item.task_id]) return
+  const warning = item.status === 'running'
+    ? '任务会在当前 OCR、模型或比对阶段完成后终止，已生成的结果不会保存。确定请求停止吗？'
+    : '确定停止这项排队任务吗？'
+  if (!window.confirm(warning)) return
+  taskAction.value = { ...taskAction.value, [item.task_id]: 'stop' }
+  try {
+    const result = await stopTask(item.task_id)
+    item.status = result.status
+    item.stop_requested = 'stop_requested' in result
+    item.error = result.status === 'failed' ? '用户手动停止：任务尚未开始执行' : result.message
+    if (result.status === 'failed') item.finished_at = new Date().toISOString()
+    setTaskActionMessage(item.task_id, result.message)
+    await refresh()
+  } catch (e) {
+    setTaskActionMessage(
+      item.task_id,
+      e instanceof ApiError ? e.message : `停止失败:${(e as Error).message}`,
+    )
+  } finally {
+    taskAction.value = { ...taskAction.value, [item.task_id]: undefined }
+  }
+}
+
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
 })
@@ -358,7 +423,7 @@ onMounted(refresh)
     <section class="card toolbar">
       <div class="head-row">
         <div class="head-left">
-          <h2 class="page-title">合同对比记录</h2>
+          <h2 class="page-title">对比记录</h2>
           <p class="muted page-desc">查看历史比对与统计任务,点击「查看报告」打开结果,或点击行查看时间线与模型调用。</p>
         </div>
         <div class="head-actions">
@@ -455,7 +520,7 @@ onMounted(refresh)
                 </td>
                 <td>
                   <span class="status-tag" :data-status="item.status">
-                    {{ statusText[item.status] }}
+                    {{ item.stop_requested ? '停止请求中' : statusText[item.status] }}
                   </span>
                 </td>
                 <td>
@@ -483,12 +548,29 @@ onMounted(refresh)
                <td>{{ formatElapsed(item.elapsed) }}</td>
                <td class="col-actions" @click.stop>
                  <button class="chip" type="button" @click="viewReport(item)">查看报告</button>
-                 <a
-                   v-if="item.source_name"
-                   class="chip chip-link"
-                   :href="getTaskSourceDownloadUrl(item.task_id)"
-                   @click.stop
-                 >下载原文件</a>
+                 <button
+                   v-if="canRecover(item)"
+                   class="chip"
+                   type="button"
+                   :disabled="taskAction[item.task_id] != null"
+                   :title="taskActionMsg[item.task_id] || '重新入队：仅在输入文件和队列参数仍保留时可用'"
+                   @click="recover(item)"
+                 >
+                   {{ taskAction[item.task_id] === 'recover' ? '恢复中…' : '恢复' }}
+                 </button>
+                 <button
+                   v-if="canStop(item)"
+                   class="chip chip-stop"
+                   type="button"
+                   :disabled="taskAction[item.task_id] != null"
+                   :title="taskActionMsg[item.task_id] || (item.status === 'running' ? '请求在当前处理阶段结束后停止' : '立即停止排队任务')"
+                   @click="stop(item)"
+                 >
+                   {{ taskAction[item.task_id] === 'stop' ? '停止中…' : '停止' }}
+                 </button>
+                 <span v-if="taskActionMsg[item.task_id]" class="action-msg">
+                   {{ taskActionMsg[item.task_id] }}
+                 </span>
                  <button
                    v-if="canRedeliver(item)"
                    class="chip chip-cb"
@@ -798,10 +880,20 @@ table.task-table {
 .task-table .col-actions .chip {
   margin-left: 6px;
 }
-.task-table .col-actions .chip-link {
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
+.task-table .col-actions .chip-stop {
+  color: var(--risk-high);
+  border-color: var(--risk-high);
+}
+.action-msg {
+  display: inline-block;
+  max-width: 180px;
+  margin-left: 6px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 .file-cell {
   max-width: 260px;

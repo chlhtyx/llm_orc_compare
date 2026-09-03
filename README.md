@@ -298,7 +298,10 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `GET` | `/api/v1/config/llm` | 获取当前模型配置（Key 脱敏） |
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 | `GET` | `/api/v1/tasks?kind=&status=&document_type=&limit=&offset=` | 查询任务历史(支持按类型/状态/单据类型筛选 + 分页;`document_type` 为金额统计任务的发票(1)/对帐单(2)细分) |
-| `GET` | `/api/v1/tasks/{task_id}/source/download` | 下载历史任务的原始上传文件(保留 `.docx`/`.pdf` 原格式；文件清理后返回 404) |
+| `POST` | `/api/v1/tasks/{task_id}/recover` | 将失败任务重新入队；仅输入文件与队列参数仍存在时可恢复 |
+| `POST` | `/api/v1/tasks/{task_id}/stop` | 立即停止排队任务；运行中任务在当前 OCR/模型/比对阶段结束后终止 |
+| `GET` | `/api/v1/tasks/{task_id}/source/download` | 下载采购部合同原始上传文件(保留 `.docx`/`.pdf` 原格式；文件清理后返回 404) |
+| `GET` | `/api/v1/tasks/{task_id}/target/download` | 下载供应商合同原始上传 PDF(不替换为页数截断后的比对文件；文件清理后返回 404) |
 | `GET` | `/api/v1/tasks/{task_id}/events` | 查询单任务的里程碑事件时间线 |
 | `GET` | `/api/v1/tasks/{task_id}/llm-calls` | 查询单任务的模型调用与最终 OCR 解析结果明细(OCR/judge/llm-diff/ocr-result 等) |
 | `GET` | `/api/v1/tasks/{task_id}/external-calls` | 查询单任务的外部接口入站调用审计记录 |

@@ -2703,23 +2703,70 @@ def create_app() -> FastAPI:
             "items": [db_repo.event_to_dict(e) for e in events],
         }
 
-    @app.get("/api/v1/tasks/{task_id}/source/download")
-    async def download_task_source_file(task_id: str):
-        """下载历史任务的原始上传件，不使用 DOCX 派生的预览 PDF。"""
+    @app.post("/api/v1/tasks/{task_id}/recover")
+    async def recover_task_from_history(task_id: str):
+        """将保留输入文件和队列参数的失败任务重新入队。"""
+        outcome = await task_manager.recover_from_history(task_id)
+        if outcome == "not_found":
+            raise HTTPException(404, "task not found")
+        if outcome == "not_recoverable":
+            raise HTTPException(409, "任务缺少可恢复的队列参数或上传文件")
+        if outcome == "invalid_status":
+            raise HTTPException(409, "仅失败任务可以恢复")
+        return {"task_id": task_id, "status": "pending", "message": "任务已重新入队"}
+
+    @app.post("/api/v1/tasks/{task_id}/stop")
+    async def stop_task_from_history(task_id: str):
+        """停止排队任务，或请求运行中任务在当前阶段后终止。"""
+        outcome = await task_manager.stop_from_history(task_id)
+        if outcome == "not_found":
+            raise HTTPException(404, "task not found")
+        if outcome == "invalid_status":
+            raise HTTPException(409, "仅排队中或处理中的任务可以停止")
+        if outcome == "stop_requested":
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "task_id": task_id,
+                    "status": "running",
+                    "stop_requested": True,
+                    "message": "已请求停止，当前处理阶段结束后终止",
+                },
+            )
+        return {"task_id": task_id, "status": "failed", "message": "排队任务已停止"}
+
+    async def _download_task_upload(task_id: str, role: Literal["source", "target"]):
+        """下载任务上传的原始文件，不使用预览派生或截断产物。"""
         record = await asyncio.to_thread(db_repo.get_task, task_id)
         if record is None:
             raise HTTPException(404, "task not found")
-        if not record.source_name:
+
+        original_name = (
+            record.source_name
+            if role == "source"
+            else (record.target_names or [""])[0]
+        )
+        if not original_name:
             raise HTTPException(404, "该任务没有可下载的原始文件")
 
-        path = upload_path(task_id, "source")
+        path = upload_path(task_id, role)
         if path is None or not path.is_file():
             raise HTTPException(404, "原始文件已过期,无法下载")
 
         # 仅使用持久化展示名的 basename，避免把调用方传入的路径片段带入下载响应头。
-        filename = Path(record.source_name.replace("\\", "/")).name or f"source{path.suffix}"
+        filename = Path(original_name.replace("\\", "/")).name or f"{role}{path.suffix}"
         media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         return _attachment_file_response(path, media_type, filename)
+
+    @app.get("/api/v1/tasks/{task_id}/source/download")
+    async def download_task_source_file(task_id: str):
+        """下载采购部合同原始上传件，不使用 DOCX 派生的预览 PDF。"""
+        return await _download_task_upload(task_id, "source")
+
+    @app.get("/api/v1/tasks/{task_id}/target/download")
+    async def download_task_target_file(task_id: str):
+        """下载供应商合同原始上传件，不使用页数截断后的比对 PDF。"""
+        return await _download_task_upload(task_id, "target")
 
     @app.post("/api/v1/tasks/{task_id}/redeliver-callback")
     async def redeliver_callback(task_id: str):

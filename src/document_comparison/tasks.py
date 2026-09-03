@@ -64,6 +64,9 @@ _STAGE_TIMING_KEY = {
 # 对帐单动态 stage(statement_file_N_done)用前缀匹配。
 _MILESTONE_STAGES: frozenset[str] = frozenset({
     "queued",
+    "recovered",
+    "stopped",
+    "stop_requested",
     "start",
     "done",
     "failed",
@@ -139,6 +142,7 @@ class Task:
     start_time: float = field(default_factory=time.monotonic)
     active_timing_stage: str | None = None
     active_timing_started_at: float | None = None
+    stop_requested: bool = False
 
     def finalize_elapsed(self) -> None:
         """终结时计算总耗时(秒),写入 info.elapsed。"""
@@ -174,6 +178,13 @@ class Task:
         self.info.stage_timings[self.active_timing_stage] = round(previous + elapsed, 3)
         self.active_timing_stage = None
         self.active_timing_started_at = None
+
+
+class TaskStopRequested(RuntimeError):
+    """持久化停止请求在同步处理阶段返回后转换为任务失败。"""
+
+    def __init__(self) -> None:
+        super().__init__("用户手动停止：当前处理阶段已结束")
 
 
 class TaskManager:
@@ -250,6 +261,69 @@ class TaskManager:
                 self._record_milestone(task, "queued", 0.0)
             self.wake_queue()
         return queued
+
+    @staticmethod
+    def _queue_payload_files_exist(payload: dict) -> bool:
+        """仅允许恢复所有本地输入文件仍在的持久化任务。"""
+        runner = payload.get("runner")
+        if runner in {"compare", "raw"}:
+            paths = [payload.get("word_path"), payload.get("pdf_path")]
+        elif runner == "statement":
+            paths = list(payload.get("pdf_paths") or [])
+        else:
+            return False
+        return bool(paths) and all(
+            isinstance(path, str) and Path(path).is_file() for path in paths
+        )
+
+    async def recover_from_history(self, task_id: str) -> str:
+        """恢复失败任务；旧任务缺少队列参数或上传件时明确拒绝。"""
+        rec = await asyncio.to_thread(db_repo.get_task, task_id)
+        if rec is None:
+            return "not_found"
+        if rec.status != "failed":
+            return "invalid_status"
+        payload = dict(rec.queue_payload or {})
+        if not payload or not self._queue_payload_files_exist(payload):
+            return "not_recoverable"
+        outcome = await asyncio.to_thread(db_repo.recover_failed_task, task_id)
+        if outcome == "recovered":
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task.info.status = "pending"
+                task.info.stage = "queued"
+                task.info.progress = 0.0
+                task.info.error = None
+                task.done.clear()
+                task.push_event("recovered", 0.0)
+            await self._db_thread(
+                db_repo.save_milestone_event, task_id, "recovered", 0.0, {}
+            )
+            self.wake_queue()
+        return outcome
+
+    async def stop_from_history(self, task_id: str) -> str:
+        """停止排队任务，或登记运行中任务的跨 worker 停止请求。"""
+        outcome = await asyncio.to_thread(db_repo.request_task_stop, task_id)
+        if outcome == "stopped":
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task.info.status = "failed"
+                task.info.error = "用户手动停止：任务尚未开始执行"
+                task.done.set()
+                task.finalize_elapsed()
+            await self._db_thread(
+                db_repo.save_milestone_event, task_id, "stopped", 1.0, {}
+            )
+            self.wake_queue()
+        elif outcome == "stop_requested":
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task.stop_requested = True
+            await self._db_thread(
+                db_repo.save_milestone_event, task_id, "stop_requested", 0.0, {}
+            )
+        return outcome
 
     async def queue_is_full(self) -> bool:
         """用于上传文件前的有界队列预检；领取端仍负责执行并发原子约束。"""
@@ -423,6 +497,30 @@ class TaskManager:
         """asyncio 友好版的 _safe_db:在线程池里执行,不阻塞。"""
         await asyncio.to_thread(self._safe_db, fn, *args, **kwargs)
 
+    async def _raise_if_stop_requested(self, task: Task) -> None:
+        """在同步 pipeline 的阶段边界消费跨 worker 停止请求。
+
+        ``asyncio.to_thread`` 无法安全终止已经运行的 OCR/模型线程；只在其返回
+        后停止，保证后台线程不会继续写入成功报告。读取失败不改变主流程，避免
+        临时 DB 抖动把正常任务误判为已停止。
+        """
+        if task.stop_requested:
+            raise TaskStopRequested()
+        try:
+            requested = await asyncio.to_thread(
+                db_repo.task_stop_requested, task.info.task_id
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "task stop request check failed task=%s",
+                task.info.task_id,
+                exc_info=True,
+            )
+            return
+        if requested:
+            task.stop_requested = True
+            raise TaskStopRequested()
+
     @contextlib.asynccontextmanager
     async def _acquire_sem(self):
         """获取执行槽位,超时抛错,防止同步模式请求在槽位满时永久 hang。
@@ -494,6 +592,7 @@ class TaskManager:
         try:
             async with self._acquire_sem():
                 task.info.status = "running"
+                await self._raise_if_stop_requested(task)
                 # pipeline 为同步阻塞(OCR/解析),放工作线程
                 # 进度回调从工作线程实时推送(stage, fraction)
                 # llm_call_collector 设 contextvar,to_thread 把它复制进工作线程;
@@ -549,6 +648,7 @@ class TaskManager:
                         # 模型超时/解析异常会让 pipeline 抛错;仍要落库已收集的
                         # request/failure attempt,否则历史页看不到模型/OCR记录。
                         await self._save_llm_calls(task_id, llm_calls)
+            await self._raise_if_stop_requested(task)
             task.report = report
             await self._db_thread(
                 db_repo.save_compare_report, task_id, report
@@ -672,6 +772,7 @@ class TaskManager:
         try:
             async with self._acquire_sem():
                 task.info.status = "running"
+                await self._raise_if_stop_requested(task)
                 with llm_call_collector() as llm_calls:
                     try:
                         report = await asyncio.to_thread(
@@ -682,6 +783,7 @@ class TaskManager:
                         )
                     finally:
                         await self._save_llm_calls(task_id, llm_calls)
+            await self._raise_if_stop_requested(task)
             task.raw_report = report
             task.info.status = "done"
             task.push_event("done", 1.0)
@@ -748,6 +850,7 @@ class TaskManager:
         try:
             async with self._acquire_sem():
                 task.info.status = "running"
+                await self._raise_if_stop_requested(task)
                 with llm_call_collector() as llm_calls:
                     try:
                         report = await asyncio.to_thread(
@@ -759,6 +862,7 @@ class TaskManager:
                         )
                     finally:
                         await self._save_llm_calls(task_id, llm_calls)
+            await self._raise_if_stop_requested(task)
             task.statement_report = report
             task.info.status = "done"
             task.push_event("done", 1.0)

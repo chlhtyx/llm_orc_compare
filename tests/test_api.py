@@ -489,25 +489,34 @@ def test_docx_rendered_pdf_preview_and_source_annotated_report(client, monkeypat
     assert source.read_bytes() == b"uploaded docx remains unchanged"
 
 
-def test_history_source_download_returns_uploaded_original_file(client, monkeypatch, tmp_path):
-    """比对记录下载的是原上传 DOCX，不是原件侧预览用的派生 PDF。"""
+def test_report_file_downloads_return_uploaded_original_files(client, monkeypatch, tmp_path):
+    """报告页下载两侧上传件，不返回派生预览或截断后的比对 PDF。"""
     from document_comparison.api.app import task_manager
 
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
     settings.ensure_dirs()
-    task_id = task_manager.create("compare", source_name="采购合同.docx")
+    task_id = task_manager.create(
+        "compare", source_name="采购合同.docx", target_names=["供应商合同.pdf"],
+    )
     source = settings.uploads_dir / f"{task_id}-source.docx"
+    target = settings.uploads_dir / f"{task_id}-target.pdf"
     source.write_bytes(b"original-docx-bytes")
+    target.write_bytes(b"original-pdf-bytes")
 
-    response = client.get(f"/api/v1/tasks/{task_id}/source/download")
+    source_response = client.get(f"/api/v1/tasks/{task_id}/source/download")
+    target_response = client.get(f"/api/v1/tasks/{task_id}/target/download")
 
-    assert response.status_code == 200
-    assert response.content == b"original-docx-bytes"
-    assert response.headers["content-type"].startswith(
+    assert source_response.status_code == 200
+    assert source_response.content == b"original-docx-bytes"
+    assert source_response.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
-    assert "attachment" in response.headers["content-disposition"]
-    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert "attachment" in source_response.headers["content-disposition"]
+    assert "filename*=UTF-8''" in source_response.headers["content-disposition"]
+    assert target_response.status_code == 200
+    assert target_response.content == b"original-pdf-bytes"
+    assert target_response.headers["content-type"].startswith("application/pdf")
+    assert "attachment" in target_response.headers["content-disposition"]
 
 
 def test_compare_rejects_nonpositive_original_page_count(client):
@@ -1294,6 +1303,120 @@ def test_get_task_events_endpoint(client):
 def test_get_task_events_unknown_404(client):
     r = client.get("/api/v1/tasks/unknown-task/events")
     assert r.status_code == 404
+
+
+def test_recover_failed_queued_task_from_history(client, monkeypatch, tmp_path):
+    """控制台可将保留队列参数的失败任务重新置为 pending。"""
+    from document_comparison.api.app import task_manager
+    from document_comparison.config import settings
+    from document_comparison.db import repository as db_repo
+
+    source = tmp_path / "source.docx"
+    target = tmp_path / "target.pdf"
+    source.write_bytes(b"source")
+    target.write_bytes(b"target")
+    db_repo.create_task("recover-1", "compare", target_names=["target.pdf"])
+    assert db_repo.set_task_queue_payload(
+        "recover-1", {"runner": "compare", "word_path": str(source), "pdf_path": str(target)}
+    )
+    db_repo.update_task_status("recover-1", "failed", error="worker stopped", finished=True)
+    monkeypatch.setattr(task_manager, "wake_queue", lambda: None)
+    if settings.console_password:
+        assert client.post(
+            "/api/v1/auth/login", json={"password": settings.console_password}
+        ).status_code == 200
+
+    r = client.post("/api/v1/tasks/recover-1/recover")
+
+    assert r.status_code == 200
+    assert r.json() == {"task_id": "recover-1", "status": "pending", "message": "任务已重新入队"}
+    rec = db_repo.get_task("recover-1")
+    assert rec is not None
+    assert rec.status == "pending"
+    assert rec.error is None
+    assert rec.finished_at is None
+    assert [event.stage for event in db_repo.get_task_events("recover-1")] == ["recovered"]
+
+
+def test_stop_pending_task_from_history(client):
+    """控制台停止尚未领取的任务时应立即转为失败终态。"""
+    from document_comparison.config import settings
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("stop-pending-1", "compare")
+    if settings.console_password:
+        assert client.post(
+            "/api/v1/auth/login", json={"password": settings.console_password}
+        ).status_code == 200
+
+    r = client.post("/api/v1/tasks/stop-pending-1/stop")
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "task_id": "stop-pending-1",
+        "status": "failed",
+        "message": "排队任务已停止",
+    }
+    rec = db_repo.get_task("stop-pending-1")
+    assert rec is not None
+    assert rec.status == "failed"
+    assert rec.finished_at is not None
+    assert rec.error == "用户手动停止：任务尚未开始执行"
+    assert [event.stage for event in db_repo.get_task_events("stop-pending-1")] == ["stopped"]
+
+
+def test_stop_running_task_requests_cooperative_stop(client):
+    """运行中的任务保留当前状态，但跨 worker 持久化停止请求。"""
+    from document_comparison.config import settings
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("stop-running-1", "compare")
+    assert db_repo.set_task_queue_payload(
+        "stop-running-1", {"runner": "compare", "word_path": "/tmp/a", "pdf_path": "/tmp/b"}
+    )
+    assert db_repo.claim_next_queued_task("test-worker", 10, 120) is not None
+    if settings.console_password:
+        assert client.post(
+            "/api/v1/auth/login", json={"password": settings.console_password}
+        ).status_code == 200
+
+    r = client.post("/api/v1/tasks/stop-running-1/stop")
+
+    assert r.status_code == 202
+    assert r.json() == {
+        "task_id": "stop-running-1",
+        "status": "running",
+        "stop_requested": True,
+        "message": "已请求停止，当前处理阶段结束后终止",
+    }
+    rec = db_repo.get_task("stop-running-1")
+    assert rec is not None
+    assert rec.status == "running"
+    assert rec.stop_requested is True
+    assert [event.stage for event in db_repo.get_task_events("stop-running-1")] == ["stop_requested"]
+
+
+def test_stop_unmanaged_historical_running_task_immediately(client):
+    """无队列租约的历史“处理中”任务没有 worker 可消费停止请求，应立即终止。"""
+    from document_comparison.config import settings
+    from document_comparison.db import repository as db_repo
+
+    db_repo.create_task("stop-history-1", "statement")
+    db_repo.update_task_status("stop-history-1", "running")
+    if settings.console_password:
+        assert client.post(
+            "/api/v1/auth/login", json={"password": settings.console_password}
+        ).status_code == 200
+
+    r = client.post("/api/v1/tasks/stop-history-1/stop")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "failed"
+    rec = db_repo.get_task("stop-history-1")
+    assert rec is not None
+    assert rec.status == "failed"
+    assert rec.stop_requested is False
+    assert rec.error == "用户手动停止：历史任务无有效队列租约"
 
 
 # —— LLM 调用记录端点(/api/v1/tasks/{task_id}/llm-calls)——

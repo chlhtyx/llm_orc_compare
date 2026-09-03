@@ -424,6 +424,44 @@ async def test_sync_queue_wait_returns_when_task_is_claimed(monkeypatch):
     assert await TaskManager().wait_for_sync_queue("queued-task") is True
 
 
+async def test_running_task_stops_after_current_pipeline_stage(monkeypatch):
+    """运行中停止请求不会强杀线程，但管线返回后不得写入成功报告。"""
+    from document_comparison import tasks as tasks_module
+    from document_comparison.models import TamperReport
+    from document_comparison.tasks import TaskManager
+
+    for name in (
+        "create_task", "update_task_status", "save_milestone_event",
+        "save_llm_calls_batch",
+    ):
+        monkeypatch.setattr(tasks_module.db_repo, name, lambda *_a, **_kw: None)
+    saved_reports: list[TamperReport] = []
+    monkeypatch.setattr(
+        tasks_module.db_repo, "save_compare_report",
+        lambda _task_id, report: saved_reports.append(report),
+    )
+    stop_checks = iter([False, True])
+    monkeypatch.setattr(
+        tasks_module.db_repo, "task_stop_requested", lambda _task_id: next(stop_checks),
+    )
+    monkeypatch.setattr(
+        tasks_module, "run_pipeline",
+        lambda *_a, **_kw: TamperReport(
+            source="source.pdf", target="target.pdf", overall_risk="clean",
+        ),
+    )
+
+    manager = TaskManager()
+    task_id = manager.create("compare")
+    await manager.run(task_id, "source.pdf", "target.pdf")
+
+    task = manager.get(task_id)
+    assert task is not None
+    assert task.info.status == "failed"
+    assert task.info.error == "用户手动停止：当前处理阶段已结束"
+    assert saved_reports == []
+
+
 async def test_model_timeout_persists_collected_llm_call(monkeypatch):
     """流水线因模型超时失败时,已收集的失败 attempt 仍应落库。"""
     import logging

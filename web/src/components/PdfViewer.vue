@@ -23,7 +23,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectClause: [clauseId: string]
-  updateZoomLevel: [zoomLevel: number]
+  'update:zoomLevel': [zoomLevel: number]
 }>()
 
 // ---- 状态 ----
@@ -144,7 +144,7 @@ function setZoom(nextZoom: number): void {
     void renderPdf()
     return
   }
-  emit('updateZoomLevel', boundedZoom)
+  emit('update:zoomLevel', boundedZoom)
 }
 
 // ---- 滚动到指定页 ----

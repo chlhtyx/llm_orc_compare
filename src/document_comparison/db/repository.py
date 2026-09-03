@@ -65,6 +65,7 @@ def create_task(
             existing.callback_url = callback_url
             existing.callback_status = cb_status
             existing.status = "pending"
+            existing.stop_requested = False
             return
         s.add(TaskRecord(
             task_id=task_id,
@@ -102,6 +103,7 @@ def update_task_status(
         if status in ("done", "failed"):
             rec.lease_owner = None
             rec.lease_expires_at = None
+            rec.stop_requested = False
         if overall_risk is not None:
             rec.overall_risk = overall_risk
         if change_status is not None:
@@ -347,6 +349,77 @@ def set_task_queue_payload(task_id: str, payload: dict[str, Any]) -> bool:
         return True
 
 
+def recover_failed_task(task_id: str) -> str:
+    """将保留队列参数的失败任务安全地重新入队。
+
+    返回 ``recovered`` / ``not_found`` / ``invalid_status`` /
+    ``not_recoverable``。与领取端共用 advisory lock，避免管理员恢复与
+    dispatcher 领取任务发生状态竞争。
+    """
+    with session_scope() as s:
+        s.execute(text("SELECT pg_advisory_xact_lock(92134017)"))
+        rec = s.get(TaskRecord, task_id)
+        if rec is None:
+            return "not_found"
+        if rec.status != "failed":
+            return "invalid_status"
+        if not rec.queue_payload:
+            return "not_recoverable"
+        rec.status = "pending"
+        rec.error = None
+        rec.finished_at = None
+        rec.lease_owner = None
+        rec.lease_expires_at = None
+        rec.stop_requested = False
+        return "recovered"
+
+
+def request_task_stop(task_id: str) -> str:
+    """停止尚未领取的任务，或登记运行中任务的协作式停止请求。
+
+    与领取端共用 advisory lock，确保任务要么被停止，要么先被领取并由调用方
+    进入“停止请求中”处理，不会出现两个终态写入者。返回 ``stopped`` /
+    ``stop_requested`` / ``not_found`` / ``invalid_status``。
+    """
+    with session_scope() as s:
+        s.execute(text("SELECT pg_advisory_xact_lock(92134017)"))
+        rec = s.get(TaskRecord, task_id)
+        if rec is None:
+            return "not_found"
+        if rec.status == "pending":
+            rec.status = "failed"
+            rec.error = "用户手动停止：任务尚未开始执行"
+            rec.finished_at = datetime.now(timezone.utc)
+            rec.lease_owner = None
+            rec.lease_expires_at = None
+            rec.stop_requested = False
+            return "stopped"
+        if rec.status == "running":
+            # 新持久化队列任务在领取时一定同时写入 payload 和 lease_owner。
+            # 两者缺失说明是旧版直跑任务或 worker 已消失的遗留记录，没有执行者
+            # 可以消费协作式停止请求，必须直接转终态，不能继续显示“处理中”。
+            if not rec.queue_payload or not rec.lease_owner:
+                rec.status = "failed"
+                rec.error = "用户手动停止：历史任务无有效队列租约"
+                rec.finished_at = datetime.now(timezone.utc)
+                rec.lease_owner = None
+                rec.lease_expires_at = None
+                rec.stop_requested = False
+                return "stopped"
+            rec.stop_requested = True
+            rec.error = "用户请求停止：当前处理阶段结束后终止"
+            return "stop_requested"
+        return "invalid_status"
+
+
+def task_stop_requested(task_id: str) -> bool:
+    """读取运行中任务的跨 worker 停止请求标记。"""
+    with session_scope() as s:
+        return bool(s.scalar(
+            select(TaskRecord.stop_requested).where(TaskRecord.task_id == task_id)
+        ))
+
+
 def claim_next_queued_task(
     worker_id: str,
     max_running: int,
@@ -420,6 +493,7 @@ def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:
         "task_id": rec.task_id,
         "kind": rec.kind,
         "status": rec.status,
+        "stop_requested": rec.stop_requested,
         "source_name": rec.source_name,
         "target_names": list(rec.target_names or []),
         "ocr_backend": rec.ocr_backend,
