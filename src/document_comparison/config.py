@@ -212,14 +212,27 @@ class Settings:
     max_pdf_pages: int = 0
 
     # —— 任务 ——
-    # 全局并发上限。多 worker 部署下由 PG task_records 计数强制(见 api/app.py),
-    # 单进程下另有 asyncio.Semaphore 第二道保险(见 tasks.py)。
+    # 全局执行并发上限。多 worker 部署下由 PG 队列原子领取强制(见 tasks.py),
+    # 单进程下另有 asyncio.Semaphore 第二道保险。
     max_concurrent_tasks: int = field(
         default_factory=lambda: int(_env("DC_MAX_CONCURRENT_TASKS", "4"))
     )
-    # 获取执行槽位(asyncio.Semaphore)的最长等待秒数;超时则任务直接置 failed。
-    # 防止同步模式(sync=true)请求在槽位被占满时永久 hang(gunicorn timeout=0 不兜底)。
-    # 0 表示不等待(拿不到立即失败);建议保留一定排队余量。
+    # 可持久化等待队列的容量。0 表示不接受任何等待任务(仍可执行空闲槽位任务)。
+    max_queued_tasks: int = field(
+        default_factory=lambda: int(_env("DC_MAX_QUEUED_TASKS", "50"))
+    )
+    # 外部 sync=true 请求在任务尚未取得执行槽位时最多等待的秒数。超时后返回
+    # 202 + task_id，任务保持在队列中，不因 HTTP 客户端断开而取消。
+    sync_queue_wait_seconds: float = field(
+        default_factory=lambda: float(_env("DC_SYNC_QUEUE_WAIT_SECONDS", "300"))
+    )
+    # PostgreSQL 队列任务的 worker 租约。执行期间会按三分之一周期续租；worker
+    # 崩溃后租约到期的 running 任务会回到 pending 并从头重跑。
+    task_queue_lease_seconds: float = field(
+        default_factory=lambda: float(_env("DC_TASK_QUEUE_LEASE_SECONDS", "120"))
+    )
+    # 兼容直接调用 TaskManager.run 的进程内 semaphore 等待上限；HTTP 提交入口
+    # 已通过 PostgreSQL 队列领取槽位，sync 请求排队预算见 sync_queue_wait_seconds。
     task_acquire_timeout: float = field(
         default_factory=lambda: float(_env("DC_TASK_ACQUIRE_TIMEOUT", "30.0"))
     )

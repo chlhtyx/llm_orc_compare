@@ -13,7 +13,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import String, case, cast, func, or_, select
+from sqlalchemy import String, case, cast, func, or_, select, text
 
 from ..models import (
     StatementSummaryReport,
@@ -99,6 +99,9 @@ def update_task_status(
             logger.warning("update_task_status: task_id=%s not found", task_id)
             return
         rec.status = status
+        if status in ("done", "failed"):
+            rec.lease_owner = None
+            rec.lease_expires_at = None
         if overall_risk is not None:
             rec.overall_risk = overall_risk
         if change_status is not None:
@@ -307,6 +310,104 @@ def count_active_tasks() -> int:
             select(func.count()).select_from(TaskRecord)
             .where(TaskRecord.status.in_(("pending", "running")))
         ) or 0
+
+
+def count_queued_tasks() -> int:
+    """统计已经完整入队、尚未获得执行槽位的任务数。"""
+    with session_scope() as s:
+        return s.scalar(
+            select(func.count()).select_from(TaskRecord).where(
+                TaskRecord.status == "pending",
+                TaskRecord.queue_payload.is_not(None),
+            )
+        ) or 0
+
+
+def count_running_tasks() -> int:
+    """统计已领取执行槽位的任务数。"""
+    with session_scope() as s:
+        return s.scalar(
+            select(func.count()).select_from(TaskRecord).where(
+                TaskRecord.status == "running"
+            )
+        ) or 0
+
+
+def set_task_queue_payload(task_id: str, payload: dict[str, Any]) -> bool:
+    """使一个已创建任务成为可领取的持久化队列任务。
+
+    这里不做容量检查；提交端在文件落盘前检查队列容量，避免队列满时留下
+    上传文件。调度领取使用另一把 PG 事务锁保证执行并发不会超限。
+    """
+    with session_scope() as s:
+        rec = s.get(TaskRecord, task_id)
+        if rec is None or rec.status != "pending":
+            return False
+        rec.queue_payload = dict(payload)
+        return True
+
+
+def claim_next_queued_task(
+    worker_id: str,
+    max_running: int,
+    lease_seconds: float,
+) -> TaskRecord | None:
+    """原子领取最早的 pending 任务，跨 worker 严格限制 running 数。
+
+    PostgreSQL advisory transaction lock 覆盖“统计 running + 领取”这个组合操作；
+    单纯 count 后 update 在多 worker 下会产生竞态。过期租约的任务先退回
+    pending，以便 worker 异常退出后重新执行。
+    """
+    with session_scope() as s:
+        s.execute(text("SELECT pg_advisory_xact_lock(92134017)"))
+        now = datetime.now(timezone.utc)
+        s.query(TaskRecord).filter(
+            TaskRecord.status == "running",
+            TaskRecord.lease_expires_at.is_not(None),
+            TaskRecord.lease_expires_at < now,
+        ).update(
+            {
+                TaskRecord.status: "pending",
+                TaskRecord.lease_owner: None,
+                TaskRecord.lease_expires_at: None,
+            },
+            synchronize_session=False,
+        )
+        running = s.scalar(
+            select(func.count()).select_from(TaskRecord).where(
+                TaskRecord.status == "running"
+            )
+        ) or 0
+        if running >= max_running:
+            return None
+        rec = s.scalar(
+            select(TaskRecord)
+            .where(
+                TaskRecord.status == "pending",
+                TaskRecord.queue_payload.is_not(None),
+            )
+            .order_by(TaskRecord.created_at.asc())
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if rec is None:
+            return None
+        rec.status = "running"
+        rec.lease_owner = worker_id
+        rec.lease_expires_at = now + timedelta(seconds=max(1.0, lease_seconds))
+        return rec
+
+
+def renew_task_lease(task_id: str, worker_id: str, lease_seconds: float) -> bool:
+    """仅持有当前租约的 worker 可以续租，避免旧 worker 覆盖新领取者。"""
+    with session_scope() as s:
+        rec = s.get(TaskRecord, task_id)
+        if rec is None or rec.status != "running" or rec.lease_owner != worker_id:
+            return False
+        rec.lease_expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=max(1.0, lease_seconds)
+        )
+        return True
 
 
 def to_dict(rec: TaskRecord, *, include_report: bool = False) -> dict[str, Any]:

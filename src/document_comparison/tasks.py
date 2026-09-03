@@ -63,6 +63,7 @@ _STAGE_TIMING_KEY = {
 # 高频进度事件(中间 stage、子进度)不入库,避免写放大。
 # 对帐单动态 stage(statement_file_N_done)用前缀匹配。
 _MILESTONE_STAGES: frozenset[str] = frozenset({
+    "queued",
     "start",
     "done",
     "failed",
@@ -179,6 +180,11 @@ class TaskManager:
     def __init__(self) -> None:
         self._tasks: dict[str, Task] = {}
         self._sem = asyncio.Semaphore(settings.max_concurrent_tasks)
+        self._queue_wakeup: asyncio.Event | None = None
+        self._queue_dispatcher: asyncio.Task | None = None
+        self._queue_stop = False
+        self._queue_running: set[asyncio.Task] = set()
+        self._queue_worker_id = f"{uuid.uuid4().hex[:12]}"
 
     def create(
         self,
@@ -231,6 +237,175 @@ class TaskManager:
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
+
+    async def enqueue(self, task_id: str, payload: dict) -> bool:
+        """将文件已落盘的任务转为可由 PG 队列领取的作业。"""
+        queued = await asyncio.to_thread(db_repo.set_task_queue_payload, task_id, payload)
+        if queued:
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task.info.status = "pending"
+                task.info.stage = "queued"
+                task.push_event("queued", 0.0)
+                self._record_milestone(task, "queued", 0.0)
+            self.wake_queue()
+        return queued
+
+    async def queue_is_full(self) -> bool:
+        """用于上传文件前的有界队列预检；领取端仍负责执行并发原子约束。"""
+        if settings.max_queued_tasks > 0:
+            return (
+                await asyncio.to_thread(db_repo.count_queued_tasks)
+            ) >= settings.max_queued_tasks
+        # 0 表示不保留等待名额：仅在所有执行槽位均被占用时拒绝。
+        return (
+            await asyncio.to_thread(db_repo.count_running_tasks)
+        ) >= settings.max_concurrent_tasks
+
+    def wake_queue(self) -> None:
+        if self._queue_wakeup is not None:
+            self._queue_wakeup.set()
+
+    async def start_queue_dispatcher(self) -> None:
+        """在每个 FastAPI worker 生命周期内启动 PG 队列调度器。"""
+        if self._queue_dispatcher is not None and not self._queue_dispatcher.done():
+            return
+        self._queue_stop = False
+        self._queue_wakeup = asyncio.Event()
+        self._queue_dispatcher = asyncio.create_task(
+            self._queue_dispatch_loop(), name="document-comparison-queue"
+        )
+        self.wake_queue()
+
+    async def stop_queue_dispatcher(self) -> None:
+        self._queue_stop = True
+        self.wake_queue()
+        if self._queue_dispatcher is not None:
+            self._queue_dispatcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._queue_dispatcher
+        self._queue_dispatcher = None
+
+    async def wait_for_sync_queue(self, task_id: str) -> bool:
+        """等到任务领取或终态；False 表示仍 pending 且同步排队预算耗尽。"""
+        deadline = time.monotonic() + max(0.0, settings.sync_queue_wait_seconds)
+        while True:
+            status = await asyncio.to_thread(db_repo.get_task_status, task_id)
+            if status is None or status in ("done", "failed", "running"):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
+
+    async def wait_for_terminal(self, task_id: str) -> None:
+        """跨 worker 等待终态；不能依赖仅本进程可见的 Task.done。"""
+        while True:
+            status = await asyncio.to_thread(db_repo.get_task_status, task_id)
+            if status is None or status in ("done", "failed"):
+                return
+            await asyncio.sleep(0.5)
+
+    def _hydrate_claimed_task(self, rec) -> Task:
+        task = self._tasks.get(rec.task_id)
+        if task is None:
+            task = Task(
+                info=TaskInfo(task_id=rec.task_id, status="running"),
+                kind=rec.kind,
+                callback_url=rec.callback_url,
+                document_no=rec.document_no,
+                document_type=rec.document_type,
+                external_request=rec.external_request,
+                sync_mode=bool((rec.queue_payload or {}).get("sync_mode", False)),
+            )
+            self._tasks[rec.task_id] = task
+        task.info.status = "running"
+        return task
+
+    async def _renew_lease_until_done(self, task_id: str) -> None:
+        interval = max(1.0, settings.task_queue_lease_seconds / 3)
+        while True:
+            await asyncio.sleep(interval)
+            renewed = await asyncio.to_thread(
+                db_repo.renew_task_lease,
+                task_id,
+                self._queue_worker_id,
+                settings.task_queue_lease_seconds,
+            )
+            if not renewed:
+                return
+
+    async def _run_claimed_queue_task(self, rec) -> None:
+        self._hydrate_claimed_task(rec)
+        payload = dict(rec.queue_payload or {})
+        renewer = asyncio.create_task(self._renew_lease_until_done(rec.task_id))
+        try:
+            runner = payload.get("runner")
+            if runner == "compare":
+                await self.run(
+                    rec.task_id, payload["word_path"], payload["pdf_path"],
+                    enable_llm_judge=bool(payload.get("enable_llm_judge", False)),
+                    enable_llm_alignment=bool(payload.get("enable_llm_alignment", False)),
+                    ocr_backend=payload.get("ocr_backend"),
+                    enable_risk_assessment=bool(payload.get("enable_risk_assessment", False)),
+                    enable_llm_direct_diff=bool(payload.get("enable_llm_direct_diff", False)),
+                    truncate_to_original_pages=bool(payload.get("truncate_to_original_pages", False)),
+                    original_page_count=payload.get("original_page_count"),
+                )
+            elif runner == "statement":
+                await self.run_statement(
+                    rec.task_id, list(payload["pdf_paths"]), list(payload["file_names"]),
+                    ocr_backend=payload.get("ocr_backend"),
+                    amount_column_keywords=payload.get("amount_column_keywords"),
+                    enable_llm_column_detection=bool(payload.get("enable_llm_column_detection", True)),
+                )
+            elif runner == "raw":
+                await self.run_raw(
+                    rec.task_id, payload["word_path"], payload["pdf_path"],
+                    char_level=bool(payload.get("char_level", True)),
+                    ocr_backend=payload.get("ocr_backend"),
+                )
+            else:
+                raise ValueError(f"未知队列 runner: {runner!r}")
+        except Exception:  # run* normally swallows pipeline errors; keep dispatcher alive on bad payload.
+            logger.exception("queued task dispatch failed task=%s", rec.task_id)
+            await self._db_thread(
+                db_repo.update_task_status, rec.task_id, "failed",
+                error="队列任务参数无效或调度失败",
+                finished=True,
+            )
+        finally:
+            renewer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await renewer
+
+    async def _queue_dispatch_loop(self) -> None:
+        assert self._queue_wakeup is not None
+        while not self._queue_stop:
+            claimed_any = False
+            while len(self._queue_running) < settings.max_concurrent_tasks:
+                try:
+                    rec = await asyncio.to_thread(
+                        db_repo.claim_next_queued_task,
+                        self._queue_worker_id,
+                        settings.max_concurrent_tasks,
+                        settings.task_queue_lease_seconds,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("queue claim failed")
+                    break
+                if rec is None:
+                    break
+                claimed_any = True
+                future = asyncio.create_task(self._run_claimed_queue_task(rec))
+                self._queue_running.add(future)
+                future.add_done_callback(self._queue_running.discard)
+            if claimed_any:
+                continue
+            try:
+                await asyncio.wait_for(self._queue_wakeup.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            self._queue_wakeup.clear()
 
     @staticmethod
     def _safe_db(fn, *args, **kwargs) -> None:

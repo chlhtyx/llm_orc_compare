@@ -27,6 +27,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -45,6 +46,16 @@ class TaskRecord(Base):
     kind: Mapped[str] = mapped_column(String(16), index=True)
     # 任务状态:pending | running | done | failed
     status: Mapped[str] = mapped_column(String(16), index=True)
+
+    # 持久化队列的运行参数只保存本机已落盘文件路径与布尔/枚举选项，不保存上传
+    # 文件内容或模型密钥。payload 为 NULL 的旧任务/尚未落定上传文件的任务不会被领取。
+    queue_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None, index=True
+    )
 
     # 文件名(供记录页展示;不存文件内容,文件仍在 .dc_data/uploads)
     source_name: Mapped[str] = mapped_column(String(512), default="")
@@ -112,6 +123,11 @@ class TaskRecord(Base):
         # 列表页常用筛选+排序:status / kind + created_at desc
         Index("ix_task_records_status_created", "status", "created_at"),
         Index("ix_task_records_kind_created", "kind", "created_at"),
+        Index(
+            "ix_task_queue_pending_created",
+            "created_at",
+            postgresql_where=text("status = 'pending' AND queue_payload IS NOT NULL"),
+        ),
     )
 
 

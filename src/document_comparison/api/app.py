@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from datetime import date, datetime
@@ -761,10 +762,19 @@ def create_app() -> FastAPI:
     # 把文件导入 PG(文件保留作备份),再把 PG 配置应用到运行时 settings 单例。
     _maybe_import_legacy_llm_config_file()
     apply_llm_overrides()
+    @asynccontextmanager
+    async def _queue_lifespan(_app: FastAPI):
+        await task_manager.start_queue_dispatcher()
+        try:
+            yield
+        finally:
+            await task_manager.stop_queue_dispatcher()
+
     app = FastAPI(
        title="文档比对 API",
         description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",
        version=settings.version,
+       lifespan=_queue_lifespan,
     )
 
     app.add_middleware(
@@ -1341,11 +1351,8 @@ def create_app() -> FastAPI:
                     f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
                 )
 
-        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-        # 进程内信号量 + 任务排队消化。
-        running = await asyncio.to_thread(db_repo.count_active_tasks)
-        if running >= settings.max_concurrent_tasks:
-            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+        if await task_manager.queue_is_full():
+            raise HTTPException(429, "等待队列已满,请稍后重试")
 
         document_no = f"API-TEST-{uuid.uuid4().hex[:12].upper()}"
         task_id = task_manager.create(
@@ -1358,19 +1365,15 @@ def create_app() -> FastAPI:
         )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
-        asyncio.create_task(
-            task_manager.run(
-                task_id,
-                str(word_path),
-                str(pdf_path),
-                enable_llm_judge=settings.external_enable_llm_judge,
-                enable_llm_alignment=settings.external_enable_llm_alignment,
-                ocr_backend=settings.external_ocr_backend,
-                enable_risk_assessment=settings.external_enable_risk_assessment,
-                enable_llm_direct_diff=settings.external_enable_llm_direct_diff,
-                truncate_to_original_pages=settings.external_truncate_to_original_pages,
-            )
-        )
+        await task_manager.enqueue(task_id, {
+            "runner": "compare", "word_path": str(word_path), "pdf_path": str(pdf_path),
+            "enable_llm_judge": settings.external_enable_llm_judge,
+            "enable_llm_alignment": settings.external_enable_llm_alignment,
+            "ocr_backend": settings.external_ocr_backend,
+            "enable_risk_assessment": settings.external_enable_risk_assessment,
+            "enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
+            "truncate_to_original_pages": settings.external_truncate_to_original_pages,
+        })
         return {"task_id": task_id, "document_no": document_no, "status": "pending"}
 
     @app.get("/api/v1/compare/api-test/{task_id}")
@@ -1440,7 +1443,7 @@ def create_app() -> FastAPI:
         """供外部系统调用的标准合同比对入口。
 
         默认异步(`sync=false`):返回 task_id,结果经回调或查询端点获取。
-        `sync=true`:同步阻塞至比对完成,响应体内直接返回完整结果。
+        `sync=true`:优先同步等待完成；持续排队超过配置预算时返回 202 和 task_id。
 
         source/source_url 二选一、target/target_url 二选一;URL 模式下后端下载落盘后复用同一 pipeline。
         """
@@ -1557,11 +1560,10 @@ def create_app() -> FastAPI:
                         f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
                     )
 
-            # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-            # 进程内信号量 + 任务排队消化。
-            running = await asyncio.to_thread(db_repo.count_active_tasks)
-            if running >= settings.max_concurrent_tasks:
-                raise HTTPException(429, "并发任务已达上限,请稍后重试")
+            # 已满的执行槽位不再直接拒绝：只要持久化等待队列仍有容量就受理。
+            # 预检发生在文件最终落盘前，避免队列满时留下无主上传文件。
+            if await task_manager.queue_is_full():
+                raise HTTPException(429, "等待队列已满,请稍后重试")
 
             task_id = task_manager.create(
                 "compare",
@@ -1586,27 +1588,35 @@ def create_app() -> FastAPI:
             # 已落定,rename 后的最终路径接管;临时文件引用清空,finally 不再清理。
             temp_source = None
             temp_target = None
-            run_coro = task_manager.run(
-                task_id,
-                str(word_path),
-                str(pdf_path),
-                enable_llm_judge=settings.external_enable_llm_judge,
-                enable_llm_alignment=settings.external_enable_llm_alignment,
-                ocr_backend=settings.external_ocr_backend,
-                enable_risk_assessment=settings.external_enable_risk_assessment,
-                enable_llm_direct_diff=settings.external_enable_llm_direct_diff,
-                truncate_to_original_pages=settings.external_truncate_to_original_pages,
-                original_page_count=original_page_count,
-            )
+            queued = await task_manager.enqueue(task_id, {
+                "runner": "compare",
+                "word_path": str(word_path),
+                "pdf_path": str(pdf_path),
+                "enable_llm_judge": settings.external_enable_llm_judge,
+                "enable_llm_alignment": settings.external_enable_llm_alignment,
+                "ocr_backend": settings.external_ocr_backend,
+                "enable_risk_assessment": settings.external_enable_risk_assessment,
+                "enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
+                "truncate_to_original_pages": settings.external_truncate_to_original_pages,
+                "original_page_count": original_page_count,
+                "sync_mode": sync,
+            })
+            if not queued:
+                raise HTTPException(503, "任务入队失败,请稍后重试")
             if sync:
-                # 同步模式:阻塞至比对完成,直接在响应体内返回完整结果。
-                # run 内部已兜底异常(失败只置 status=failed + error,不向调用方抛)。
-                await run_coro
+                # sync 优先保持旧契约；若持续 pending 超出队列预算，则交回 task_id
+                # 让调用方查询/接收回调，避免大量长连接拖垮上游和本服务。
+                claimed = await task_manager.wait_for_sync_queue(task_id)
+                if not claimed:
+                    return JSONResponse(
+                        status_code=202,
+                        content=await _external_task_response(task_id),
+                    )
+                await task_manager.wait_for_terminal(task_id)
                 return JSONResponse(
                     status_code=200,
                     content=await _external_task_response(task_id),
                 )
-            asyncio.create_task(run_coro)
             return {"task_id": task_id, "document_no": document_no, "status": "pending"}
         finally:
             # 仅清理未被 finalize 接管的临时文件(下载后校验/并发失败时)。
@@ -1770,7 +1780,7 @@ def create_app() -> FastAPI:
         """供外部系统调用的金额统计入口。
 
         默认异步(`sync=false`):返回 task_id,结果经回调或查询端点获取。
-        `sync=true`:同步阻塞至统计完成,响应体内直接返回完整结果。
+        `sync=true`:优先同步等待完成；持续排队超过配置预算时返回 202 和 task_id。
 
         支持多 PDF:target(文件)与 target_urls(URL)可混合提交,合计至少一个。
         document_type 标记统计对象是发票还是对帐单(1=发票、2=对帐单,缺省 1),
@@ -1888,10 +1898,8 @@ def create_app() -> FastAPI:
                             f"超过上限 {settings.max_pdf_pages} 页",
                         )
 
-            # 全局并发上限走 PG 计数(跨 worker 一致)。
-            running = await asyncio.to_thread(db_repo.count_active_tasks)
-            if running >= settings.max_concurrent_tasks:
-                raise HTTPException(429, "并发任务已达上限,请稍后重试")
+            if await task_manager.queue_is_full():
+                raise HTTPException(429, "等待队列已满,请稍后重试")
 
             task_id = task_manager.create(
                 "statement",
@@ -1929,17 +1937,27 @@ def create_app() -> FastAPI:
                 file_names.append(filename)
                 index += 1
 
-            run_coro = task_manager.run_statement(
-                task_id, pdf_paths, file_names,
-                ocr_backend=settings.external_ocr_backend,
-            )
+            queued = await task_manager.enqueue(task_id, {
+                "runner": "statement",
+                "pdf_paths": pdf_paths,
+                "file_names": file_names,
+                "ocr_backend": settings.external_ocr_backend,
+                "sync_mode": sync,
+            })
+            if not queued:
+                raise HTTPException(503, "任务入队失败,请稍后重试")
             if sync:
-                await run_coro
+                claimed = await task_manager.wait_for_sync_queue(task_id)
+                if not claimed:
+                    return JSONResponse(
+                        status_code=202,
+                        content=await _external_statement_response(task_id),
+                    )
+                await task_manager.wait_for_terminal(task_id)
                 return JSONResponse(
                     status_code=200,
                     content=await _external_statement_response(task_id),
                 )
-            asyncio.create_task(run_coro)
             return {
                 "task_id": task_id,
                 "document_no": document_no,
@@ -2004,12 +2022,8 @@ def create_app() -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
-        # 限流:运行中任务达上限则拒绝(§14.4)
-        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-        # 进程内信号量 + 任务排队消化。
-        running = await asyncio.to_thread(db_repo.count_active_tasks)
-        if running >= settings.max_concurrent_tasks:
-            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+        if await task_manager.queue_is_full():
+            raise HTTPException(429, "等待队列已满,请稍后重试")
 
         # PDF 页数上限预检:超过配置上限直接拒绝,不进入流水线。
         # 0 表示不限制;读取 target 字节计数后回拨流,供 save_upload 再读一次。
@@ -2037,18 +2051,16 @@ def create_app() -> FastAPI:
         )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
-        asyncio.create_task(
-            task_manager.run(
-                task_id, str(word_path), str(pdf_path),
-                enable_llm_judge=enable_llm_judge,
-                enable_llm_alignment=enable_llm_alignment,
-                ocr_backend=ocr_backend,
-                enable_risk_assessment=enable_risk_assessment,
-                enable_llm_direct_diff=enable_llm_direct_diff,
-                truncate_to_original_pages=truncate_to_original_pages,
-                original_page_count=original_page_count,
-            )
-        )
+        await task_manager.enqueue(task_id, {
+            "runner": "compare", "word_path": str(word_path), "pdf_path": str(pdf_path),
+            "enable_llm_judge": enable_llm_judge,
+            "enable_llm_alignment": enable_llm_alignment,
+            "ocr_backend": ocr_backend,
+            "enable_risk_assessment": enable_risk_assessment,
+            "enable_llm_direct_diff": enable_llm_direct_diff,
+            "truncate_to_original_pages": truncate_to_original_pages,
+            "original_page_count": original_page_count,
+        })
         return {"task_id": task_id, "status": "pending"}
 
     @app.get(
@@ -2281,11 +2293,8 @@ def create_app() -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
-        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-        # 进程内信号量 + 任务排队消化。
-        running = await asyncio.to_thread(db_repo.count_active_tasks)
-        if running >= settings.max_concurrent_tasks:
-            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+        if await task_manager.queue_is_full():
+            raise HTTPException(429, "等待队列已满,请稍后重试")
 
         # PDF 页数上限预检(与 /api/v1/compare 一致)。
         if settings.max_pdf_pages > 0:
@@ -2312,12 +2321,10 @@ def create_app() -> FastAPI:
         )
         word_path = save_upload(source, task_id, "source")
         pdf_path = save_upload(target, task_id, "target")
-        asyncio.create_task(
-            task_manager.run_raw(
-                task_id, str(word_path), str(pdf_path),
-                char_level=opts.char_level, ocr_backend=opts.ocr_backend,
-            )
-        )
+        await task_manager.enqueue(task_id, {
+            "runner": "raw", "word_path": str(word_path), "pdf_path": str(pdf_path),
+            "char_level": opts.char_level, "ocr_backend": opts.ocr_backend,
+        })
         return {"task_id": task_id, "status": "pending"}
 
     @app.get("/api/v1/raw-compare/{task_id}")
@@ -2471,11 +2478,8 @@ def create_app() -> FastAPI:
                             f"超过上限 {settings.max_pdf_pages} 页",
                         )
 
-            # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-            # 进程内信号量 + 任务排队消化。
-            running = await asyncio.to_thread(db_repo.count_active_tasks)
-            if running >= settings.max_concurrent_tasks:
-                raise HTTPException(429, "并发任务已达上限,请稍后重试")
+            if await task_manager.queue_is_full():
+                raise HTTPException(429, "等待队列已满,请稍后重试")
 
             document_no = f"API-TEST-{uuid.uuid4().hex[:12].upper()}"
             task_id = task_manager.create(
@@ -2506,12 +2510,10 @@ def create_app() -> FastAPI:
                 pdf_paths.append(str(saved))
                 file_names.append(filename)
                 index += 1
-            asyncio.create_task(
-                task_manager.run_statement(
-                    task_id, pdf_paths, file_names,
-                    ocr_backend=settings.external_ocr_backend,
-                )
-            )
+            await task_manager.enqueue(task_id, {
+                "runner": "statement", "pdf_paths": pdf_paths, "file_names": file_names,
+                "ocr_backend": settings.external_ocr_backend,
+            })
             return {
                 "task_id": task_id,
                 "document_no": document_no,
@@ -2548,12 +2550,8 @@ def create_app() -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"options 解析失败: {exc}")
 
-        # 限流:与 compare/raw 共享并发上限
-        # 全局并发上限走 PG 计数(跨 worker 一致);事务级检查,瞬时略超由执行端
-        # 进程内信号量 + 任务排队消化。
-        running = await asyncio.to_thread(db_repo.count_active_tasks)
-        if running >= settings.max_concurrent_tasks:
-            raise HTTPException(429, "并发任务已达上限,请稍后重试")
+        if await task_manager.queue_is_full():
+            raise HTTPException(429, "等待队列已满,请稍后重试")
 
         # PDF 页数上限预检(对每个 PDF 校验)
         if settings.max_pdf_pages > 0:
@@ -2587,14 +2585,12 @@ def create_app() -> FastAPI:
             saved = save_upload(t, task_id, "target", index=i)
             pdf_paths.append(str(saved))
             file_names.append(t.filename or f"target-{i}.pdf")
-        asyncio.create_task(
-            task_manager.run_statement(
-                task_id, pdf_paths, file_names,
-                ocr_backend=opts.ocr_backend,
-                amount_column_keywords=opts.amount_column_keywords,
-                enable_llm_column_detection=opts.enable_llm_column_detection,
-            )
-        )
+        await task_manager.enqueue(task_id, {
+            "runner": "statement", "pdf_paths": pdf_paths, "file_names": file_names,
+            "ocr_backend": opts.ocr_backend,
+            "amount_column_keywords": opts.amount_column_keywords,
+            "enable_llm_column_detection": opts.enable_llm_column_detection,
+        })
         return {"task_id": task_id, "status": "pending", "file_count": len(pdf_paths)}
 
     @app.get("/api/v1/statement/{task_id}")

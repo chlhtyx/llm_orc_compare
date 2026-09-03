@@ -31,7 +31,7 @@ Base  {external_public_base_url}/api/v1/external
 
 > 每个角色文件与链接**二选一**;同时传或都不传 → 400。URL 模式下文件名取 `Content-Disposition: filename=` 或 URL 末段,**source 后缀必须 `.docx`/`.pdf`、target 后缀必须 `.pdf`**,下载失败(非 2xx / 超时 / 超限)→ 400。
 
-**同步模式** `sync=true`:HTTP 一直阻塞到完成,响应体直接返回完整结果(状态码恒为 200,成败看 body 的 `status`)。客户端超时建议 ≥ 5 分钟。
+**同步模式** `sync=true`:优先等待完成并返回 `200` 完整结果；若持续排队超过服务端预算，返回 `202 + task_id`，任务继续执行，改用查询或回调获取结果。客户端读超时应覆盖排队预算与单任务处理时间。
 
 **异步模式** `sync=false`:立即返回 202:
 
