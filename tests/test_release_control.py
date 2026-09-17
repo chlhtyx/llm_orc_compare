@@ -15,13 +15,11 @@ from document_comparison.deployment import DeploymentAdmissionMiddleware, record
 
 @pytest.fixture
 def deployment(db_isolated, monkeypatch, tmp_path):
-    monkeypatch.setattr(settings, "deployment_id", "a-v1")
-    monkeypatch.setattr(settings, "deployment_initial_mode", "SERVING")
     monkeypatch.setattr(settings, "version", "v1")
     monkeypatch.setattr(settings, "storage_dir", tmp_path)
     monkeypatch.setattr(settings, "console_password", "")
-    releases.register("a-v1", "v1", "SERVING")
-    return "a-v1"
+    releases.register(releases.DEPLOYMENT_ID, "v1", "SERVING")
+    return releases.DEPLOYMENT_ID
 
 
 @pytest.mark.parametrize("mode", ["SERVING", "DRAINING", "STOPPED"])
@@ -219,8 +217,8 @@ def test_snapshots_are_private_and_restore_only_while_quiet(deployment):
     assert set(_LLM_CONFIG_FIELDS).issubset(json.loads(path.read_text())["llm_config"])
     repository.save_llm_config({"llm_api_key": "different", "llm_model": "model-v2"})
     with pytest.raises(ValueError):
-        restore(path, "bad-hash", deployment)
-    restore(path, result["sha256"], deployment)
+        restore(path, "bad-hash")
+    restore(path, result["sha256"])
     assert repository.get_llm_config()["llm_model"] == "model-v1"
     assert repository.get_llm_config()["llm_api_key"] == "test-private-key"
 
@@ -326,3 +324,61 @@ def test_prepare_script_stops_after_drain_timeout(tmp_path):
     calls = log.read_text()
     assert "release drain" in calls and "release wait" in calls
     assert "snapshot" not in calls and "stop" not in calls
+
+
+def test_removed_deployment_environment_is_ignored(monkeypatch):
+    from document_comparison.config import Settings
+    monkeypatch.setenv("DC_DEPLOYMENT_ID", "unused-ab-instance")
+    monkeypatch.setenv("DC_DEPLOYMENT_INITIAL_MODE", "STOPPED")
+    monkeypatch.setenv("DC_DEPLOYMENT_RETRY_AFTER", "invalid")
+    config = Settings()
+    assert not hasattr(config, "deployment_id")
+    assert not hasattr(config, "deployment_initial_mode")
+    assert not hasattr(config, "deployment_retry_after")
+    assert releases.DEPLOYMENT_ID == "main"
+
+
+async def test_dispatcher_uses_internal_single_service_identity(monkeypatch):
+    from document_comparison.tasks import TaskManager
+    manager = TaskManager()
+    manager._queue_wakeup = asyncio.Event()
+    manager._queue_wakeup.set()
+    captured = []
+
+    def claim(*args, **kwargs):
+        captured.append(kwargs["deployment_id"])
+        manager._queue_stop = True
+        return None
+
+    monkeypatch.setattr(repository, "claim_next_queued_task", claim)
+    await asyncio.wait_for(manager._queue_dispatch_loop(), timeout=2)
+    assert captured == ["main"]
+
+
+def test_restore_cli_needs_only_file_and_hash(deployment, monkeypatch, capsys):
+    from document_comparison import release
+    repository.save_llm_config({"llm_model": "before"})
+    releases.set_mode(deployment, "DRAINING")
+    saved = release.snapshot("single-service")
+    repository.save_llm_config({"llm_model": "after"})
+    monkeypatch.setattr(release.engine, "init_engine", lambda: None)
+    assert release.main(["restore", "--file", saved["path"], "--sha256", saved["sha256"]]) == 0
+    assert repository.get_llm_config()["llm_model"] == "before"
+    assert json.loads(capsys.readouterr().out)["restored"] is True
+
+
+def test_restore_rejects_foreign_snapshot_without_modifying_config(deployment):
+    import hashlib
+    from document_comparison.release import snapshot, restore
+    repository.save_llm_config({"llm_model": "keep"})
+    releases.set_mode(deployment, "DRAINING")
+    saved = snapshot("single-service")
+    path = Path(saved["path"])
+    payload = json.loads(path.read_text())
+    payload["deployment_id"] = "retired-other-service"
+    payload["llm_config"]["llm_model"] = "replace"
+    raw = json.dumps(payload).encode()
+    path.write_bytes(raw)
+    with pytest.raises(ValueError, match="来源部署不匹配"):
+        restore(path, hashlib.sha256(raw).hexdigest())
+    assert repository.get_llm_config()["llm_model"] == "keep"

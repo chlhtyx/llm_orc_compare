@@ -35,7 +35,7 @@ def _require_quiet(s):
 def snapshot(label: str):
     with engine.session_scope() as s:
         _require_quiet(s)
-        deployment = releases._deployment(s, settings.deployment_id)
+        deployment = releases._deployment(s, releases.DEPLOYMENT_ID)
         row = s.get(LlmConfigRecord, 1)
         effective = dict(_LLM_DEFAULTS)
         effective.update({k: v for k, v in (row.config if row else {}).items()
@@ -61,12 +61,12 @@ def snapshot(label: str):
             "deployment_id": payload["deployment_id"], "version": payload["version"]}
 
 
-def restore(path: Path, expected_sha256: str, source_deployment: str):
+def restore(path: Path, expected_sha256: str):
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise ValueError("配置快照校验失败")
     payload = json.loads(raw)
-    if payload.get("format") != 1 or payload.get("deployment_id") != source_deployment:
+    if payload.get("format") != 1 or payload.get("deployment_id") != releases.DEPLOYMENT_ID:
         raise ValueError("配置快照格式或来源部署不匹配")
     config = payload.get("llm_config")
     if not isinstance(config, dict) or set(config) - set(_LLM_CONFIG_FIELDS):
@@ -75,7 +75,7 @@ def restore(path: Path, expected_sha256: str, source_deployment: str):
         raise ValueError("快照字段不完整，请使用对应版本进行恢复或显式迁移")
     with engine.session_scope() as s:
         _require_quiet(s)
-        releases._deployment(s, settings.deployment_id)
+        releases._deployment(s, releases.DEPLOYMENT_ID)
         row = s.get(LlmConfigRecord, 1)
         if row is None:
             row = LlmConfigRecord(id=1, config=config)
@@ -83,14 +83,14 @@ def restore(path: Path, expected_sha256: str, source_deployment: str):
         else:
             row.config = config
         row.updated_at = datetime.now(timezone.utc)
-    return {"restored": True, "source_deployment": source_deployment,
+    return {"restored": True, "source_deployment": releases.DEPLOYMENT_ID,
             "runtime_restored": False}
 
 
 def wait_drained(timeout: float, interval: float = 1):
     deadline = time.monotonic() + timeout
     while True:
-        result = releases.status(settings.deployment_id)
+        result = releases.status(releases.DEPLOYMENT_ID)
         if result["mode"] != "DRAINING":
             raise releases.ReleaseConflict("wait 只允许 DRAINING；先执行 drain")
         if result["drained"]:
@@ -112,7 +112,6 @@ def main(argv=None):
     rest = commands.add_parser("restore")
     rest.add_argument("--file", type=Path, required=True)
     rest.add_argument("--sha256", required=True)
-    rest.add_argument("--source-deployment", required=True)
     resolve = commands.add_parser("resolve-activity", help="仅在停止 owner 并对账后清除异常屏障")
     resolve.add_argument("--activity-id", required=True)
     resolve.add_argument("--confirmed-stopped-owner", required=True)
@@ -121,17 +120,17 @@ def main(argv=None):
         engine.init_engine()  # CLI 不导入 app，不启动任务，不自动执行迁移。
         engine.check_connection()
         if args.command == "status":
-            result = releases.status(settings.deployment_id)
+            result = releases.status(releases.DEPLOYMENT_ID)
         elif args.command == "wait":
             result = wait_drained(args.timeout)
         elif args.command == "snapshot":
             result = snapshot(args.label)
         elif args.command == "restore":
-            result = restore(args.file, args.sha256, args.source_deployment)
+            result = restore(args.file, args.sha256)
         elif args.command == "resolve-activity":
-            releases.resolve_activity(settings.deployment_id, args.activity_id,
+            releases.resolve_activity(releases.DEPLOYMENT_ID, args.activity_id,
                                       args.confirmed_stopped_owner)
-            result = releases.status(settings.deployment_id)
+            result = releases.status(releases.DEPLOYMENT_ID)
         elif args.command == "ready":
             result = check_readiness()
             print(json.dumps(result, ensure_ascii=False))
@@ -140,8 +139,8 @@ def main(argv=None):
             if args.command == "serve" and not check_readiness()["prepared"]:
                 raise releases.ReleaseConflict("数据库、schema 或文件存储未就绪")
             mode = {"drain": "DRAINING", "serve": "SERVING", "stop": "STOPPED"}[args.command]
-            releases.set_mode(settings.deployment_id, mode)
-            result = releases.status(settings.deployment_id)
+            releases.set_mode(releases.DEPLOYMENT_ID, mode)
+            result = releases.status(releases.DEPLOYMENT_ID)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (releases.ReleaseConflict, ValueError) as exc:

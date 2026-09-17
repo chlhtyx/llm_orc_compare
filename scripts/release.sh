@@ -12,7 +12,7 @@ prepare：暂停提交 → 等待排空 → 保存私有配置快照 → 停机�
 失败立即停止，保留当前状态；超时后可用 ctl CONTAINER serve 取消排空。
 快照路径和 SHA256 输出到终端，配置正文仅写容器内持久化目录。
 
-原地发布后续步骤（换镜像、验收、回滚）见 docs/release-switch.md：
+原地发布后续步骤（换镜像、验收、回滚）见 docs/deploy.md：
   .env 调整 DC_VERSION 后 docker compose pull && docker compose up -d llm-ocr-compare
   bash scripts/release.sh ctl llm-ocr-compare ready
   bash scripts/release.sh ctl llm-ocr-compare serve

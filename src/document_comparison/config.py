@@ -39,14 +39,6 @@ def _import_package_version() -> str:
 
 @dataclass
 class Settings:
-    # 发布控制按部署实例持久化。原地发布：部署 ID 固定复用，换版本保留已有运行/维护状态。
-    deployment_id: str = field(default_factory=lambda: _env("DC_DEPLOYMENT_ID", "main"))
-    deployment_initial_mode: str = field(
-        default_factory=lambda: _env("DC_DEPLOYMENT_INITIAL_MODE", "SERVING").upper()
-    )
-    deployment_retry_after: int = field(
-        default_factory=lambda: int(_env("DC_DEPLOYMENT_RETRY_AFTER", "60"))
-    )
     # —— 服务 ——
     host: str = field(default_factory=lambda: _env("DC_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(_env("DC_PORT", "8000")))

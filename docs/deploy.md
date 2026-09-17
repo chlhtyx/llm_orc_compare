@@ -1,163 +1,197 @@
-# Docker 部署指南
+# 单服务部署与运维
 
-已有正式任务时建议按 [发布切换与回滚](release-switch.md) 操作，先排空再停止容器。
-`docker compose up -d --build` 适用于首次启动/开发，不会替你处理在途正式任务。
-正式服务跨版本固定使用同一 `DC_DEPLOYMENT_ID`（默认 `main`）；更换镜像版本会自动更新版本记录，保留已有运行/维护状态。
-受控发布设置 `DC_DB_AUTO_MIGRATE=0` 并单独迁移。
+本文是部署、升级和回滚的统一说明。Vue 前端和 FastAPI 后端运行在同一个应用容器，PostgreSQL 单独运行；OCR/LLM 在控制台配置为外部服务。
 
-## 目标环境
+## 1. 首次启动
 
-Linux x86_64(amd64)、Docker 20.10+、Docker Compose v2。
-
-## 快速开始
+目标环境为 Linux x86_64、Docker 和 Compose v2。在包含 `docker-compose.yml` 的项目目录执行：
 
 ```bash
-# 1. 进入项目目录
-cd document_comparison
-
-# 2. 准备环境变量
 cp .env.example .env
-
-# 3. 构建并启动(会同时拉起 postgres 服务,应用依赖 PG 健康检查通过后启动)
+chmod 600 .env
+# 编辑 .env：设置 DC_VERSION、POSTGRES_PASSWORD 和 DC_CONSOLE_PASSWORD
+docker compose config --quiet
 docker compose up -d --build
-
-# 4. 检查状态
 docker compose ps
-curl http://localhost:3012/health
+curl -fsS http://localhost:3012/health
+curl -fsS http://localhost:3012/ready
 ```
 
-浏览器打开 `http://<服务器IP>:3012` 即可访问。应用容器直接持有该宿主端口；
-发布为原地升级（排空后换镜像 tag 重建容器），业务调用地址不变。
+已有发布镜像时，可用以下命令代替源码构建：
 
-Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康检查通过后再启动,因此首次启动稍慢(等 PG 就绪)。
+```bash
+docker compose pull llm-ocr-compare
+docker compose up -d
+```
 
-## 环境变量
+默认访问 <http://localhost:3012>。修改 `DC_PORT` 后，请同步调整检查命令和 Nginx 上游端口。
+应用等待 PostgreSQL 健康检查通过，随后自动执行 `alembic upgrade head`。
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DC_PORT` | `3012` | 应用容器的稳定宿主机入口端口；容器内固定监听 8000 |
-| `DC_FONTS_DIR` | `./fonts` | 可选的授权字体目录，只读挂载到 `/usr/local/share/fonts/authorized`；不要把字体提交到仓库或打进镜像 |
-| `DATABASE_URL` | (compose 自动注入) | Postgres 连接串;必填,未配置则应用启动失败 |
-| `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(`dc` 用户) |
-| `DC_DB_AUTO_MIGRATE` | `1` | 启动时自动 `alembic upgrade head`(默认开);设为 `0` 改由运维手动控制 |
-| `DC_DEPLOYMENT_ID` | `main` | 发布实例 ID，跨版本固定复用；同版本多个 worker 共用 |
-| `DC_DEPLOYMENT_INITIAL_MODE` | `SERVING` | 首次注册模式（仅允许 SERVING）；重启及换版本沿用数据库运行/维护状态 |
-| `DC_DEPLOYMENT_RETRY_AFTER` | `60` | 维护拒绝写请求时的 Retry-After 秒数 |
-| `DC_DB_AUTO_CREATE` | 空 | 设为 `1` 时跳过 alembic 直接 `CREATE TABLE IF NOT EXISTS`(仅测试用) |
-| `DC_EXTERNAL_API_KEY` | 空 | 外部 API Key 的可选启动默认值；管理端设置可覆盖 |
-| `DC_EXTERNAL_PUBLIC_BASE_URL` | 空 | 服务公开地址的可选启动默认值；管理端设置可覆盖 |
-| `DC_EXTERNAL_MAX_UPLOAD_MB` | `50` | 外部接口单文件上限默认值；管理端设置可覆盖 |
-| `DC_EXTERNAL_IMAGE_DPI` | `144` | 全页高亮 PNG DPI 默认值；管理端设置可覆盖 |
-| `DC_EXTERNAL_OCR_BACKEND` | `paddleocr` | 外部 API 与页面测试共用的 OCR 引擎默认值 |
-| `DC_EXTERNAL_ENABLE_LLM_ALIGNMENT` | `0` | 外部 API 是否默认启用 LLM 原始块联合分段对齐；失败自动回退 Clause 对齐 |
-| `DC_EXTERNAL_ENABLE_LLM_JUDGE` | `0` | 外部 API 是否默认启用 LLM 辅助说明 |
-| `DC_EXTERNAL_ENABLE_RISK_ASSESSMENT` | `0` | 外部 API 是否默认开启风险分级 |
-| `DC_CONSOLE_PASSWORD` | 空 | Web 控制台访问口令；非空时控制台业务接口需口令登录(会话 Cookie),外部 X-API-Key 接口、`/health`、`/api/v1/version` 与静态资源不受影响 |
-| `DC_CONSOLE_SESSION_TTL_HOURS` | `12` | 控制台会话有效期(小时)；修改口令会使所有已发会话立即失效 |
+登录控制台后，在“设置”配置 OCR/LLM 地址、模型和密钥，在“外部 API 配置”维护外部接口鉴权与公开地址。模型配置保存在 PostgreSQL 中，重启不会丢失。
 
-> LLM / OCR 配置(API Base、API Key、模型名、超时、并发等)统一持久化于 Postgres 的 `llm_config` 表,通过 UI 设置页维护,不使用环境变量。首次启动若 `./data/llm_config.json` 存在且 PG 无记录,会自动一次性导入该文件并保留文件作备份,之后不再读取。
+## 2. 部署配置
 
-外部系统 API 配置在管理端“合同比对 API”页维护并写入 Postgres，保存后立即生效。
-上述 `DC_EXTERNAL_*` 仅作为首次启动或数据库配置不可用时的默认值。该页中的管线
-测试与正式外部接口共用 OCR/LLM 比对选项，会生成真实 OCR/比对调用和全页 PNG，
-但不会发送回调。测试文件与产物按普通任务保存在 `uploads/`、`reports/` 和任务历史中。
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `DC_VERSION` | 见 `.env.example` | 已发布镜像 tag 或源码构建版本；按本次目标版本设置 |
+| `DC_PORT` | `3012` | 应用宿主端口，映射到容器内 8000 |
+| `COMPOSE_PROJECT_NAME` | `llm-ocr-compare` | Compose 项目名，部署后保持稳定 |
+| `POSTGRES_PASSWORD` | `dcpass` | 首次初始化数据库的口令，生产部署前替换 |
+| `DC_CONSOLE_PASSWORD` | 空 | 非空时启用控制台登录 |
+| `DC_CONSOLE_SESSION_TTL_HOURS` | `12` | 控制台会话有效期，单位小时 |
+| `DC_DB_PORT` | `15433` | PostgreSQL 宿主映射端口，仅供受限运维访问 |
+| `DC_DB_AUTO_MIGRATE` | `1` | 应用启动时自动迁移；仅在自行管理迁移时改为 `0` |
+| `DC_FONTS_DIR` | `./fonts` | 授权字体目录，只读挂载 |
+| `DC_UVICORN_WORKERS` | `1` | 应用 worker 数 |
+| `DC_MAX_CONCURRENT_TASKS` | `4` | 执行并发上限 |
+| `DC_MAX_QUEUED_TASKS` | `50` | 等待队列容量 |
 
-## DOCX 渲染字体
+无需配置部署 ID、初始发布状态或双服务参数。Compose 自动注入 `DATABASE_URL`；只有脱离 Compose 运行后端时才需要自行提供连接串。不要在已有数据库上仅修改 `POSTGRES_PASSWORD`：初始化变量不会同步修改库内用户口令。
 
-镜像内置 Noto CJK、Liberation、Carlito、Caladea，并通过 Fontconfig 为常见 Word 字体提供回退。若合同依赖等线、微软雅黑、宋体、Arial 等授权字体，请在部署机准备只包含授权 `.ttf`、`.ttc`、`.otf` 文件的目录，在 `.env` 中设置 `DC_FONTS_DIR=/srv/document-comparison/fonts`，然后重新部署：
+更多业务配置及并发说明见 [README](../README.md)。控制台保存的模型和外部接口配置不需要复制到 `.env`。
+
+## 3. 日常启动和升级
+
+已有本地镜像时：
+
+```bash
+docker compose up -d
+```
+
+从镜像仓库升级：先修改 `.env` 的 `DC_VERSION`，再执行：
+
+```bash
+docker compose pull llm-ocr-compare
+docker compose up -d
+```
+
+从当前源码构建升级：
 
 ```bash
 docker compose up -d --build
+```
+
+`up -d` 不会把源码变更打入已有镜像。升级重建同一个应用容器，保留数据目录、端口和业务调用地址。
+启动会自动更新版本记录；原状态为 `SERVING` 时继续接单，无需先执行发布控制命令。
+
+显式设置的维护状态会保留：`DRAINING` 拒绝新写请求并继续完成已有队列；`STOPPED` 同时暂停领取任务。两种状态下查询和下载仍可使用，新写请求返回 503 和 `Retry-After`。
+
+`/health` 只检查进程存活；`/ready` 返回 200 且 `ready=true` 表示数据库、迁移、存储、调度器和接单状态均就绪。
+
+## 4. 可选：长任务的排空升级与回滚
+
+存在长任务或需要受控回滚时，建议先排空再重建。Gunicorn 优雅退出等待 120 秒，Compose 等待 130 秒，超过等待时间的任务可能被中断。以下命令中的容器名使用默认值；自定义后请相应替换。
+
+```bash
+# 暂停提交 → 等待已有任务及回调完成 → 保存配置快照 → 暂停执行
+bash scripts/release.sh prepare llm-ocr-compare before-upgrade 1800
+```
+
+任何一步失败都会停止后续操作。排空超时会保持 `DRAINING`，用 `release status` 检查任务、回调及在途操作；需要取消升级时可执行 `release serve`。配置快照包含模型密钥，权限为 0600，只应由运维保管。
+
+排空后按第 5 节备份，修改 `.env` 中的镜像版本，再执行：
+
+```bash
+docker compose pull llm-ocr-compare
+docker compose up -d llm-ocr-compare
+bash scripts/release.sh ctl llm-ocr-compare ready
+bash scripts/release.sh ctl llm-ocr-compare serve
+curl -fsS http://localhost:3012/ready
+```
+
+维护期间 HTTP `/ready` 返回 503 属预期；CLI `release ready` 检查数据库、迁移和存储，成功后再 `serve`。
+发布记录供同一服务的 worker 共享，不是容器互斥锁，不要同时运行两个不同版本连接同一业务库。
+
+回滚同样替换原容器。已经恢复接单时，先重新执行 `prepare`，再将 `DC_VERSION` 改回已保存的旧版本，重建并检查后恢复接单。若数据库迁移或模型配置不兼容旧版本，应先评估兼容性，不能仅凭旧镜像可启动就判断回滚成功。
+
+需要恢复模型配置快照时，在服务停止接单且全库排空后执行：
+
+```bash
+bash scripts/release.sh ctl llm-ocr-compare restore \
+  --file /app/.dc_data/release-snapshots/SNAPSHOT_ID.json \
+  --sha256 SNAPSHOT_SHA256
+```
+
+路径和 SHA256 使用 `prepare` 的实际输出。恢复命令校验摘要及快照来源，只恢复模型配置，不恢复运行环境变量或整个业务库。不要用上线前的数据库备份覆盖已经接收新任务的业务库来做常规回滚。
+
+## 5. 数据与备份
+
+| 宿主路径 | 内容 |
+| --- | --- |
+| `data/pg/` | PostgreSQL 数据：任务、完整报告 JSONB、模型配置及审计 |
+| `data/uploads/` | 上传原件和回收件 |
+| `data/reports/` | PDF、HTML、高亮图片等文件产物 |
+| `data/logs/` | 应用日志 |
+| `data/release-snapshots/` | 可选发布流程生成的配置快照 |
+
+升级时保留 `data/`。数据库和文件需要一起备份；运行中的 `data/pg/` 直接打包不能替代一致的数据库备份。
+以下示例在排空后执行，备份存放在业务目录之外：
+
+```bash
+mkdir -p backups
+chmod 700 backups
+umask 077
+# 停止应用以冻结业务写入，PostgreSQL 保持运行
+docker compose stop llm-ocr-compare
+docker compose exec -T postgres pg_dump -U dc doc_compare > backups/database.sql
+tar --exclude='./pg' -czf backups/files.tar.gz -C data .
+# 完成后启动；若此前进入维护状态，还需 ready / serve
+docker compose up -d llm-ocr-compare
+```
+
+示例文件名每次使用前应替换为独立的备份批次，避免覆盖。`.env` 和授权字体另行安全备份。
+灾难恢复应在应用停止的干净恢复环境中导入数据库、恢复匹配的文件，再启动并验证；先完成恢复演练，不在运行中的业务库上直接覆盖。
+
+## 6. Nginx 和字体
+
+宿主机 Nginx 的现有站点 `server` 块可使用以下配置；若 Nginx 也在容器内，应改为它能够访问的应用地址：
+
+```nginx
+# 按单次请求所有文件的总大小设置，并留出表单开销
+client_max_body_size 120m;
+
+location / {
+    proxy_pass http://127.0.0.1:3012;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+SSE 进度需要关闭代理缓冲。域名与证书由部署方配置，修改后先 `nginx -t` 再重新加载。应用和数据库宿主端口限制在可信网段内。
+
+镜像内置开源中文字体及常用 Word 字体回退。授权字体放入 `DC_FONTS_DIR`，仅在运行时只读挂载。检查字体命中：
+
+```bash
 docker compose exec llm-ocr-compare fc-match "等线"
 docker compose exec llm-ocr-compare fc-match Arial
 ```
 
-挂载目录为只读，不会写入上传文件、报告、日志或镜像。字体改变只影响后续 DOCX 派生 PDF；既有 HTML/PNG 报告需重新提交任务生成。
+字体调整后重建应用容器并重新提交文档以生成新产物；既有报告不会自动重新渲染。
 
-## 数据持久化
+## 7. 故障检查
 
-部署涉及两个数据目录,均在宿主 `./data/` 下:
+```bash
+docker compose ps -a
+docker compose logs --tail=100 llm-ocr-compare
+docker compose logs --tail=100 postgres
+docker compose exec llm-ocr-compare python -m document_comparison.release status
+docker compose exec llm-ocr-compare alembic current
+```
 
-| 路径 | 内容 | 容器内路径 |
-|------|------|------------|
-| `./data/uploads` | 上传的源/目标文件(docx/pdf),按 `uploads/{task_id}/` 子目录归集;旧版本的平铺命名文件仍可直接读取,无需迁移 | `/app/.dc_data/uploads` |
-| `./data/reports` | 外部接口的标注 PDF 与逐页高亮 PNG | `/app/.dc_data/reports` |
-| `./data/logs/app.log` | 应用滚动日志(10MB×5) | `/app/.dc_data/logs/app.log` |
-| `./data/pg/` | Postgres 数据目录(任务记录、里程碑事件、**完整报告 JSONB**、**LLM/OCR 模型配置**) | `/var/lib/postgresql/data` |
+- 旧镜像提示“更换版本前必须先排空并 stop”：拉取包含修复的镜像或从当前源码重新构建。
+- 应用运行但提交返回 503：检查维护状态；确认维护完成后 `release ready`，再 `release serve`。
+- 数据库迁移失败：先检查迁移日志和版本兼容性，不通过删表或删除迁移文件强行启动。
+- `release_activities` 存在未知操作：先暂停接单，确认 `status` 中对应 owner 的进程及后台写入已停止，核对任务、文件、回调和审计，再清除单个操作屏障：
 
-> `./data/llm_config.json`(旧版 LLM 配置文件)在升级后不再被读取,首次启动会自动导入 PG 一次;若文件存在,作为备份保留。
+```bash
+bash scripts/release.sh ctl llm-ocr-compare resolve-activity \
+  --activity-id ACTIVITY_ID --confirmed-stopped-owner OWNER_ID
+```
 
-**报告持久化**:比对报告 JSON、任务元数据、里程碑事件写入 Postgres。上传的原始 docx/pdf 保存在文件系统；外部 API 还会把标注 PDF 和逐页 PNG 写入 `.dc_data/reports/`，因此备份时必须同时保留该目录。
-
-> 升级提示:从老版本(报告写文件)升级后,老报告 `.json` 文件不再被读取;如需保留历史可访问性,升级前用一次性脚本把它们导入 PG(`db_repo.save_compare_report` 等)。
-
-备份(应用文件 + 数据库):
-
-备份(应用文件 + 数据库):
-
-    # 应用文件(volume 绑定方式:直接 tar 宿主目录即可)
-    tar czf dc_data_backup.tar.gz -C ./data .
-
-    # Postgres:逻辑备份(推荐,跨版本安全)
-    docker compose exec postgres pg_dump -U dc doc_compare > db_backup.sql
-
-恢复:
-
-    tar xzf dc_data_backup.tar.gz -C ./data
-    docker compose exec -T postgres psql -U dc doc_compare < db_backup.sql
-
-## 日常运维
-
-    # 查看日志
-    docker compose logs -f
-
-    # 重启
-    docker compose restart
-
-    # 更新代码后重新部署
-    docker compose up -d --build
-
-    # 停止 / 删除
-    docker compose down            # 仅停止,保留数据
-    docker compose down -v         # 停止并删除数据卷(谨慎!)
-
-## 数据库迁移(Alembic)
-
-应用启动时**默认自动执行** `alembic upgrade head`(幂等),`docker compose up` 即用、无需手动跑迁移。如需关闭(交由 CI/运维手动控制),设置 `DC_DB_AUTO_MIGRATE=0`。
-
-升级或排查 schema 版本时,可手动执行:
-
-    # 进入应用容器执行 alembic
-    docker compose exec llm-ocr-compare alembic upgrade head
-
-    # 查看当前版本
-    docker compose exec llm-ocr-compare alembic current
-
-开发期可设置 `DC_DB_AUTO_CREATE=1`(优先级高于 `DC_DB_AUTO_MIGRATE`),让应用启动时直接 `CREATE TABLE IF NOT EXISTS`,跳过 alembic 子进程,便于本地快速起服务或跑测试。
-
-## 使用真实 OCR 引擎
-
-默认 `mock` 后端不调用任何外部服务。要启用真实 OCR:
-
-1. 打开 UI 的"设置"页面
-2. 配置 API Base、API Key、模型名指向你的推理服务(兼容 OpenAI 协议)
-3. 设置页的配置会持久化到 Postgres 的 `llm_config` 表,容器重启后仍然生效
-
-## 反向代理(Nginx)
-
-如需 HTTPS 或自定义域名,在前面加 Nginx:
-
-    server {
-        listen 80;
-        server_name your-domain.com;
-
-        client_max_body_size 100m;
-
-        location / {
-            proxy_pass http://127.0.0.1:8000;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-    }
+该命令不修改任务或回调状态，也不能替代对账。历史 `0014_shadow_comparisons` 迁移及表结构仅用于数据库兼容，应用不再读写；无需回退或手工删除。

@@ -50,7 +50,7 @@ class DeploymentAdmissionMiddleware:
         activity_id = uuid.uuid4().hex
         try:
             accepted = await asyncio.to_thread(
-                releases.begin_request, settings.deployment_id, self.owner,
+                releases.begin_request, releases.DEPLOYMENT_ID, self.owner,
                 f'{scope["method"]} {path}', activity_id,
             )
         except Exception:
@@ -62,7 +62,7 @@ class DeploymentAdmissionMiddleware:
             response = JSONResponse(
                 {"code": 503, "message": "服务发布维护中，暂不接受新任务或修改，请稍后重试",
                  "request_id": request_id}, status_code=503,
-                headers={"Retry-After": str(max(1, settings.deployment_retry_after)),
+                headers={"Retry-After": "60",
                          "X-Request-Id": request_id},
             )
             await response(scope, receive, send)
@@ -102,7 +102,7 @@ def check_readiness():
         cfg.set_main_option("script_location", str(engine._find_alembic_dir()))
         expected = set(ScriptDirectory.from_config(cfg).get_heads())
         checks["schema"] = bool(expected) and current == expected
-        state = releases.status(settings.deployment_id)
+        state = releases.status(releases.DEPLOYMENT_ID)
         mode = state["mode"]
         checks["deployment"] = state["version"] == settings.version
     except Exception:
@@ -118,5 +118,5 @@ def check_readiness():
             checks[label] = True
         except Exception:
             checks[label] = False
-    return {"deployment_id": settings.deployment_id, "version": settings.version,
+    return {"deployment_id": releases.DEPLOYMENT_ID, "version": settings.version,
             "mode": mode, "checks": checks, "prepared": bool(checks) and all(checks.values())}

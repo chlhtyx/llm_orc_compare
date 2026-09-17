@@ -1,4 +1,4 @@
-# 文档比对系统（llm_orc_compare）
+# 文档比对系统（llm_ocr_compare）
 
 基于多模态 LLM API 的合同篡改检测系统。以原始合同（Word `.docx` 或 PDF `.pdf`）为基准，比对回收的 PDF（文本 PDF 或扫描件），识别金额、日期、违约责任、管辖法院等条款是否发生变化，并生成可追溯的差异报告。原始合同为 PDF 时，复用原生文本层优先 + OCR 兜底解析通道（与回收件同路径）。
 
@@ -23,35 +23,82 @@
 - 报告页可在线查看带坐标的 PDF 差异标注，并可下载高亮 Word 报告。
 - **比对记录持久化**:每次任务(合同比对 / 无标注比对 / 对帐单统计)的元数据、里程碑事件与完整报告 JSON 都写入 Postgres;进程重启后报告仍可打开,并提供独立的「比对记录」页查询历史。
 
+## 外部 API 调用文档
+
+合同比对与金额统计的字段类型、必填条件、文件/URL 提交方式、同步/异步规则、curl 和 Postman 示例，见 [合同比对与金额统计 API 调用参数](docs/external-api-parameters.md)。
+
+| 接口 | 本机默认提交地址 |
+| --- | --- |
+| 合同比对 | `POST http://localhost:3012/api/v1/external/contractCompare` |
+| 金额统计 | `POST http://localhost:3012/api/v1/external/amountStat` |
+
 ## 快速开始
 
-采用单服务部署。版本验证使用固定样本回归和人工核验。
-普通单服务升级可直接执行（先准备好新版本镜像并更新 `.env` 中的 `DC_VERSION`）：
+采用单应用服务部署：Vue 前端与 FastAPI 后端运行在同一个容器，PostgreSQL 为独立数据库容器，OCR/LLM 通过外部接口调用。版本验证使用固定样本回归和人工核验，已取消 A/B 双服务与影子分发验证。
+
+### 首次启动
+
+在项目目录执行：
+
+```bash
+cp .env.example .env
+# 编辑 .env：设置 DC_VERSION、数据库口令和控制台口令
+# 首次从源码构建并启动
+docker compose up -d --build
+docker compose ps
+curl -fsS http://localhost:3012/health
+curl -fsS http://localhost:3012/ready
+```
+
+默认访问地址为 <http://localhost:3012>。若修改 `.env` 中的 `DC_PORT`，请同步替换检查命令中的端口。
+应用启动前等待 PostgreSQL 健康检查，并自动执行数据库迁移。业务文件与数据库持久化在 `./data/`，升级时保留该目录。
+
+### 日常启动与版本升级
+
+已有镜像时启动或应用 Compose 配置：
 
 ```bash
 docker compose up -d
 ```
 
-启动会自动更新版本记录，原状态为 `SERVING` 时继续接单；主动维护的 `DRAINING` / `STOPPED` 状态保持不变。
-源码修改后需 `docker compose up -d --build`；仅 `up -d` 不会重建已有镜像。
-存在长任务时，仍建议采用下方排空发布流程，以免超过容器停止等待时间。
-
-正式版本升级请使用 [发布与回滚流程](docs/release-switch.md)：排空任务和回调后，使用新镜像 tag
-重建同一容器，再恢复接单。`DC_DEPLOYMENT_ID` 固定复用为 `main`，3012、Nginx 和业务调用地址保持不变。
-完整操作见 [部署手册](docs/deployment-runbook.md)。
-
-推荐使用 Docker Compose，前端和后端会运行在同一个容器中。
+从镜像仓库升级：先将 `.env` 中的 `DC_VERSION` 改为已发布的版本，再执行：
 
 ```bash
-cp .env.example .env
-docker compose up -d --build
-docker compose ps
-curl http://localhost:3012/health
+docker compose pull llm-ocr-compare
+docker compose up -d
 ```
 
-`docker-compose.yml` 会同时启动 `postgres` 服务并自动迁移数据库;应用容器依赖 PG 健康检查通过后才会启动。Postgres 数据持久化到宿主 `./data/pg/`。
+从当前源码构建升级：
 
-默认访问地址为 <http://localhost:3012>。`docker-compose.yml` 中应用容器直接映射 `${DC_PORT:-3012}` 宿主端口；发布为原地升级（排空后换镜像 tag 重建容器），端口与业务调用地址不变。
+```bash
+docker compose up -d --build
+```
+
+仅执行 `up -d` 不会把源码修改打入已有镜像；其他机器需要拉取包含修复的镜像，或自行构建。
+无需配置部署 ID 或初始发布状态。同一部署更换版本会自动更新版本记录，不再要求先手动 `stop`；原状态为 `SERVING` 时继续接单。升级重建同一应用容器，宿主端口、Nginx 和业务调用地址保持不变。
+
+主动设置的 `DRAINING`（排空）或 `STOPPED`（暂停）状态不会被重启或换版本覆盖。确认维护结束后，可检查并恢复接单：
+
+```bash
+docker compose exec llm-ocr-compare python -m document_comparison.release status
+docker compose exec llm-ocr-compare python -m document_comparison.release ready
+docker compose exec llm-ocr-compare python -m document_comparison.release serve
+curl -fsS http://localhost:3012/ready
+```
+
+`/health` 表示进程存活；`/ready` 返回 HTTP 200 且 `ready=true` 才表示服务可接单。暂停期间 `/ready` 返回 503 属预期，CLI `release ready` 可用于检查暂停状态下的数据库、迁移和存储是否就绪。
+
+有长任务或需要受控回滚时，建议先排空任务和回调、备份后再升级，避免任务超过容器停止等待时间。统一操作说明见 [单服务部署与运维](docs/deploy.md)。
+
+### 启动异常排查
+
+```bash
+docker compose ps -a
+docker compose logs --tail=100 llm-ocr-compare
+docker compose logs --tail=100 postgres
+```
+
+若日志仍提示“同一部署 ID 更换版本前必须先排空并 stop”，说明正在运行旧镜像，需拉取包含修复的版本或执行 `docker compose up -d --build` 重建。若应用已启动但新提交返回 503，先用 `release status` 检查是否处于主动维护状态。
 
 ### DOCX 渲染字体
 
@@ -71,7 +118,7 @@ curl http://localhost:3012/health
 
 > **数据库迁移**:应用启动时会自动执行 `alembic upgrade head`(幂等),`docker compose up` 即用、无需手动进容器跑迁移。如需关闭自动迁移(交由 CI/运维手动控制),设置 `DC_DB_AUTO_MIGRATE=0`。
 
-更完整的容器运维说明见 [Docker 部署指南](docs/deploy.md)。
+更完整的容器运维说明见 [单服务部署与运维](docs/deploy.md)。
 
 ## 漏洞扫描防护
 
@@ -309,7 +356,7 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | `GET` | `/api/v1/statement/{task_id}/events` | 订阅 SSE 进度 |
 | `GET` | `/api/v1/statement/{task_id}/report` | 获取统计报告(含总合计、按列汇总、逐行明细) |
 | `POST` | `/api/v1/external/amountStat` | 外部系统提交金额统计(`X-API-Key`,多 PDF,支持 `target`/`target_urls` 混合);默认异步,`sync=true` 同步返回结果。详见 [金额统计对外 API 文档](docs/external-amount-api.md) |
-| `GET` | `/api/v1/external/amountStat/{task_id}` | 外部系统查询金额统计结果(扁平汇总字段 + 完整明细 `report`) |
+| `GET` | `/api/v1/external/amountStat/{task_id}` | 外部系统查询金额统计结果(扁平汇总字段与每文件合计，不含完整 `report`) |
 | `GET` | `/api/v1/config/llm` | 获取当前模型配置（Key 脱敏） |
 | `PUT` | `/api/v1/config/llm` | 更新并持久化模型配置 |
 | `GET` | `/api/v1/tasks?kind=&status=&document_type=&limit=&offset=` | 查询任务历史(支持按类型/状态/单据类型筛选 + 分页;`document_type` 为金额统计任务的发票(1)/对帐单(2)细分) |

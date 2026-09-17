@@ -10,6 +10,9 @@ from sqlalchemy import func, select, text
 from .engine import session_scope
 from .models import ReleaseActivity, ReleaseDeployment, TaskRecord
 
+# 单服务内部标识，不再从部署环境读取。保留 main 以兼容已有发布记录。
+DEPLOYMENT_ID = "main"
+
 MODES = {"SERVING", "DRAINING", "STOPPED"}
 ACTIVE = {"SERVING", "DRAINING"}
 
@@ -39,9 +42,9 @@ def _other_active(session, deployment_id):
 
 def register(deployment_id: str, version: str, initial_mode: str):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", deployment_id):
-        raise ValueError("DC_DEPLOYMENT_ID 必须为 1-100 位字母、数字、点、下划线或短横线")
+        raise ValueError("部署标识必须为 1-100 位字母、数字、点、下划线或短横线")
     if initial_mode != "SERVING":
-        raise ValueError("DC_DEPLOYMENT_INITIAL_MODE 只允许 SERVING")
+        raise ValueError("初始状态只允许 SERVING")
     if not version or len(version) > 100:
         raise ValueError("发布版本长度必须为 1-100")
     with session_scope() as s:

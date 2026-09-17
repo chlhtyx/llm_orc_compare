@@ -19,7 +19,7 @@ from functools import wraps
 from pathlib import Path
 
 from .config import settings
-from .db import repository as db_repo
+from .db import releases, repository as db_repo
 from .models import TaskInfo, TamperReport, TextDiffReport, StatementSummaryReport
 from .pipeline import run_pipeline
 from .raw_pipeline import run_raw_pipeline
@@ -462,7 +462,6 @@ class TaskManager:
 
     async def _run_release_job(self, rec) -> None:
         from .deployment import persistence_errors
-        from .db import releases
         errors: list = []
         token = persistence_errors.set(errors)
         try:
@@ -493,7 +492,7 @@ class TaskManager:
                         self._queue_worker_id,
                         settings.max_concurrent_tasks,
                         settings.task_queue_lease_seconds,
-                        deployment_id=settings.deployment_id,
+                        deployment_id=releases.DEPLOYMENT_ID,
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("queue claim failed")

@@ -763,10 +763,10 @@ def create_app() -> FastAPI:
         db_pkg.run_migrations()
     from ..db import releases
     from ..deployment import DeploymentAdmissionMiddleware, check_readiness
-    releases.register(settings.deployment_id, settings.version, settings.deployment_initial_mode)
+    releases.register(releases.DEPLOYMENT_ID, settings.version, "SERVING")
     # LLM 配置持久化迁移:首次启动若 PG 无记录且本地遗留 llm_config.json 存在,
     # 把文件导入 PG(文件保留作备份),再把 PG 配置应用到运行时 settings 单例。
-    if releases.status(settings.deployment_id)["mode"] == "SERVING":
+    if releases.status(releases.DEPLOYMENT_ID)["mode"] == "SERVING":
         _maybe_import_legacy_llm_config_file()
     apply_llm_overrides()
     audit_futures: set[asyncio.Task] = set()
@@ -958,7 +958,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/deployment")
     async def deployment_status():
-        return await asyncio.to_thread(releases.status, settings.deployment_id)
+        return await asyncio.to_thread(releases.status, releases.DEPLOYMENT_ID)
 
     @app.get("/api/v1/version")
     async def version():
