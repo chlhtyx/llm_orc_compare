@@ -35,6 +35,51 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .engine import Base
 
 
+class ReleaseDeployment(Base):
+    """一个发布实例的持久化状态；同一正式库只能有一个活动部署。"""
+
+    __tablename__ = "release_deployments"
+    deployment_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReleaseActivity(Base):
+    """排空屏障：进程失联也不自动过期，不能把未知执行状态当成完成。"""
+
+    __tablename__ = "release_activities"
+    activity_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    deployment_id: Mapped[str] = mapped_column(
+        String(100), ForeignKey("release_deployments.deployment_id"), nullable=False,
+        index=True,
+    )
+    owner: Mapped[str] = mapped_column(String(100), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ShadowComparison(Base):
+    """已停用的影子验证历史表；仅保留迁移兼容，不再读写或开放接口。"""
+
+    __tablename__ = "shadow_comparisons"
+    comparison_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    role: Mapped[str] = mapped_column(String(1), nullable=False)
+    experiment: Mapped[str] = mapped_column(String(100), nullable=False)
+    a_task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    b_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    review: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        Index("ix_shadow_role_experiment_created", "role", "experiment", "created_at"),
+        Index("ix_shadow_role_experiment_task", "role", "experiment", "a_task_id"),
+    )
+
+
 class TaskRecord(Base):
     """单次比对/统计任务记录(含完整报告 JSONB)。"""
 

@@ -9,6 +9,7 @@ from document_comparison.models import (
     PageRecognitionDiagnostic,
     PageRegion,
     TamperReport,
+    TruncationRecord,
 )
 from document_comparison.report.pdf_report import render_pdf_report
 
@@ -69,6 +70,28 @@ def test_render_pdf_report_basic_fields(tmp_path):
     assert "差异数量:1" in text
     assert "第三条 金额" in text
     doc.close()
+
+
+def test_render_pdf_report_discloses_discarded_drawing_pages(tmp_path):
+    report = TamperReport(
+        source="s.docx",
+        target="compared.pdf",
+        truncation=TruncationRecord(
+            original_pdf_page_count=5,
+            truncated_pdf_page_count=3,
+            truncation_reason="auto_trailing_drawings",
+            excluded_page_numbers=[4, 5],
+            detection_confidence=0.96,
+        ),
+    )
+    out = tmp_path / "drawing-scope.pdf"
+
+    render_pdf_report("BILL-DRAWING", report, datetime(2026, 8, 7, 15, 30), out)
+
+    with pymupdf.open(str(out)) as rendered:
+        text = "".join(page.get_text() for page in rendered)
+    assert "排除尾部图纸第4、5页" in text
+    assert "保留前3页正文参与比对" in text
 
 
 def test_render_pdf_report_modified_segments_colored(tmp_path):

@@ -39,6 +39,14 @@ def _import_package_version() -> str:
 
 @dataclass
 class Settings:
+    # 发布控制按部署实例持久化。原地发布：部署 ID 固定复用，换版本保留已有运行/维护状态。
+    deployment_id: str = field(default_factory=lambda: _env("DC_DEPLOYMENT_ID", "main"))
+    deployment_initial_mode: str = field(
+        default_factory=lambda: _env("DC_DEPLOYMENT_INITIAL_MODE", "SERVING").upper()
+    )
+    deployment_retry_after: int = field(
+        default_factory=lambda: int(_env("DC_DEPLOYMENT_RETRY_AFTER", "60"))
+    )
     # —— 服务 ——
     host: str = field(default_factory=lambda: _env("DC_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(_env("DC_PORT", "8000")))
@@ -287,6 +295,12 @@ class Settings:
             "DC_EXTERNAL_TRUNCATE_TO_ORIGINAL_PAGES", "0"
         ).lower() in ("1", "true", "yes")
     )
+    # 仅从供应商 PDF 尾部向前排除连续、高置信度工程图；不确定页安全保留。
+    external_auto_discard_trailing_drawings: bool = field(
+        default_factory=lambda: _env(
+            "DC_EXTERNAL_AUTO_DISCARD_TRAILING_DRAWINGS", "0"
+        ).lower() in ("1", "true", "yes")
+    )
     # 外部接口以 URL(source_url/target_url)方式提交时,后端下载该 URL 落盘后比对。
     # 大小上限复用 external_max_upload_mb,不另设;此处只配下载行为。
     download_timeout_seconds: float = field(
@@ -390,6 +404,7 @@ _LLM_CONFIG_FIELDS = (
     "external_enable_risk_assessment",
     "external_enable_llm_direct_diff",
     "external_truncate_to_original_pages",
+    "external_auto_discard_trailing_drawings",
 )
 
 # dataclass 字段默认值,供 PG 无记录时合并使用(不再写入种子配置)。
@@ -444,6 +459,7 @@ _LLM_DEFAULTS: dict = {
     "external_enable_risk_assessment": settings.external_enable_risk_assessment,
     "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
     "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
+    "external_auto_discard_trailing_drawings": settings.external_auto_discard_trailing_drawings,
 }
 
 def _legacy_llm_config_path() -> Path:
@@ -616,6 +632,10 @@ def apply_llm_overrides() -> None:
     if "external_truncate_to_original_pages" in cfg:
         settings.external_truncate_to_original_pages = bool(
             cfg["external_truncate_to_original_pages"]
+        )
+    if "external_auto_discard_trailing_drawings" in cfg:
+        settings.external_auto_discard_trailing_drawings = bool(
+            cfg["external_auto_discard_trailing_drawings"]
         )
     # 记录本次 apply 对应的 PG 版本,供多 worker 间的 ensure_llm_config_fresh 比对。
     # 取 PG updated_at(而非本机 now)以避免多机时钟漂移误判;查询失败则回退本机时间。

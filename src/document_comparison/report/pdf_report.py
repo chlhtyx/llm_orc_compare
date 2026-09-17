@@ -13,6 +13,7 @@ from pathlib import Path
 import pymupdf
 
 from ..models import Diff, TamperReport
+from .page_scope_notice import page_scope_notice
 from .review_notice import empty_diff_message, review_notice_intro, review_notice_messages
 
 # 富文本片段:(文本, 颜色, 删除线)。
@@ -400,6 +401,7 @@ def render_pdf_report(
     recognition = _RECOGNITION.get(report.recognition_status, report.recognition_status)
     location = _LOCATION.get(report.location_status, report.location_status)
     stamp = generated_at.strftime("%Y-%m-%d %H:%M")
+    scope_notice = page_scope_notice(report)
 
     doc = pymupdf.open()
     layout = _Layout(doc)
@@ -422,6 +424,8 @@ def render_pdf_report(
     _meta_line(layout, "高亮定位", location)
     _meta_line(layout, "差异数量", str(len(diffs)))
     _meta_line(layout, "生成时间", stamp)
+    if scope_notice:
+        _meta_line(layout, "正文范围", scope_notice)
     _review_notice_block(layout, report)
 
     # —— 差异明细 ——

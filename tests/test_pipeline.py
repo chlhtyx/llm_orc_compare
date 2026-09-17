@@ -677,6 +677,135 @@ def _make_multipage_pdf(tmp_path: Path, n_pages: int) -> Path:
     return path
 
 
+def _make_contract_with_drawing_tail(tmp_path: Path) -> Path:
+    """生成三页合同正文 + 两页带标题栏和大量线框的工程图。"""
+    path = tmp_path / "contract-with-drawings.pdf"
+    pdf = fitz.open()
+    for page_number in range(1, 4):
+        page = pdf.new_page(width=595, height=842)
+        page.insert_text(
+            (72, 100),
+            f"第{page_number}条 合同正文第{page_number}页",
+            fontname="china-s",
+            fontsize=16,
+        )
+    for drawing_number in range(1, 3):
+        page = pdf.new_page(width=842, height=595)
+        for x in range(40, 820, 40):
+            page.draw_line((x, 40), (x, 500))
+        for y in range(40, 520, 40):
+            page.draw_line((40, y), (800, y))
+        page.draw_rect(fitz.Rect(560, 470, 800, 560))
+        page.insert_text(
+            (570, 495),
+            f"图号 D-{drawing_number}  比例 1:20  制图 张三  审核 李四",
+            fontname="china-s",
+            fontsize=10,
+        )
+    pdf.save(path)
+    pdf.close()
+    return path
+
+
+def test_pipeline_auto_discards_only_trailing_engineering_drawings(tmp_path: Path):
+    """自动模式按供应商正文边界保留正文，不受采购方 Word 页数限制。"""
+    word_buf = _make_word([
+        ("h1", "第一条 合同标的"),
+        ("p", "采购方原件只有一页。"),
+    ])
+    wpath = tmp_path / "source.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    ppath = _make_contract_with_drawing_tail(tmp_path)
+    compared = tmp_path / "compared.pdf"
+
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+        auto_discard_trailing_drawings=True,
+        truncated_pdf_output_path=compared,
+    )
+
+    assert count_pages(compared) == 3
+    assert len(report.page_meta) == 3
+    assert report.target == str(compared)
+    assert report.truncation is not None
+    assert report.truncation.truncation_reason == "auto_trailing_drawings"
+    assert report.truncation.excluded_page_numbers == [4, 5]
+    assert [item.page_number for item in report.truncation.page_decisions] == [4, 5]
+    assert all(
+        item.page_type == "engineering_drawing"
+        and item.confidence >= 0.90
+        and item.signals
+        for item in report.truncation.page_decisions
+    )
+
+
+def test_pipeline_auto_drawing_detection_keeps_sparse_signature_page(tmp_path: Path):
+    """签章页即使文字很少，也必须作为合同正文保留。"""
+    word_buf = _make_word([("h1", "第一条 合同标的")])
+    wpath = tmp_path / "source.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    ppath = tmp_path / "signed-with-drawing.pdf"
+    pdf = fitz.open()
+    first = pdf.new_page(width=595, height=842)
+    first.insert_text((72, 100), "第一条 合同正文", fontname="china-s", fontsize=16)
+    signature = pdf.new_page(width=595, height=842)
+    signature.insert_text(
+        (72, 680), "甲方盖章：        乙方盖章：", fontname="china-s", fontsize=14
+    )
+    drawing = pdf.new_page(width=842, height=595)
+    for x in range(40, 820, 35):
+        drawing.draw_line((x, 40), (x, 500))
+    drawing.insert_text(
+        (500, 520),
+        "图号 D-1  比例 1:10  制图 张三  审核 李四",
+        fontname="china-s",
+        fontsize=10,
+    )
+    pdf.save(ppath)
+    pdf.close()
+    compared = tmp_path / "compared.pdf"
+
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+        auto_discard_trailing_drawings=True,
+        truncated_pdf_output_path=compared,
+    )
+
+    assert count_pages(compared) == 2
+    assert report.truncation is not None
+    assert report.truncation.excluded_page_numbers == [3]
+
+
+def test_pipeline_explicit_target_body_end_page_takes_priority(tmp_path: Path):
+    """显式供应商正文截止页不依赖图纸规则，且留下准确的排除页审计。"""
+    word_buf = _make_word([("h1", "第一条 合同标的")])
+    wpath = tmp_path / "source.docx"
+    wpath.write_bytes(word_buf.getvalue())
+    ppath = _make_multipage_pdf(tmp_path, 5)
+    compared = tmp_path / "compared.pdf"
+
+    report = run_pipeline(
+        wpath,
+        ppath,
+        ocr=_TextLayerOCR(),
+        embed=MockEmbedding(),
+        auto_discard_trailing_drawings=True,
+        target_body_end_page=3,
+        truncated_pdf_output_path=compared,
+    )
+
+    assert count_pages(compared) == 3
+    assert report.truncation is not None
+    assert report.truncation.truncation_reason == "manual_target_body_end_page"
+    assert report.truncation.excluded_page_numbers == [4, 5]
+
+
 def test_pipeline_corrects_misindexed_ocr_blocks_before_pdf_highlighting(tmp_path: Path):
     """页 1、2、4 的差异不得因 OCR 页号错误而都画到第 2 页。"""
     wpath = tmp_path / "c.docx"

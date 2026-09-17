@@ -8,16 +8,19 @@ export interface NormalizedError {
   code: number
   message: string
   request_id?: string
+  retry_after_seconds?: number
 }
 
 export class ApiError extends Error {
   code: number
   request_id?: string
+  retry_after_seconds?: number
   constructor(e: NormalizedError) {
     super(e.message)
     this.name = 'ApiError'
     this.code = e.code
     this.request_id = e.request_id
+    this.retry_after_seconds = e.retry_after_seconds
   }
 }
 
@@ -99,10 +102,18 @@ async function normalizeError(res: Response): Promise<NormalizedError> {
       code: data.code ?? res.status,
       message: data.message ?? res.statusText,
       request_id: data.request_id,
+      retry_after_seconds: parseRetryAfter(res),
     }
   } catch {
-    return { code: res.status, message: res.statusText }
+    return { code: res.status, message: res.statusText, retry_after_seconds: parseRetryAfter(res) }
   }
+}
+
+// 不自动重试提交，避免网络故障后重复创建合同任务。
+function parseRetryAfter(res: Response): number | undefined {
+  const value = res.headers.get('Retry-After')
+  if (!value || !/^\d+$/.test(value)) return undefined
+  return Number(value)
 }
 
 /**

@@ -26,6 +26,7 @@ from document_comparison.models import (
     StatementFileSummary,
     StatementSummaryReport,
     TamperReport,
+    TruncationRecord,
 )
 
 
@@ -631,6 +632,23 @@ def test_result_text_and_all_page_images(monkeypatch, tmp_path):
         "https://dc.example.test/api/v1/external/contractCompare/task-1/images/1",
         "https://dc.example.test/api/v1/external/contractCompare/task-1/images/2",
     ]
+
+
+def test_result_text_discloses_discarded_drawing_pages():
+    report = TamperReport(
+        source="s.docx",
+        target="compared.pdf",
+        truncation=TruncationRecord(
+            original_pdf_page_count=5,
+            truncated_pdf_page_count=3,
+            truncation_reason="auto_trailing_drawings",
+            excluded_page_numbers=[4, 5],
+        ),
+    )
+
+    text = build_result_text("BILL-DRAWING", report)
+
+    assert "正文范围：自动排除尾部图纸第4、5页" in text
 
 
 def test_external_renders_and_exposes_source_highlight_images(monkeypatch, tmp_path):

@@ -48,7 +48,8 @@ const callExample = computed(() => {
   return [
     '# ===== 1. 异步模式(默认:sync 缺省或 false)=====',
     '# 提交后立即返回 task_id,callback_url 必填,结果经回调或查询端点获取。',
-    "# 可选：-F 'original_page_count=<原始合同真实页数>'，覆盖 Word 自动页数。",
+    "# 可选：-F 'target_body_end_page=<供应商PDF正文截止页>'，优先于自动图纸识别。",
+    "# 兼容旧调用：-F 'original_page_count=<原始合同真实页数>'。",
     '# source 与 source_url 二选一、target 与 target_url 二选一；',
     '# 文件与链接都支持，链接由服务端下载后比对(同样受 .docx/.pdf 后缀与大小限制)。',
     `curl -X POST '${endpoint}' \\`,
@@ -73,7 +74,7 @@ const callExample = computed(() => {
     '',
     '# ===== 2. 同步模式(sync=true)=====',
     '# HTTP 保持至比对完成,结果直接在响应体内;callback_url 非必填。',
-    "# 可选：-F 'original_page_count=<原始合同真实页数>'，覆盖 Word 自动页数。",
+    "# 可选：-F 'target_body_end_page=<供应商PDF正文截止页>'，优先于自动图纸识别。",
     '# 同样支持 source_url/target_url 链接提交(与 source/target 二选一)。',
     `curl -X POST '${endpoint}' \\`,
     "  -H 'X-API-Key: <YOUR_API_KEY>' \\",

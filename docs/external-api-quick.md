@@ -28,6 +28,7 @@ Base  {external_public_base_url}/api/v1/external
 | `sync` | bool | ❌ | 默认 `false`。`true`=同步,`false`=异步 |
 | `callback_url` | string | 异步必填 | http(s) 回调地址,禁止带账号密码 |
 | `original_page_count` | int | ❌ | ≥ 1;仅服务端开启「页数截取」时生效 |
+| `target_body_end_page` | int | ❌ | 供应商 PDF 正文截止页；优先于自动尾部图纸识别和旧页数截取 |
 
 > 每个角色文件与链接**二选一**;同时传或都不传 → 400。URL 模式下文件名取 `Content-Disposition: filename=` 或 URL 末段,**source 后缀必须 `.docx`/`.pdf`、target 后缀必须 `.pdf`**,下载失败(非 2xx / 超时 / 超限)→ 400。
 

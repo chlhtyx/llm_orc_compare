@@ -35,6 +35,13 @@ def client(monkeypatch):
     monkeypatch.setattr(db_pkg, "check_connection", lambda: None)
     monkeypatch.setattr(db_pkg, "create_all", lambda: None)
     monkeypatch.setattr(db_pkg, "run_migrations", lambda: None)
+    from document_comparison.db import releases
+    monkeypatch.setattr(releases, "register", lambda *_a: None)
+    monkeypatch.setattr(releases, "status", lambda *_a: {"mode": "SERVING"})
+    monkeypatch.setattr(releases, "begin_request", lambda *_a: True)
+    monkeypatch.setattr(releases, "finish_activity", lambda *_a: None)
+    # 查询日志测试也保持无 DB；不能依赖前一个测试遗留的全局 session factory。
+    monkeypatch.setattr(db_pkg.repository, "list_tasks", lambda **_kw: ([], 0))
     # 走 create_all 分支(已 stub),避免触发 alembic 子进程。
     monkeypatch.setattr(settings, "db_auto_create", True)
     monkeypatch.setattr(settings, "db_auto_migrate", False)

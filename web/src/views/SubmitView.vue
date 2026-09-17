@@ -18,6 +18,7 @@ const form = reactive({
   external_enable_risk_assessment: false,
   external_enable_llm_direct_diff: false,
   external_truncate_to_original_pages: false,
+  external_auto_discard_trailing_drawings: false,
   // —— LLM 直接比对系统提示词(留空=内置默认)——
   llm_direct_diff_prompt: '',
   // —— /no_think 指令开关(GLM-4.5/4.6 关闭思考链;默认 True=保持当前行为)——
@@ -46,6 +47,8 @@ function syncFromConfig(config: LlmConfig | null): void {
   form.external_enable_risk_assessment = config.external_enable_risk_assessment ?? false
   form.external_enable_llm_direct_diff = config.external_enable_llm_direct_diff ?? false
   form.external_truncate_to_original_pages = config.external_truncate_to_original_pages ?? false
+  form.external_auto_discard_trailing_drawings =
+    config.external_auto_discard_trailing_drawings ?? false
   form.llm_direct_diff_prompt = config.llm_direct_diff_prompt || ''
   form.llm_diff_no_think_enabled = config.llm_diff_no_think_enabled ?? true
 }
@@ -72,7 +75,11 @@ async function onSave(): Promise<void> {
     external_enable_llm_alignment: !directDiffOn && form.external_enable_llm_alignment,
     external_enable_risk_assessment: form.external_enable_risk_assessment,
     external_enable_llm_direct_diff: form.external_enable_llm_direct_diff,
-    external_truncate_to_original_pages: form.external_truncate_to_original_pages,
+    external_truncate_to_original_pages:
+      !form.external_auto_discard_trailing_drawings &&
+      form.external_truncate_to_original_pages,
+    external_auto_discard_trailing_drawings:
+      form.external_auto_discard_trailing_drawings,
     // 每次都提交:空串=回退内置默认(用户清空文本框即清除自定义)。
     llm_direct_diff_prompt: form.llm_direct_diff_prompt.trim(),
     llm_diff_no_think_enabled: form.llm_diff_no_think_enabled,
@@ -180,15 +187,30 @@ async function onReset(): Promise<void> {
           </label>
           <label class="toggle-row">
             <span>
-              <strong>回收件页数截取</strong>
+              <strong>自动排除尾部图纸</strong>
               <small>
-                自动按 Word 保存页数截掉合同后的图纸；请求可显式提供真实页数覆盖。
+                从供应商 PDF 末页向前识别并排除连续工程图；正文、签章页和不确定页保留。
               </small>
+            </span>
+            <input
+              v-model="form.external_auto_discard_trailing_drawings"
+              type="checkbox"
+              role="switch"
+            />
+          </label>
+          <label
+            class="toggle-row"
+            :class="{ disabled: form.external_auto_discard_trailing_drawings }"
+          >
+            <span>
+              <strong>按采购方页数截取（兼容模式）</strong>
+              <small>仅兼容旧调用；供应商正文重新排版增页时可能误删，不建议与自动图纸识别同时使用。</small>
             </span>
             <input
               v-model="form.external_truncate_to_original_pages"
               type="checkbox"
               role="switch"
+              :disabled="form.external_auto_discard_trailing_drawings"
             />
           </label>
           <label class="toggle-row">

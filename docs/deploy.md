@@ -1,5 +1,10 @@
 # Docker 部署指南
 
+已有正式任务时建议按 [发布切换与回滚](release-switch.md) 操作，先排空再停止容器。
+`docker compose up -d --build` 适用于首次启动/开发，不会替你处理在途正式任务。
+正式服务跨版本固定使用同一 `DC_DEPLOYMENT_ID`（默认 `main`）；更换镜像版本会自动更新版本记录，保留已有运行/维护状态。
+受控发布设置 `DC_DB_AUTO_MIGRATE=0` 并单独迁移。
+
 ## 目标环境
 
 Linux x86_64(amd64)、Docker 20.10+、Docker Compose v2。
@@ -18,10 +23,11 @@ docker compose up -d --build
 
 # 4. 检查状态
 docker compose ps
-curl http://localhost:8000/health
+curl http://localhost:3012/health
 ```
 
-浏览器打开 `http://<服务器IP>:8000` 即可访问。
+浏览器打开 `http://<服务器IP>:3012` 即可访问。应用容器直接持有该宿主端口；
+发布为原地升级（排空后换镜像 tag 重建容器），业务调用地址不变。
 
 Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康检查通过后再启动,因此首次启动稍慢(等 PG 就绪)。
 
@@ -29,11 +35,14 @@ Postgres 数据持久化在宿主 `./data/pg/`,应用依赖 `pg_isready` 健康�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DC_PORT` | `8000` | 宿主机映射端口(容器内固定 8000) |
+| `DC_PORT` | `3012` | 应用容器的稳定宿主机入口端口；容器内固定监听 8000 |
 | `DC_FONTS_DIR` | `./fonts` | 可选的授权字体目录，只读挂载到 `/usr/local/share/fonts/authorized`；不要把字体提交到仓库或打进镜像 |
 | `DATABASE_URL` | (compose 自动注入) | Postgres 连接串;必填,未配置则应用启动失败 |
 | `POSTGRES_PASSWORD` | `dcpass` | docker-compose 内置 PG 服务的密码(`dc` 用户) |
 | `DC_DB_AUTO_MIGRATE` | `1` | 启动时自动 `alembic upgrade head`(默认开);设为 `0` 改由运维手动控制 |
+| `DC_DEPLOYMENT_ID` | `main` | 发布实例 ID，跨版本固定复用；同版本多个 worker 共用 |
+| `DC_DEPLOYMENT_INITIAL_MODE` | `SERVING` | 首次注册模式（仅允许 SERVING）；重启及换版本沿用数据库运行/维护状态 |
+| `DC_DEPLOYMENT_RETRY_AFTER` | `60` | 维护拒绝写请求时的 Retry-After 秒数 |
 | `DC_DB_AUTO_CREATE` | 空 | 设为 `1` 时跳过 alembic 直接 `CREATE TABLE IF NOT EXISTS`(仅测试用) |
 | `DC_EXTERNAL_API_KEY` | 空 | 外部 API Key 的可选启动默认值；管理端设置可覆盖 |
 | `DC_EXTERNAL_PUBLIC_BASE_URL` | 空 | 服务公开地址的可选启动默认值；管理端设置可覆盖 |

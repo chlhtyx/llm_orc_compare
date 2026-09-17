@@ -11,6 +11,7 @@ from document_comparison.models import (
     PageRecognitionDiagnostic,
     PageRegion,
     TamperReport,
+    TruncationRecord,
 )
 from document_comparison.report import render_html_report
 
@@ -43,6 +44,25 @@ def test_render_html_report_basic_fields():
     assert "发现确认内容变化" in html  # change_status→中文
     assert "生成时间:</b>2026-08-07 15:30" in html
     assert "差异数量:</b>1" in html
+
+
+def test_render_html_report_discloses_discarded_drawing_pages():
+    report = TamperReport(
+        source="s.docx",
+        target="compared.pdf",
+        truncation=TruncationRecord(
+            original_pdf_page_count=5,
+            truncated_pdf_page_count=3,
+            truncation_reason="auto_trailing_drawings",
+            excluded_page_numbers=[4, 5],
+            detection_confidence=0.96,
+        ),
+    )
+
+    rendered = render_html_report("BILL-DRAWING", report, datetime.now(timezone.utc))
+
+    assert "排除尾部图纸第4、5页" in rendered
+    assert "保留前3页正文参与比对" in rendered
 
 
 def test_render_html_report_modified_segments_highlighted():

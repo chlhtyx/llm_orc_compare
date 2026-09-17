@@ -27,6 +27,7 @@ def test_run_migrations_creates_missing_tables(test_db_url, monkeypatch):
     eng = create_engine(test_db_url, future=True)
     with eng.begin() as conn:
         for table in (
+            "shadow_comparisons", "release_activities", "release_deployments",
             "external_api_calls", "task_llm_calls", "task_events",
             "task_records", "llm_config", "alembic_version",
         ):
@@ -44,6 +45,8 @@ def test_run_migrations_creates_missing_tables(test_db_url, monkeypatch):
     assert "task_llm_calls" in tables
     assert "external_api_calls" in tables
     assert "alembic_version" in tables
+    assert "release_deployments" in tables
+    assert "release_activities" in tables
 
     eng.dispose()
     engine_mod.dispose_engine()

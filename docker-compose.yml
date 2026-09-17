@@ -1,13 +1,13 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: llm-ocr-compare-db
+    container_name: ${DC_DB_CONTAINER_NAME:-llm-ocr-compare-db}
     restart: unless-stopped
     # 不暴露端口:仅 compose 内部网络供应用访问。
     # 应用通过 postgres:5432(容器内端口 + 服务名)连接。
     # 如需从宿主机直连 DB(调试),取消注释下面 ports,端口用 25432 避免与本机 PG 冲突。
     ports:
-      - "15433:5432"
+      - "${DC_DB_PORT:-15433}:5432"
     environment:
       POSTGRES_DB: doc_compare
       POSTGRES_USER: dc
@@ -32,14 +32,14 @@ services:
       args:
         DC_VERSION: ${DC_VERSION}
     image: registry.cn-hangzhou.aliyuncs.com/chldemo/llm-ocr-compare:${DC_VERSION}
-    container_name: llm-ocr-compare
+    container_name: ${DC_APP_CONTAINER_NAME:-llm-ocr-compare}
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      # 应用对外端口:DC_PORT 控制宿主机映射,容器内固定 8000。
+      # 原地发布：应用直接持有稳定宿主端口，发布 = drain 后换镜像 tag 重建本容器。
       - "${DC_PORT:-3012}:8000"
     environment:
       # DATABASE_URL 内部走服务名 + 容器内端口 5432(不是宿主映射端口)。
@@ -49,6 +49,9 @@ services:
       # Postgres 连接池与迁移(可选透传;未设置时用代码默认:pool 5 / overflow 10 / timeout 30s / 自动迁移开)。
       # 启用多 worker 时注意:N workers × (pool+overflow) 需 ≤ PG max_connections(默认 100)。
       DC_DB_AUTO_MIGRATE: ${DC_DB_AUTO_MIGRATE:-1}
+      DC_DEPLOYMENT_ID: ${DC_DEPLOYMENT_ID:-main}
+      DC_DEPLOYMENT_INITIAL_MODE: ${DC_DEPLOYMENT_INITIAL_MODE:-SERVING}
+      DC_DEPLOYMENT_RETRY_AFTER: ${DC_DEPLOYMENT_RETRY_AFTER:-60}
       DC_DB_POOL_SIZE: ${DC_DB_POOL_SIZE:-5}
       DC_DB_MAX_OVERFLOW: ${DC_DB_MAX_OVERFLOW:-10}
       DC_DB_POOL_TIMEOUT: ${DC_DB_POOL_TIMEOUT:-30.0}
@@ -69,3 +72,5 @@ services:
       # 可选:部署方拥有授权的 Word 字体(等线、微软雅黑、宋体、Arial 等)放在
       # DC_FONTS_DIR。只读挂载，字体不进入镜像、仓库或任务数据目录。
       - ${DC_FONTS_DIR:-./fonts}:/usr/local/share/fonts/authorized:ro
+    # 停止旧容器时等待在途任务收尾；长任务发布建议先 drain/wait。
+    stop_grace_period: 130s

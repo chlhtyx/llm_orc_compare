@@ -97,14 +97,17 @@ X-API-Key: <KEY>
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `source` | file | 与 `source_url` 二选一 | — | 原始合同文件,**文件名必须以 `.docx` 结尾**(大小写不敏感)。仅按后缀判定,不看 MIME。 |
-| `source_url` | string | 与 `source` 二选一 | — | 原始合同 URL(`http`/`https`)。服务端下载后比对,文件名取 `Content-Disposition` 或 URL 末段,**后缀仍必须 `.docx`**。大小限制同 `source`。 |
+| `source` | file | 与 `source_url` 二选一 | — | 原始合同文件,文件名必须以 `.docx` 或 `.pdf` 结尾(大小写不敏感)。仅按后缀判定,不看 MIME。 |
+| `source_url` | string | 与 `source` 二选一 | — | 原始合同 URL(`http`/`https`)。服务端下载后比对,文件名取 `Content-Disposition` 或 URL 末段,后缀仍必须 `.docx` 或 `.pdf`。大小限制同 `source`。 |
 | `target` | file | 与 `target_url` 二选一 | — | 回收件文件,**文件名必须以 `.pdf` 结尾**。必须可被正常解析,否则 400。 |
 | `target_url` | string | 与 `target` 二选一 | — | 回收件 URL(`http`/`https`)。服务端下载后比对,文件名取 `Content-Disposition` 或 URL 末段,**后缀仍必须 `.pdf`**。大小限制同 `target`。 |
 | `document_no` | string | ✅ | — | 单据号 / 合同编号。会去除首尾空白后校验:不能为空、长度 ≤ 255 字符。用于结果回显与审计关联。 |
 | `sync` | bool | ❌ | `false` | 调用模式开关。`true`=同步(见[三](#三同步调用模式-synctrue));`false`=异步(见[四](#四异步调用模式-syncfalse))。 |
 | `callback_url` | string | ⚠️ 条件必填 | `null` | **异步模式必填**,同步模式可选。回调地址,校验规则见下。 |
-| `original_page_count` | int | ❌ | `null` | 原始合同的真实页数,**仅当服务端开启了「回收件页数截取」时才生效**。用于在 PDF 末尾有多多余图纸页时,显式指定截取到第几页。提供时必须 ≥ 1。未提供时服务端自行确定基准:DOCX 原件优先用渲染出的原件 PDF 页数;页数仍无法确定时**跳过截取**(宁可不截,不按臆测页数截掉真实内容)。 |
+| `original_page_count` | int | ❌ | `null` | 兼容参数：原始合同的真实页数，**仅当服务端开启旧「按采购方页数截取」模式时生效**。提供时必须 ≥ 1。由于 Word 重新排版可能导致采购方与供应商正文页数不同，新接入优先使用 `target_body_end_page`，或启用自动尾部图纸识别。未提供时 DOCX 原件优先使用渲染页数；无法可靠确定时跳过截取。 |
+| `target_body_end_page` | int | ❌ | `null` | 供应商 PDF 的正文截止页(1 基)。提供时必须 ≥ 1 且不能超过 PDF 实际页数；优先级高于自动尾部图纸识别和旧 `original_page_count` 截取。其后的页面不会进入 OCR、比对、预览和报告。 |
+
+服务端启用“自动排除尾部图纸”后，会从供应商 PDF 最后一页向前检查，只排除连续、高置信度工程图；合同条款、签章页和判断不明确的页面保留。视觉模型不可用或分类失败时安全保留页面。原始上传 PDF 不删除，系统另存正文比对副本。
 
 > **文件与链接二选一**:每个角色(`source`/`target`)在文件与 `_url` 字段之间**只能传一个**;同时传或都不传 → **400**(`source 与 source_url 只能二选一` / `必须提供 source 文件或 source_url`)。两种模式下游比对完全一致。
 
@@ -476,6 +479,8 @@ X-API-Key: <KEY>
 | **400** | `document_no` 为空 | `document_no 不能为空` |
 | **400** | `document_no` 超 255 字符 | `document_no 不能超过 255 个字符` |
 | **400** | `original_page_count < 1` | `original_page_count 必须 >= 1` |
+| **400** | `target_body_end_page < 1` | `target_body_end_page 必须 >= 1` |
+| **400** | `target_body_end_page` 超过回收件实际页数 | `target_body_end_page 不能超过回收件实际页数` |
 | **400** | 异步模式未提供 `callback_url` | `异步模式必须提供 callback_url` |
 | **400** | `callback_url` 非法 | `callback_url 必须是有效的 HTTP/HTTPS 地址` / `callback_url 不允许包含用户名或密码` |
 | **400** | PDF 无法解析 | `无法解析 PDF: {详情}` |

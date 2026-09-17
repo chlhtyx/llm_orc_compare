@@ -9,6 +9,7 @@ import html
 from datetime import datetime
 
 from ..models import Diff, DiffSegment, TamperReport
+from .page_scope_notice import page_scope_notice
 from .review_notice import empty_diff_message, review_notice_intro, review_notice_messages
 
 # —— 文案映射(与 external_api.build_result_text 保持一致)——
@@ -184,6 +185,7 @@ def render_html_report(
     stamp = generated_at.strftime("%Y-%m-%d %H:%M")
     review_intro = review_notice_intro(report)
     review_messages = review_notice_messages(report)
+    scope_notice = page_scope_notice(report)
 
     rows: list[str] = []
     empty_cell = '<span class="empty">（无）</span>'
@@ -294,6 +296,7 @@ def render_html_report(
   <div><b>高亮定位:</b>{html.escape(location)}</div>
   <div><b>差异数量:</b>{len(diffs)}</div>
   <div><b>生成时间:</b>{html.escape(stamp)}</div>
+  {f'<div><b>正文范围:</b>{html.escape(scope_notice)}</div>' if scope_notice else ''}
 </div>
 {review_html}
 <table>

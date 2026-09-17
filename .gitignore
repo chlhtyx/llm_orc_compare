@@ -11,6 +11,8 @@ data/
 venv/
 test/
 .env
+deploy/candidate.env
+deploy/shadow.env
 .pytest_cache/
 .coverage
 htmlcov/
@@ -20,3 +22,6 @@ htmlcov/
 .zcode/
 .DS_Store
 .playwright-mcp
+
+tests/*
+!tests/test_release_control.py

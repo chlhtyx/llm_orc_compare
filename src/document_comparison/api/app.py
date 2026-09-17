@@ -423,7 +423,7 @@ async def _persist_external_call(*, request, status_code: int, elapsed_ms: int) 
             api_key_sha256=_api_key_fingerprint(request.headers.get("x-api-key")),
             status_code=status_code,
             elapsed_ms=elapsed_ms,
-            error=_EXTERNAL_ERROR_BY_STATUS.get(status_code),
+            error=getattr(request.state, "audit_error", None) or _EXTERNAL_ERROR_BY_STATUS.get(status_code),
             request_id=request_id,
             content_length=_parse_content_length(request.headers.get("content-length")),
             request_params=_sanitize_audit_params(
@@ -431,6 +431,8 @@ async def _persist_external_call(*, request, status_code: int, elapsed_ms: int) 
             ),
         )
     except Exception:  # noqa: BLE001
+        from ..deployment import record_persistence_error
+        record_persistence_error()
         logger.exception(
             "persist_external_call failed: endpoint=%s status=%s request_id=%s",
             endpoint, status_code, request_id,
@@ -759,10 +761,15 @@ def create_app() -> FastAPI:
         db_pkg.create_all()
     elif settings.db_auto_migrate:
         db_pkg.run_migrations()
+    from ..db import releases
+    from ..deployment import DeploymentAdmissionMiddleware, check_readiness
+    releases.register(settings.deployment_id, settings.version, settings.deployment_initial_mode)
     # LLM 配置持久化迁移:首次启动若 PG 无记录且本地遗留 llm_config.json 存在,
     # 把文件导入 PG(文件保留作备份),再把 PG 配置应用到运行时 settings 单例。
-    _maybe_import_legacy_llm_config_file()
+    if releases.status(settings.deployment_id)["mode"] == "SERVING":
+        _maybe_import_legacy_llm_config_file()
     apply_llm_overrides()
+    audit_futures: set[asyncio.Task] = set()
     @asynccontextmanager
     async def _queue_lifespan(_app: FastAPI):
         await task_manager.start_queue_dispatcher()
@@ -770,19 +777,14 @@ def create_app() -> FastAPI:
             yield
         finally:
             await task_manager.stop_queue_dispatcher()
+            if audit_futures:
+                await asyncio.gather(*list(audit_futures), return_exceptions=True)
 
     app = FastAPI(
        title="文档比对 API",
         description="基于多模态 LLM API 的合同条款篡改检测(§7、§14)",
        version=settings.version,
        lifespan=_queue_lifespan,
-    )
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
     )
 
     @app.middleware("http")
@@ -823,11 +825,38 @@ def create_app() -> FastAPI:
                     request.method, status_code, elapsed_ms,
                 )
                 # 异步落库,不阻塞响应返回;异常已在 _persist_external_call 内吞并
-                asyncio.create_task(_persist_external_call(
+                future = asyncio.create_task(_persist_external_call(
                     request=request,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                 ))
+                audit_futures.add(future)
+                future.add_done_callback(audit_futures.discard)
+                if "release_background" in request.scope:
+                    request.scope["release_background"].append(future)
+
+    async def _audit_maintenance_rejection(scope):
+        # 发布屏障在 multipart 预读之前；拒绝请求不读取上传内容，但仍写外部审计。
+        request = Request(scope)
+        request.state.audit_error = "deployment maintenance or control unavailable"
+        request.state.audit_endpoint = {
+            "/api/v1/external/contractCompare": "contractCompare.submit",
+            "/api/v1/external/amountStat": "amountStat.submit",
+        }.get(scope["path"], "unknown")
+        await _persist_external_call(request=request, status_code=503, elapsed_ms=0)
+
+    app.add_middleware(
+        DeploymentAdmissionMiddleware, owner=task_manager._queue_worker_id,
+        on_rejected=_audit_maintenance_rejection,
+    )
+    # CORS 在发布屏障外层，跨域调用方也能读取维护响应及 Retry-After。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["Retry-After", "X-Request-Id"],
+    )
 
     @app.middleware("http")
     async def _console_auth_middleware(request, call_next):
@@ -917,6 +946,19 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/ready")
+    async def ready():
+        result = await asyncio.to_thread(check_readiness)
+        dispatcher = task_manager._queue_dispatcher
+        result["checks"]["dispatcher"] = dispatcher is not None and not dispatcher.done()
+        result["prepared"] = result["prepared"] and result["checks"]["dispatcher"]
+        result["ready"] = result["prepared"] and result["mode"] == "SERVING"
+        return JSONResponse(result, status_code=200 if result["ready"] else 503)
+
+    @app.get("/api/v1/deployment")
+    async def deployment_status():
+        return await asyncio.to_thread(releases.status, settings.deployment_id)
 
     @app.get("/api/v1/version")
     async def version():
@@ -1034,6 +1076,7 @@ def create_app() -> FastAPI:
             "external_enable_risk_assessment": settings.external_enable_risk_assessment,
             "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
             "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
+            "external_auto_discard_trailing_drawings": settings.external_auto_discard_trailing_drawings,
             "external_enabled": external_config_enabled(),
             "persisted": _safe_persisted_config(),
             # 只读:内置默认提示词(settings.llm_direct_diff_prompt 为空时生效的前半段),
@@ -1058,6 +1101,7 @@ def create_app() -> FastAPI:
         external_public_base_url, external_max_upload_mb, external_image_dpi,
         external_ocr_backend, external_enable_llm_judge, external_enable_llm_alignment,
         external_enable_risk_assessment, external_truncate_to_original_pages,
+        external_auto_discard_trailing_drawings,
         llm_direct_diff_prompt(合同 LLM 直接比对系统提示词,留空=内置默认)。
         空值/省略表示不修改(api_key 传
         空串则清除已保存的 key)。
@@ -1084,6 +1128,7 @@ def create_app() -> FastAPI:
             "external_enable_risk_assessment",
             "external_enable_llm_direct_diff",
             "external_truncate_to_original_pages",
+            "external_auto_discard_trailing_drawings",
         }
         unknown = set(body.keys()) - allowed
         if unknown:
@@ -1232,6 +1277,11 @@ def create_app() -> FastAPI:
         if "external_truncate_to_original_pages" in body:
             if not isinstance(body["external_truncate_to_original_pages"], bool):
                 raise HTTPException(400, "external_truncate_to_original_pages 必须为布尔值")
+        if "external_auto_discard_trailing_drawings" in body:
+            if not isinstance(body["external_auto_discard_trailing_drawings"], bool):
+                raise HTTPException(
+                    400, "external_auto_discard_trailing_drawings 必须为布尔值"
+                )
 
         # api_key 特殊处理:明文哨兵 "********" 表示"不修改"
         overrides = dict(body)
@@ -1310,6 +1360,7 @@ def create_app() -> FastAPI:
                 "external_enable_risk_assessment": settings.external_enable_risk_assessment,
                 "external_enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
                 "external_truncate_to_original_pages": settings.external_truncate_to_original_pages,
+                "external_auto_discard_trailing_drawings": settings.external_auto_discard_trailing_drawings,
                 "external_enabled": external_config_enabled(),
                 "llm_direct_diff_default_prompt": DEFAULT_DIFF_SYSTEM_PROMPT,
                 "llm_diff_no_think_enabled": settings.llm_diff_no_think_enabled,
@@ -1374,6 +1425,7 @@ def create_app() -> FastAPI:
             "enable_risk_assessment": settings.external_enable_risk_assessment,
             "enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
             "truncate_to_original_pages": settings.external_truncate_to_original_pages,
+            "auto_discard_trailing_drawings": settings.external_auto_discard_trailing_drawings,
         })
         return {"task_id": task_id, "document_no": document_no, "status": "pending"}
 
@@ -1437,6 +1489,10 @@ def create_app() -> FastAPI:
             default=None,
             description="原始合同真实页数；仅用于显式截取回收 PDF",
         ),
+        target_body_end_page: int | None = Form(
+            default=None,
+            description="供应商 PDF 正文截止页；优先于自动图纸识别和原件页数截取",
+        ),
         callback_url: str | None = Form(default=None),
         sync: bool = Form(default=False),
         _auth: None = Depends(require_external_api_key),
@@ -1457,6 +1513,7 @@ def create_app() -> FastAPI:
             "target_url": target_url,
             "document_no": document_no,
             "original_page_count": original_page_count,
+            "target_body_end_page": target_body_end_page,
             "callback_url": callback_url,
             "sync": sync,
         }
@@ -1482,6 +1539,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "document_no 不能超过 255 个字符")
         if original_page_count is not None and original_page_count < 1:
             raise HTTPException(400, "original_page_count 必须 >= 1")
+        if target_body_end_page is not None and target_body_end_page < 1:
+            raise HTTPException(400, "target_body_end_page 必须 >= 1")
         # callback_url:异步模式必填,同步模式可选(结果随响应返回)。
         callback_url = (callback_url or "").strip() or None
         if callback_url is None and not sync:
@@ -1541,8 +1600,8 @@ def create_app() -> FastAPI:
                         f"{field_name} 超过 {settings.external_max_upload_mb} MiB 上限",
                     )
 
-            # 与内部接口保持一致：超页数任务在入队前拒绝。
-            if settings.max_pdf_pages > 0:
+            # 与内部接口保持一致：页数上限和显式正文截止页在入队前校验。
+            if settings.max_pdf_pages > 0 or target_body_end_page is not None:
                 if has_target_file:
                     try:
                         pdf_bytes = target.file.read()
@@ -1555,10 +1614,17 @@ def create_app() -> FastAPI:
                     page_count = count_pages_from_bytes(pdf_bytes)
                 except Exception as exc:  # noqa: BLE001
                     raise HTTPException(400, f"无法解析 PDF: {exc}")
-                if page_count > settings.max_pdf_pages:
+                if settings.max_pdf_pages > 0 and page_count > settings.max_pdf_pages:
                     raise HTTPException(
                         400,
                         f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                    )
+                if (
+                    target_body_end_page is not None
+                    and target_body_end_page > page_count
+                ):
+                    raise HTTPException(
+                        400, "target_body_end_page 不能超过回收件实际页数"
                     )
 
             # 已满的执行槽位不再直接拒绝：只要持久化等待队列仍有容量就受理。
@@ -1599,6 +1665,8 @@ def create_app() -> FastAPI:
                 "enable_risk_assessment": settings.external_enable_risk_assessment,
                 "enable_llm_direct_diff": settings.external_enable_llm_direct_diff,
                 "truncate_to_original_pages": settings.external_truncate_to_original_pages,
+                "auto_discard_trailing_drawings": settings.external_auto_discard_trailing_drawings,
+                "target_body_end_page": target_body_end_page,
                 "original_page_count": original_page_count,
                 "sync_mode": sync,
             })
@@ -2002,6 +2070,8 @@ def create_app() -> FastAPI:
         enable_risk_assessment = False
         enable_llm_direct_diff = False
         truncate_to_original_pages = False
+        auto_discard_trailing_drawings = False
+        target_body_end_page: int | None = None
         original_page_count: int | None = None
         if options:
             try:
@@ -2012,6 +2082,8 @@ def create_app() -> FastAPI:
                 enable_risk_assessment = opts.enable_risk_assessment
                 enable_llm_direct_diff = opts.enable_llm_direct_diff
                 truncate_to_original_pages = opts.truncate_to_original_pages
+                auto_discard_trailing_drawings = opts.auto_discard_trailing_drawings
+                target_body_end_page = opts.target_body_end_page
                 original_page_count = opts.original_page_count
                 if (
                     opts.similarity_identical is not None
@@ -2028,7 +2100,7 @@ def create_app() -> FastAPI:
 
         # PDF 页数上限预检:超过配置上限直接拒绝,不进入流水线。
         # 0 表示不限制;读取 target 字节计数后回拨流,供 save_upload 再读一次。
-        if settings.max_pdf_pages > 0:
+        if settings.max_pdf_pages > 0 or target_body_end_page is not None:
             try:
                 pdf_bytes = target.file.read()
             finally:
@@ -2037,10 +2109,14 @@ def create_app() -> FastAPI:
                 page_count = count_pages_from_bytes(pdf_bytes)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(400, f"无法解析 PDF: {exc}")
-            if page_count > settings.max_pdf_pages:
+            if settings.max_pdf_pages > 0 and page_count > settings.max_pdf_pages:
                 raise HTTPException(
                     400,
                     f"暂不支持:PDF 共 {page_count} 页,超过上限 {settings.max_pdf_pages} 页",
+                )
+            if target_body_end_page is not None and target_body_end_page > page_count:
+                raise HTTPException(
+                    400, "target_body_end_page 不能超过回收件实际页数"
                 )
 
         task_id = task_manager.create(
@@ -2060,6 +2136,8 @@ def create_app() -> FastAPI:
             "enable_risk_assessment": enable_risk_assessment,
             "enable_llm_direct_diff": enable_llm_direct_diff,
             "truncate_to_original_pages": truncate_to_original_pages,
+            "auto_discard_trailing_drawings": auto_discard_trailing_drawings,
+            "target_body_end_page": target_body_end_page,
             "original_page_count": original_page_count,
         })
         return {"task_id": task_id, "status": "pending"}

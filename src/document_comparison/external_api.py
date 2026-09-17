@@ -17,6 +17,7 @@ from .config import settings
 from .models import Diff, StatementSummaryReport, TamperReport
 from .report import render_html_report, render_pdf_report
 from .report.builder import burn_pdf
+from .report.page_scope_notice import page_scope_notice
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,9 @@ def build_result_text(document_no: str, report: TamperReport) -> str:
         f"高亮定位：{location}",
         f"差异数量：{len(diffs)}",
     ]
+    scope_notice = page_scope_notice(report)
+    if scope_notice:
+        lines.append(f"正文范围：{scope_notice}")
     status_names = {
         "modified": "修改",
         "added": "新增",

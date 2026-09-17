@@ -93,6 +93,16 @@ _WHOLE_DOC_OCR_PROMPT = (
     "- 只输出识别到的文字,不要添加标题、说明或格式包裹。"
 )
 
+_DRAWING_CLASSIFICATION_PROMPT = (
+    "你是合同附件页面分类器。判断给定页面属于合同正文、工程图纸或无法确定。"
+    "工程图纸包括CAD图、结构图、装配图、产品图，通常包含图号、比例、制图/审核标题栏、"
+    "尺寸标注和大量线框。合同正文包括条款、表格、签字盖章页；即使文字很少也不能误判为图纸。"
+    "严格只输出JSON对象，不要解释或输出markdown。结构为:"
+    '{"page_type":"contract_body|engineering_drawing|unknown",'
+    '"confidence":0到1之间的数字,"signals":["简短证据"]}。'
+    "证据不足时必须返回unknown；不得仅凭横向页面或文字较少判为工程图纸。"
+)
+
 
 class LLMOCREngine:
     """通过多模态 LLM API 识别 PDF 版面。
@@ -337,6 +347,73 @@ class LLMOCREngine:
             "chat_template_kwargs": {"enable_thinking": False},
         }
         return self._post_chat(payload, kind="ocr-whole", client=client)
+
+    def classify_drawing_page(
+        self,
+        image_bytes: bytes,
+        *,
+        page_number: int,
+        extracted_text: str = "",
+        client: httpx.Client | None = None,
+    ) -> dict[str, Any]:
+        """用通用 VL 模型对规则无法判断的单页做安全三分类。"""
+        self._validate_config()
+        text_hint = (extracted_text or "").strip()
+        if len(text_hint) > 2000:
+            text_hint = text_hint[:2000]
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": _DRAWING_CLASSIFICATION_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"这是供应商PDF第{page_number}页。"
+                                f"已提取文字如下:\n{text_hint or '（无可靠文本层）'}"
+                                "\n请按约定JSON判断页面类型。"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": _to_data_url(image_bytes),
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        content = self._post_chat(payload, kind="ocr", client=client)
+        parsed = extract_llm_json(content, expect=dict)
+        if not isinstance(parsed, dict):
+            raise ValueError("图纸页面分类未返回JSON对象")
+        page_type = str(parsed.get("page_type") or "")
+        if page_type not in {"contract_body", "engineering_drawing", "unknown"}:
+            raise ValueError("图纸页面分类返回了未知 page_type")
+        try:
+            confidence = float(parsed.get("confidence"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("图纸页面分类 confidence 无效") from exc
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("图纸页面分类 confidence 必须在 0 到 1 之间")
+        raw_signals = parsed.get("signals")
+        signals = (
+            [str(item)[:200] for item in raw_signals if str(item).strip()]
+            if isinstance(raw_signals, list)
+            else []
+        )
+        return {
+            "page_type": page_type,
+            "confidence": confidence,
+            "signals": signals,
+        }
 
     def _post_chat(
         self,

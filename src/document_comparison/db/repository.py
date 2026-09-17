@@ -424,6 +424,8 @@ def claim_next_queued_task(
     worker_id: str,
     max_running: int,
     lease_seconds: float,
+    *,
+    deployment_id: str | None = None,
 ) -> TaskRecord | None:
     """原子领取最早的 pending 任务，跨 worker 严格限制 running 数。
 
@@ -432,6 +434,9 @@ def claim_next_queued_task(
     pending，以便 worker 异常退出后重新执行。
     """
     with session_scope() as s:
+        from . import releases
+        if deployment_id is not None and not releases.claim_allowed(s, deployment_id):
+            return None
         s.execute(text("SELECT pg_advisory_xact_lock(92134017)"))
         now = datetime.now(timezone.utc)
         s.query(TaskRecord).filter(
@@ -468,6 +473,10 @@ def claim_next_queued_task(
         rec.status = "running"
         rec.lease_owner = worker_id
         rec.lease_expires_at = now + timedelta(seconds=max(1.0, lease_seconds))
+        if deployment_id is not None:
+            rec._release_activity_id = releases.add_activity(
+                s, deployment_id, worker_id, "job", rec.task_id,
+            )
         return rec
 
 
@@ -604,6 +613,7 @@ def save_llm_calls_batch(
             error=rec.error,
             payload=rec.payload if rec.payload is not None else {},
             response=rec.response,
+            created_at=datetime.fromisoformat(rec.created_at.replace("Z", "+00:00")),
         )
         for rec in records
     ]

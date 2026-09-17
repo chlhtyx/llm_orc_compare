@@ -618,6 +618,24 @@ def test_save_llm_calls_batch_and_get(db_isolated):
     assert "AAAA" not in str(got[0].payload)
 
 
+def test_save_llm_calls_batch_preserves_call_started_at(db_isolated):
+    """历史记录展示的时间必须是模型调用发生时间，而非任务结束后的批量落库时间。"""
+    from document_comparison.observability import LlmCallRecord
+
+    db_repo.create_task("llm-call-time", "compare")
+    recorded_at = "2026-09-04T01:02:03+00:00"
+    db_repo.save_llm_calls_batch("llm-call-time", [
+        LlmCallRecord(
+            kind="ocr", attempt=1, payload={"model": "m"},
+            status_code=200, elapsed_ms=50, created_at=recorded_at,
+        ),
+    ])
+
+    got = db_repo.get_task_llm_calls("llm-call-time")
+    assert len(got) == 1
+    assert got[0].created_at.isoformat() == recorded_at
+
+
 def test_save_llm_calls_batch_empty_is_noop(db_isolated):
     """空列表批量写入是 noop,返回 0。"""
     db_repo.create_task("llm-2", "compare")

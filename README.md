@@ -25,18 +25,33 @@
 
 ## 快速开始
 
+采用单服务部署。版本验证使用固定样本回归和人工核验。
+普通单服务升级可直接执行（先准备好新版本镜像并更新 `.env` 中的 `DC_VERSION`）：
+
+```bash
+docker compose up -d
+```
+
+启动会自动更新版本记录，原状态为 `SERVING` 时继续接单；主动维护的 `DRAINING` / `STOPPED` 状态保持不变。
+源码修改后需 `docker compose up -d --build`；仅 `up -d` 不会重建已有镜像。
+存在长任务时，仍建议采用下方排空发布流程，以免超过容器停止等待时间。
+
+正式版本升级请使用 [发布与回滚流程](docs/release-switch.md)：排空任务和回调后，使用新镜像 tag
+重建同一容器，再恢复接单。`DC_DEPLOYMENT_ID` 固定复用为 `main`，3012、Nginx 和业务调用地址保持不变。
+完整操作见 [部署手册](docs/deployment-runbook.md)。
+
 推荐使用 Docker Compose，前端和后端会运行在同一个容器中。
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 docker compose ps
-curl http://localhost:8000/health
+curl http://localhost:3012/health
 ```
 
 `docker-compose.yml` 会同时启动 `postgres` 服务并自动迁移数据库;应用容器依赖 PG 健康检查通过后才会启动。Postgres 数据持久化到宿主 `./data/pg/`。
 
-默认访问地址为 <http://localhost:8000>。当前 `docker-compose.yml` 使用 `${DC_PORT:-3012}` 作为宿主机端口；复制 `.env.example` 后，端口为其中配置的 `DC_PORT=8000`。
+默认访问地址为 <http://localhost:3012>。`docker-compose.yml` 中应用容器直接映射 `${DC_PORT:-3012}` 宿主端口；发布为原地升级（排空后换镜像 tag 重建容器），端口与业务调用地址不变。
 
 ### DOCX 渲染字体
 
@@ -221,7 +236,7 @@ OCR 解析结果，包括页码、块类型、坐标、字符数、内容 SHA-25
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DC_HOST` | `0.0.0.0` | 后端监听地址 |
-| `DC_PORT` | `8000` | 后端监听端口；Compose 中也用作宿主机映射端口 |
+| `DC_PORT` | `8000`（应用）/`3012`（Compose 示例） | 应用进程监听端口默认 8000；Compose 用 `.env` 的 `DC_PORT` 直接映射应用容器宿主端口，正式建议 3012 |
 | `DC_STORAGE_DIR` | `./.dc_data` | 上传文件、配置和日志目录(报告 JSON 不再写文件,只在 Postgres) |
 | `DC_STATIC_DIR` | 空 | 前端静态文件目录；容器内已设为 `/app/static` |
 | `DC_DOCX_RENDERER_PATH` | `soffice` | DOCX 原件派生 PDF 的 LibreOffice 可执行文件；容器内为 `/usr/bin/soffice` |

@@ -278,19 +278,52 @@ class PageRecognitionDiagnostic(BaseModel):
     )
 
 
-class TruncationRecord(BaseModel):
-    """回收件页数截取记录(等保审计留痕)。
+class PageScopeDecision(BaseModel):
+    """自动正文边界识别中，被排除页面的可审计判定证据。"""
 
-    仅在截断真正发生且回收 PDF 页数超过原始合同页数时填充;未截断或未开启
-    截断时 TamperReport.truncation 为 None。记录截断边界与页数来源,使审计
-    可追溯"本次比对是基于截断后的前 N 页,超出部分未纳入比对"。
+    page_number: int = Field(ge=1, description="用户可见的 1 基页码")
+    page_type: Literal["contract_body", "engineering_drawing", "unknown"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    signals: list[str] = Field(default_factory=list)
+
+
+class TruncationRecord(BaseModel):
+    """回收件正文范围截取记录(等保审计留痕)。
+
+    仅在手工边界、自动尾部图纸识别或兼容的原件页数模式真正移除页面时填充；
+    未移除页面时 TamperReport.truncation 为 None。记录截取原因、排除页码与
+    自动识别证据，使“哪些页面未进入比对、为何排除”可追溯。
     """
 
     original_pdf_page_count: int = Field(description="截断前回收 PDF 实际页数")
-    truncated_pdf_page_count: int = Field(description="截断后页数(=原始合同页数)")
-    original_doc_page_count: int = Field(description="原始合同页数(估算或外部显式传入)")
-    doc_page_count_source: Literal["estimated", "explicit"] = Field(
+    truncated_pdf_page_count: int = Field(description="截断后参与比对的 PDF 页数")
+    original_doc_page_count: int | None = Field(
+        default=None,
+        description="原始合同页数；按目标正文边界截取时为空",
+    )
+    doc_page_count_source: Literal["estimated", "explicit"] | None = Field(
+        default=None,
         description="原始合同页数来源:estimated=OOXML 估算,explicit=外部显式传入",
+    )
+    truncation_reason: Literal[
+        "original_page_count", "manual_target_body_end_page", "auto_trailing_drawings"
+    ] = Field(
+        default="original_page_count",
+        description="截取原因；旧报告默认按原件页数截取",
+    )
+    excluded_page_numbers: list[int] = Field(
+        default_factory=list,
+        description="未参与比对的回收件页码，按用户可见的 1 基页码记录",
+    )
+    detection_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="自动尾部图纸识别的最低页级置信度",
+    )
+    page_decisions: list[PageScopeDecision] = Field(
+        default_factory=list,
+        description="自动排除页的分类、置信度与判定证据",
     )
 
 
@@ -406,6 +439,10 @@ class CompareOptions(BaseModel):
     # 回收件页数截取:开启后,回收 PDF 页数超过原始合同时,截取到原始页数再比对。
     # 用物理截断(生成前 N 页子集 PDF)保证 OCR/报告/高亮图在页数维度一致。
     truncate_to_original_pages: bool = False
+    # 自动仅排除供应商 PDF 连续尾部的高置信度工程图；正文、签章页与不确定页保留。
+    auto_discard_trailing_drawings: bool = False
+    # 供应商 PDF 正文实际截止页(1 基)。提供时优先于自动识别和旧原件页数截取。
+    target_body_end_page: int | None = None
     # 原始合同页数(可选显式覆盖);不传时按 docx OOXML 分页符估算。
     # 外部系统已知真实页数时应优先传此值,避免渲染器差异导致的估算偏差。
     original_page_count: int | None = None
@@ -415,6 +452,13 @@ class CompareOptions(BaseModel):
     def _check_original_page_count(cls, v: int | None) -> int | None:
         if v is not None and v < 1:
             raise ValueError("original_page_count 必须 >= 1")
+        return v
+
+    @field_validator("target_body_end_page")
+    @classmethod
+    def _check_target_body_end_page(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("target_body_end_page 必须 >= 1")
         return v
 
 

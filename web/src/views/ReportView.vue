@@ -136,7 +136,25 @@ function onSelectClause(id: string) {
           class="card truncation-warning"
         >
           <h3 class="section-title">供应商合同页数已截取</h3>
-          <p>
+          <p v-if="reportStore.report.truncation.truncation_reason === 'auto_trailing_drawings'">
+            供应商合同 PDF 共
+            <strong>{{ reportStore.report.truncation.original_pdf_page_count }}</strong> 页，
+            自动识别并排除尾部图纸第
+            <strong>{{ reportStore.report.truncation.excluded_page_numbers.join('、') }}</strong> 页，
+            保留前
+            <strong>{{ reportStore.report.truncation.truncated_pdf_page_count }}</strong> 页进行正文比对。
+            <span v-if="reportStore.report.truncation.detection_confidence !== null" class="muted small">
+              （最低识别置信度 {{ Math.round(reportStore.report.truncation.detection_confidence * 100) }}%）
+            </span>
+          </p>
+          <p v-else-if="reportStore.report.truncation.truncation_reason === 'manual_target_body_end_page'">
+            供应商合同 PDF 共
+            <strong>{{ reportStore.report.truncation.original_pdf_page_count }}</strong> 页，
+            按调用方指定的正文截止页保留前
+            <strong>{{ reportStore.report.truncation.truncated_pdf_page_count }}</strong> 页，
+            第 <strong>{{ reportStore.report.truncation.excluded_page_numbers.join('、') }}</strong> 页未参与比对。
+          </p>
+          <p v-else>
             供应商合同 PDF 共
             <strong>{{ reportStore.report.truncation.original_pdf_page_count }}</strong> 页,
             超过采购部合同

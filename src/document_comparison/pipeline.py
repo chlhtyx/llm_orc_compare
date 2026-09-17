@@ -25,6 +25,8 @@ from .observability import record_ocr_result, timed_stage
 from .parsing import (
     attach_docx_layout,
     count_pages,
+    detect_trailing_drawings,
+    get_configured_drawing_classifier,
     estimate_page_count,
     extract_text_blocks,
     get_page_metas,
@@ -96,6 +98,76 @@ def resolve_truncated_pdf(
         doc_page_count_source=doc_source,
     )
     return sliced, record
+
+
+def resolve_trailing_drawings_pdf(
+    pdf_path: str | Path,
+    *,
+    output_path: str | Path | None,
+) -> tuple[Path, TruncationRecord | None]:
+    """仅截掉供应商 PDF 连续尾部的高置信度工程图。"""
+    decision = detect_trailing_drawings(
+        pdf_path,
+        classifier=get_configured_drawing_classifier(),
+    )
+    if not decision.excluded_page_numbers:
+        logger.info("no confident trailing drawings detected, keep all pages")
+        return Path(pdf_path), None
+    logger.info(
+        "discard trailing drawings total=%s body_end=%s excluded=%s confidence=%s",
+        decision.total_pages,
+        decision.body_end_page,
+        decision.excluded_page_numbers,
+        decision.confidence,
+    )
+    sliced = slice_pdf(
+        pdf_path,
+        decision.body_end_page,
+        output_path=output_path,
+    )
+    return sliced, TruncationRecord(
+        original_pdf_page_count=decision.total_pages,
+        truncated_pdf_page_count=decision.body_end_page,
+        truncation_reason="auto_trailing_drawings",
+        excluded_page_numbers=decision.excluded_page_numbers,
+        detection_confidence=decision.confidence,
+        page_decisions=[
+            {
+                "page_number": item.page_number,
+                "page_type": item.page_type,
+                "confidence": item.confidence,
+                "signals": item.signals,
+            }
+            for item in decision.assessments
+        ],
+    )
+
+
+def resolve_target_body_pdf(
+    pdf_path: str | Path,
+    *,
+    target_body_end_page: int,
+    output_path: str | Path | None,
+) -> tuple[Path, TruncationRecord | None]:
+    """按调用方明确给出的供应商正文截止页生成比对副本。"""
+    if target_body_end_page < 1:
+        raise ValueError("target_body_end_page 必须 >= 1")
+    total_pages = count_pages(pdf_path)
+    if target_body_end_page > total_pages:
+        raise ValueError("target_body_end_page 不能超过回收件实际页数")
+    if target_body_end_page == total_pages:
+        return Path(pdf_path), None
+    sliced = slice_pdf(
+        pdf_path,
+        target_body_end_page,
+        output_path=output_path,
+    )
+    return sliced, TruncationRecord(
+        original_pdf_page_count=total_pages,
+        truncated_pdf_page_count=target_body_end_page,
+        truncation_reason="manual_target_body_end_page",
+        excluded_page_numbers=list(range(target_body_end_page + 1, total_pages + 1)),
+    )
 
 
 def _enforce_ocr_page_indexes(pages_blocks: list[list[Block]]) -> list[list[Block]]:
@@ -230,6 +302,8 @@ def run_pipeline(
     enable_risk_assessment: bool = False,
     enable_llm_direct_diff: bool = False,
     truncate_to_original_pages: bool = False,
+    auto_discard_trailing_drawings: bool = False,
+    target_body_end_page: int | None = None,
     original_page_count: int | None = None,
     truncated_pdf_output_path: str | Path | None = None,
     source_annotation_pdf_path: str | Path | None = None,
@@ -261,7 +335,22 @@ def run_pipeline(
     # 物理截断保证 OCR/报告/高亮图在页数维度一致;构造 TruncationRecord 留痕。
     pdf_path = Path(pdf_path)
     truncation: TruncationRecord | None = None
-    if truncate_to_original_pages:
+    if target_body_end_page is not None:
+        pdf_path, truncation = resolve_target_body_pdf(
+            pdf_path,
+            target_body_end_page=target_body_end_page,
+            output_path=truncated_pdf_output_path,
+        )
+        if truncation is not None:
+            _progress("pdf_truncated", 0.09)
+    elif auto_discard_trailing_drawings:
+        pdf_path, truncation = resolve_trailing_drawings_pdf(
+            pdf_path,
+            output_path=truncated_pdf_output_path,
+        )
+        if truncation is not None:
+            _progress("pdf_truncated", 0.09)
+    elif truncate_to_original_pages:
         pdf_path, truncation = resolve_truncated_pdf(
             word_path,
             pdf_path,

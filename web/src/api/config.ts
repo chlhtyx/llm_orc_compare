@@ -78,6 +78,8 @@ export interface LlmConfig {
   external_enable_llm_direct_diff: boolean
   /** 回收件页数截取:回收 PDF 超过原始合同页数时,自动截取前 N 页再比对 */
   external_truncate_to_original_pages: boolean
+  /** 仅自动排除供应商 PDF 连续尾部的高置信度工程图 */
+  external_auto_discard_trailing_drawings: boolean
   external_enabled: boolean
   persisted?: Record<string, unknown>
 }
@@ -135,6 +137,7 @@ export interface LlmConfigUpdate {
   external_enable_risk_assessment?: boolean
   external_enable_llm_direct_diff?: boolean
   external_truncate_to_original_pages?: boolean
+  external_auto_discard_trailing_drawings?: boolean
 }
 
 export function getLlmConfig(): Promise<LlmConfig> {

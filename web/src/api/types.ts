@@ -89,9 +89,18 @@ export interface TruncationRecord {
   /** 截断后页数(=原始合同页数) */
   truncated_pdf_page_count: number
   /** 原始合同页数(估算或外部显式传入) */
-  original_doc_page_count: number
+  original_doc_page_count: number | null
   /** 原始合同页数来源:estimated=OOXML 估算,explicit=外部显式传入 */
-  doc_page_count_source: 'estimated' | 'explicit'
+  doc_page_count_source: 'estimated' | 'explicit' | null
+  truncation_reason: 'original_page_count' | 'manual_target_body_end_page' | 'auto_trailing_drawings'
+  excluded_page_numbers: number[]
+  detection_confidence: number | null
+  page_decisions: Array<{
+    page_number: number
+    page_type: 'contract_body' | 'engineering_drawing' | 'unknown'
+    confidence: number
+    signals: string[]
+  }>
 }
 
 export interface TamperReport {
@@ -136,6 +145,10 @@ export interface CompareOptions {
    * 用物理截断(生成前 N 页子集 PDF)保证 OCR/报告/高亮图在页数维度一致。
    */
   truncate_to_original_pages?: boolean
+  /** 自动仅排除供应商 PDF 连续尾部的高置信度工程图 */
+  auto_discard_trailing_drawings?: boolean
+  /** 供应商 PDF 正文截止页(1 基);优先于自动识别和原件页数截取 */
+  target_body_end_page?: number
   /** 原始合同页数(可选显式覆盖);不传时按 docx OOXML 分页符估算 */
   original_page_count?: number
 }

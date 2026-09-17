@@ -31,6 +31,15 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+def test_retired_shadow_routes_are_unavailable(client):
+    paths = client.app.openapi()["paths"]
+    assert "/api/v1/compare" in paths
+    assert "/api/v1/deployment" in paths
+    assert not any("/shadow/" in path or "quality-comparisons" in path for path in paths)
+    for path in ("/api/v1/external/shadow/jobs/retired", "/api/v1/quality-comparisons"):
+        assert client.get(path).status_code == 404
+
+
 def test_scan_protection_rejects_sensitive_path_and_adds_security_headers(client):
     """敏感文件探测不进入路由，正常响应也带基础浏览器防护头。"""
     blocked = client.get("/.env")
@@ -195,7 +204,7 @@ def test_compare_rejects_bad_options(client):
 
 
 def test_compare_accepts_truncate_options(client, monkeypatch):
-    """options 携带 truncate_to_original_pages / original_page_count 应透传到 run。"""
+    """三种正文范围参数都应经持久化队列透传到 run。"""
     import io
     from docx import Document  # type: ignore[import-untyped]
 
@@ -203,10 +212,11 @@ def test_compare_accepts_truncate_options(client, monkeypatch):
 
     captured: dict = {}
 
-    async def _spy_run(*args, **kwargs):
-        captured.update(kwargs)
+    async def _spy_enqueue(task_id, payload):
+        captured.update(payload)
+        return True
 
-    monkeypatch.setattr(task_manager, "run", _spy_run)
+    monkeypatch.setattr(task_manager, "enqueue", _spy_enqueue)
 
     doc = Document()
     doc.add_paragraph("第一条 测试条款")
@@ -234,13 +244,62 @@ def test_compare_accepts_truncate_options(client, monkeypatch):
         data={
             "options": (
                 '{"truncate_to_original_pages": true, '
-                '"original_page_count": 5}'
+                '"original_page_count": 5, '
+                '"auto_discard_trailing_drawings": true, '
+                '"target_body_end_page": 1}'
             ),
         },
     )
     assert r.status_code == 200, r.json()
     assert captured.get("truncate_to_original_pages") is True
     assert captured.get("original_page_count") == 5
+    assert captured.get("auto_discard_trailing_drawings") is True
+    assert captured.get("target_body_end_page") == 1
+
+
+def test_compare_rejects_target_body_end_page_beyond_pdf(client, monkeypatch):
+    """显式正文截止页不能超过供应商 PDF 的实际页数。"""
+    import io
+    from docx import Document  # type: ignore[import-untyped]
+
+    from document_comparison.api.app import task_manager
+
+    async def _unexpected_run(*args, **kwargs):
+        raise AssertionError("invalid request must not enter the task runner")
+
+    monkeypatch.setattr(task_manager, "run", _unexpected_run)
+
+    doc = Document()
+    doc.add_paragraph("第一条 测试条款")
+    doc_buf = io.BytesIO()
+    doc.save(doc_buf)
+    doc_buf.seek(0)
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page(width=595, height=842)
+    pdf.save(pdf_buf)
+    pdf_buf.seek(0)
+
+    response = client.post(
+        "/api/v1/compare",
+        files={
+            "source": (
+                "contract.docx",
+                doc_buf,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            "target": ("scan.pdf", pdf_buf, "application/pdf"),
+        },
+        data={"options": '{"target_body_end_page": 2}'},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "target_body_end_page 不能超过回收件实际页数"
 
 
 def test_preview_and_annotated_report_use_truncated_task_pdf(client, monkeypatch, tmp_path):
@@ -954,6 +1013,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
             "external_enable_llm_alignment": True,
             "external_enable_risk_assessment": True,
             "external_truncate_to_original_pages": True,
+            "external_auto_discard_trailing_drawings": True,
         },
     )
     assert response.status_code == 200, response.json()
@@ -969,11 +1029,13 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
     assert config["external_enable_llm_alignment"] is True
     assert config["external_enable_risk_assessment"] is True
     assert config["external_truncate_to_original_pages"] is True
+    assert config["external_auto_discard_trailing_drawings"] is True
     assert config["external_enabled"] is True
 
     assert settings.external_api_key == "external-secret-1234"
     assert settings.external_public_base_url == "https://compare.example.com"
     assert settings.external_truncate_to_original_pages is True
+    assert settings.external_auto_discard_trailing_drawings is True
     persisted = db_repo.get_llm_config()
     assert persisted["external_api_key"] == "external-secret-1234"
 
@@ -981,6 +1043,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
     assert fetched.status_code == 200
     body = fetched.json()
     assert body["external_truncate_to_original_pages"] is True
+    assert body["external_auto_discard_trailing_drawings"] is True
     assert body["external_api_key"] != "external-secret-1234"
     assert body["persisted"]["external_api_key"] != "external-secret-1234"
     # 现有模型 Key 的持久化快照也一并保持脱敏。
@@ -1001,6 +1064,7 @@ def test_external_api_config_persists_applies_and_masks_secret(client):
         {"external_enable_llm_alignment": "true"},
         {"external_enable_risk_assessment": 1},
         {"external_truncate_to_original_pages": "yes"},
+        {"external_auto_discard_trailing_drawings": "yes"},
     ],
 )
 def test_external_api_config_rejects_invalid_values(client, payload):

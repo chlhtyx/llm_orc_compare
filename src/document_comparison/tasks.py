@@ -355,10 +355,14 @@ class TaskManager:
         self._queue_stop = True
         self.wake_queue()
         if self._queue_dispatcher is not None:
-            self._queue_dispatcher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._queue_dispatcher
+            # 不取消正在领取的事务，避免已领取任务没有执行者。
+            await self._queue_dispatcher
         self._queue_dispatcher = None
+        if self._queue_running:
+            await asyncio.gather(*list(self._queue_running), return_exceptions=True)
+        callbacks = [f for task in self._tasks.values() for f in task.pending_callbacks]
+        if callbacks:
+            await asyncio.gather(*callbacks, return_exceptions=True)
 
     async def wait_for_sync_queue(self, task_id: str) -> bool:
         """等到任务领取或终态；False 表示仍 pending 且同步排队预算耗尽。"""
@@ -423,6 +427,10 @@ class TaskManager:
                     enable_risk_assessment=bool(payload.get("enable_risk_assessment", False)),
                     enable_llm_direct_diff=bool(payload.get("enable_llm_direct_diff", False)),
                     truncate_to_original_pages=bool(payload.get("truncate_to_original_pages", False)),
+                    auto_discard_trailing_drawings=bool(
+                        payload.get("auto_discard_trailing_drawings", False)
+                    ),
+                    target_body_end_page=payload.get("target_body_end_page"),
                     original_page_count=payload.get("original_page_count"),
                 )
             elif runner == "statement":
@@ -452,17 +460,40 @@ class TaskManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await renewer
 
+    async def _run_release_job(self, rec) -> None:
+        from .deployment import persistence_errors
+        from .db import releases
+        errors: list = []
+        token = persistence_errors.set(errors)
+        try:
+            await self._run_claimed_queue_task(rec)
+            task = self._tasks.get(rec.task_id)
+            if task and task.pending_callbacks:
+                results = await asyncio.gather(*task.pending_callbacks, return_exceptions=True)
+                errors.extend(r for r in results if isinstance(r, BaseException))
+            activity_id = getattr(rec, "_release_activity_id", None)
+            if activity_id and not errors:
+                try:
+                    await asyncio.to_thread(releases.finish_activity, activity_id)
+                except Exception:
+                    logger.error("release job cleanup failed task=%s", rec.task_id)
+            elif errors:
+                logger.error("release job barrier retained task=%s", rec.task_id)
+        finally:
+            persistence_errors.reset(token)
+
     async def _queue_dispatch_loop(self) -> None:
         assert self._queue_wakeup is not None
         while not self._queue_stop:
             claimed_any = False
-            while len(self._queue_running) < settings.max_concurrent_tasks:
+            while not self._queue_stop and len(self._queue_running) < settings.max_concurrent_tasks:
                 try:
                     rec = await asyncio.to_thread(
                         db_repo.claim_next_queued_task,
                         self._queue_worker_id,
                         settings.max_concurrent_tasks,
                         settings.task_queue_lease_seconds,
+                        deployment_id=settings.deployment_id,
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("queue claim failed")
@@ -470,7 +501,7 @@ class TaskManager:
                 if rec is None:
                     break
                 claimed_any = True
-                future = asyncio.create_task(self._run_claimed_queue_task(rec))
+                future = asyncio.create_task(self._run_release_job(rec))
                 self._queue_running.add(future)
                 future.add_done_callback(self._queue_running.discard)
             if claimed_any:
@@ -491,6 +522,8 @@ class TaskManager:
         try:
             fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001
+            from .deployment import record_persistence_error
+            record_persistence_error()
             logger.warning("db write failed in %s: %s", getattr(fn, "__name__", fn), exc)
 
     async def _db_thread(self, fn, *args, **kwargs) -> None:
@@ -579,12 +612,21 @@ class TaskManager:
         enable_risk_assessment: bool = False,
         enable_llm_direct_diff: bool = False,
         truncate_to_original_pages: bool = False,
+        auto_discard_trailing_drawings: bool = False,
+        target_body_end_page: int | None = None,
         original_page_count: int | None = None,
     ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
-        logger.info("task start input=word+pdf llm_direct=%s llm_alignment=%s llm_judge=%s ocr_backend=%s risk_assess=%s truncate=%s orig_pages=%s", enable_llm_direct_diff, enable_llm_alignment, enable_llm_judge, ocr_backend, enable_risk_assessment, truncate_to_original_pages, original_page_count)
+        logger.info(
+            "task start input=word+pdf llm_direct=%s llm_alignment=%s llm_judge=%s "
+            "ocr_backend=%s risk_assess=%s truncate=%s auto_drawings=%s "
+            "target_body_end=%s orig_pages=%s",
+            enable_llm_direct_diff, enable_llm_alignment, enable_llm_judge,
+            ocr_backend, enable_risk_assessment, truncate_to_original_pages,
+            auto_discard_trailing_drawings, target_body_end_page, original_page_count,
+        )
         await self._db_thread(
             db_repo.update_task_status, task_id, "running"
         )
@@ -617,6 +659,8 @@ class TaskManager:
                                 logger.warning("source DOCX rendering unavailable: %s", exc)
                             if (
                                 truncate_to_original_pages
+                                and not auto_discard_trailing_drawings
+                                and target_body_end_page is None
                                 and original_page_count is None
                                 and source_annotation_pdf_path is not None
                             ):
@@ -640,6 +684,8 @@ class TaskManager:
                             enable_risk_assessment=enable_risk_assessment,
                             enable_llm_direct_diff=enable_llm_direct_diff,
                             truncate_to_original_pages=truncate_to_original_pages,
+                            auto_discard_trailing_drawings=auto_discard_trailing_drawings,
+                            target_body_end_page=target_body_end_page,
                             original_page_count=original_page_count,
                             truncated_pdf_output_path=compared_pdf_path(task_id),
                             source_annotation_pdf_path=source_annotation_pdf_path,
