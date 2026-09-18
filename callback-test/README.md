@@ -1,6 +1,6 @@
 # callback-test
 
-最小 callback 接收服务,用于验证主服务(`llm_orc_compare`)的 webhook 回调。
+最小 callback 接收服务,用于验证主服务(`llm_ocr_compare`)的 webhook 回调。
 
 收到主服务 POST 过来的回调报文后,**把请求行、来源 IP、`X-Event-Id` 头、JSON body
 原样写入日志**,并回 `200` 让主服务判定交付成功(主服务 `webhook.deliver` 把 status `< 300`
@@ -73,7 +73,7 @@ body (412 bytes):
 **主服务也跑在 Docker(本机 Mac/Windows Docker Desktop):**
 
 ```bash
-docker network connect llm_orc_compare_default callback-test
+docker network connect llm_ocr_compare_default callback-test
 # 然后 callback_url 用容器名:
 #   http://callback-test:9000/
 ```
@@ -91,7 +91,7 @@ docker network connect llm_orc_compare_default callback-test
 http://localhost:9099/
 ```
 
-> 网络名 `llm_orc_compare_default` 来自 compose 项目名(默认=目录名)。
+> 网络名 `llm_ocr_compare_default` 来自 compose 项目名(默认=目录名)。
 > 若改过项目名,用 `docker network ls | grep default` 找实际网络名。
 
 ## 手动触发一次回调验证

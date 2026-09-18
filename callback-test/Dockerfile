@@ -1,4 +1,4 @@
-# 最小 callback 接收服务:用于验证主服务(llm_orc_compare)的 webhook 回调。
+# 最小 callback 接收服务:用于验证主服务(llm_ocr_compare)的 webhook 回调。
 # 仅用 Python 标准库,无需 pip 安装 → 镜像极小。
 FROM python:3.12-alpine
 

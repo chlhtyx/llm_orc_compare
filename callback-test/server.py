@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """最小 callback 接收服务。
 
-用于验证主服务(`llm_orc_compare`)的 webhook 回调:把收到的每个 POST 报文
+用于验证主服务(`llm_ocr_compare`)的 webhook 回调:把收到的每个 POST 报文
 (请求行、来源、X-Event-Id、JSON body)原样写入日志,便于人工核对;并回 200
 让主服务判定交付成功(主服务对 status < 300 视为成功)。
 
