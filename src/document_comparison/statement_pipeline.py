@@ -44,6 +44,7 @@ from .statement.amount_column import (
     summarize_table,
 )
 from .statement.invoice_layout import looks_like_invoice, parse_invoice_page
+from .statement.invoice_pages import consolidate_invoice_pages
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,15 @@ def _process_one_pdf(
             i: "\n".join(b.content for b in blocks if b.content)
             for i, blocks in enumerate(pages_blocks)
         }
-        invoice_pages = [i for i, t in page_texts.items() if looks_like_invoice(t)]
+        invoice_summaries, consolidated_pages, invoice_diagnostics = consolidate_invoice_pages(
+            page_texts, file_index=file_index, file_name=file_name,
+        )
+        tables_with_page = [(t, p) for t, p in tables_with_page if p not in consolidated_pages]
+        invoice_pages = [
+            i for i, t in page_texts.items()
+            if i not in consolidated_pages and looks_like_invoice(t)
+        ]
+        diagnostics.extend(invoice_diagnostics)
         if invoice_pages:
             tables_with_page = _apply_invoice_layout(
                 pdf_path, tables_with_page, invoice_pages
@@ -191,10 +200,14 @@ def _process_one_pdf(
         # (page_texts 已在上方发票识别时构建,这里复用)
         page_groundings = page_texts
 
-        table_summaries: list[StatementTableSummary] = []
+        table_summaries: list[StatementTableSummary] = invoice_summaries
+        for index, summary in enumerate(table_summaries):
+            summary.table_index = index
+            for item in summary.items:
+                item.table_index = index
         recognition_needs_review = any(not d.reliable for d in diagnostics)
 
-        for table_index, (table, page_index) in enumerate(merged_tables):
+        for table_index, (table, page_index) in enumerate(merged_tables, start=len(table_summaries)):
             summary = _summarize_one_table(
                 table,
                 file_index=file_index,
@@ -221,6 +234,8 @@ def _process_one_pdf(
                 file_name,
             )
             for page_index, page_text in page_groundings.items():
+                if page_index in consolidated_pages:
+                    continue
                 if not page_text or not page_text.strip():
                     continue
                 whole_summary = _extract_whole_page_amounts(
@@ -580,6 +595,12 @@ def _aggregate(file_summaries: list[StatementFileSummary]) -> StatementSummaryRe
         if fs.recognition_status == "needs_review" and verdict == "clean":
             verdict = "needs_review"
             reasons.append(f"文件 {fs.file_name} OCR 质量需复核")
+        for diagnostic in fs.recognition_diagnostics:
+            if not diagnostic.reliable:
+                reasons.extend(
+                    f"文件 {fs.file_name} 第 {diagnostic.page_index + 1} 页：{reason}"
+                    for reason in diagnostic.reasons
+                )
 
     # 完全无金额数据 → needs_review(可能是 OCR 没识别到表格)
     if not has_any_amount and verdict == "clean":

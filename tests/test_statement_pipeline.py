@@ -5,6 +5,8 @@
 """
 from unittest.mock import MagicMock
 
+import pytest
+
 from document_comparison.models import (
     Block,
     PageRecognitionDiagnostic,
@@ -685,3 +687,51 @@ def test_empty_pdf_list_returns_empty_report():
     assert report.total_files == 0
     assert report.grand_total == 0.0
     assert report.files == []
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("file_count", [1, 2])
+def test_multipage_invoice_does_not_sum_repeated_grand_totals(monkeypatch, tmp_path, structured, file_count):
+    """覆盖 OCR 整页兜底与结构化表格两条曾逐页重复相加的路径。"""
+    from document_comparison.models import StatementAmountItem
+    import document_comparison.statement.llm_amount_extract as lae
+
+    pdf_path = _make_real_pdf(tmp_path, num_pages=2)
+    pages = []
+    for i in range(2):
+        block = Block(
+            block_id=f"p{i}", page_index=i,
+            label="table" if structured else "text",
+            content="电子发票\n发票号码：12345678901234567890\n价税合计（小写）￥1130.00",
+            table=TableStructure(headers=["项目", "含税金额"], rows=[["货物", "1130元"]]) if structured else None,
+        )
+        pages.append([block])
+    _patch_get_ocr_engine(monkeypatch, _make_mock_reader(pages))
+    _patch_page_metas(monkeypatch, 2)
+    import document_comparison.statement_pipeline as sp
+    monkeypatch.setattr(sp, "render_page", lambda *args: b"fake-png")
+    extract = MagicMock(return_value=[StatementAmountItem(value=1130, column="价税合计")])
+    monkeypatch.setattr(lae, "llm_extract_amounts", extract)
+
+    report = run_statement_pipeline([pdf_path] * file_count, ["invoice.pdf"] * file_count)
+    assert report.grand_total == 1130 * file_count
+    assert all(f.total_amount == 1130 for f in report.files)
+    assert report.grand_totals_by_column == {"价税合计": 1130 * file_count}
+    assert report.total_items == report.total_tables == file_count
+    assert report.verdict == "clean"
+    extract.assert_not_called()
+
+
+def test_multipage_invoice_conflict_surfaces_review_reason(monkeypatch, tmp_path):
+    pdf_path = _make_real_pdf(tmp_path, num_pages=2)
+    pages = [[Block(
+        block_id=f"p{i}", page_index=i, label="text",
+        content=f"发票号码：12345678901234567890\n价税合计￥{amount}",
+    )] for i, amount in enumerate(["1130.00", "2260.00"])]
+    _patch_get_ocr_engine(monkeypatch, _make_mock_reader(pages))
+    _patch_page_metas(monkeypatch, 2)
+    _disable_render(monkeypatch)
+    report = run_statement_pipeline([pdf_path], ["invoice.pdf"])
+    assert report.grand_total == report.files[0].total_amount == 0
+    assert report.verdict == "needs_review"
+    assert any("价税合计缺失或不一致" in reason for reason in report.reasons)
