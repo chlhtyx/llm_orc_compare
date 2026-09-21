@@ -578,6 +578,50 @@ def test_report_file_downloads_return_uploaded_original_files(client, monkeypatc
     assert "attachment" in target_response.headers["content-disposition"]
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_statement_attachment_download_by_index(client, monkeypatch, tmp_path, legacy):
+    """同名多附件按序号下载；进程内任务清空后仍可下载历史原件。"""
+    from urllib.parse import unquote
+    from document_comparison.api.app import task_manager
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    settings.ensure_dirs()
+    task_id = task_manager.create(
+        "statement", target_names=["发票.pdf", r"C:\上传\发票.pdf"],
+    )
+    directory = settings.uploads_dir if legacy else settings.uploads_dir / task_id
+    directory.mkdir(exist_ok=True)
+    prefix = f"{task_id}-" if legacy else ""
+    for index in (0, 1, 10):
+        (directory / f"{prefix}target-{index}.pdf").write_bytes(f"original-{index}".encode())
+    task_manager._tasks.clear()
+
+    for index in (0, 1):
+        response = client.get(f"/api/v1/statement/{task_id}/files/{index}/download")
+        assert response.status_code == 200
+        assert response.content == f"original-{index}".encode()
+        assert response.headers["content-type"] == "application/pdf"
+        assert unquote(response.headers["content-disposition"]) == "attachment; filename*=UTF-8''发票.pdf"
+
+    for index in (-1, 2, 10):
+        assert client.get(f"/api/v1/statement/{task_id}/files/{index}/download").status_code == 404
+    # 缺失的 1 号不能错误匹配 10 号或其它文件。
+    (directory / f"{prefix}target-1.pdf").unlink()
+    response = client.get(f"/api/v1/statement/{task_id}/files/1/download")
+    assert response.status_code == 404
+    assert "已过期或被清理" in response.json()["message"]
+
+
+def test_statement_attachment_download_task_and_auth_checks(client, monkeypatch):
+    from document_comparison.api.app import task_manager
+
+    task_id = task_manager.create("compare", target_names=["contract.pdf"])
+    for invalid_id in ("missing-task", task_id):
+        assert client.get(f"/api/v1/statement/{invalid_id}/files/0/download").status_code == 404
+    monkeypatch.setattr(settings, "console_password", "test-download-password")
+    assert client.get(f"/api/v1/statement/{task_id}/files/0/download").status_code == 401
+
+
 def test_compare_rejects_nonpositive_original_page_count(client):
     """original_page_count 必须 >= 1(0 / 负数返回 400)。"""
     import io

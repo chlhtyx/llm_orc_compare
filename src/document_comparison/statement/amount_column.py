@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from decimal import Decimal
 from typing import Literal
 
@@ -103,7 +104,11 @@ def extract_amounts_from_cell(cell_text: str) -> list[tuple[str, float]]:
     """
     if not cell_text:
         return []
-    spans = _elements._fact_spans(cell_text)
+    text = unicodedata.normalize("NFKC", cell_text).replace("−", "-")
+    # 通用事实扫描器只抽取无符号金额。金额统计在此保留紧邻金额的负号，
+    # 并把 ¥-100 统一为 -¥100，使带货币符号、无「元」的负数也能被扫描。
+    text = re.sub(r"([¥￥])\s*([+-])\s*(?=\d)", r"\2\1", text)
+    spans = _elements._fact_spans(text)
     out: list[tuple[str, float]] = []
     for span in spans:
         if span.kind != "amount":
@@ -113,7 +118,11 @@ def extract_amounts_from_cell(cell_text: str) -> list[tuple[str, float]]:
         if not canonical.startswith("CNY:"):
             continue
         try:
-            value = float(Decimal(canonical[len("CNY:"):]))
+            amount = Decimal(canonical[len("CNY:"):])
+            if re.search(r"(?<![0-9A-Za-z.])-\s*$", text[:span.start]):
+                amount = -abs(amount)
+                canonical = f"CNY:{_elements._decimal_text(amount)}"
+            value = float(amount)
         except Exception:  # noqa: BLE001
             continue
         out.append((canonical, value))
@@ -193,8 +202,9 @@ def summarize_table(
             canonical, value = amounts[0]
             if is_total:
                 # 合计行金额 → declared_totals(用最大值,避免多金额重复)
-                prev = declared_totals.get(col_name, Decimal("0"))
-                declared_totals[col_name] = max(prev, Decimal(str(value)))
+                amount = Decimal(str(value))
+                prev = declared_totals.get(col_name)
+                declared_totals[col_name] = amount if prev is None else max(prev, amount)
             else:
                 key = col_name
                 column_sums[key] = column_sums.get(key, Decimal("0")) + Decimal(str(value))

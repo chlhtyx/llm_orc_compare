@@ -402,7 +402,7 @@ function paramEntries(params: Record<string, unknown> | null): Array<[string, st
       ? '—'
       : typeof value === 'string'
         ? value
-        : JSON.stringify(value),
+        : JSON.stringify(value, null, 2),
   ])
 }
 
@@ -684,7 +684,7 @@ onMounted(refresh)
                               class="ext-param"
                             >
                               <span class="muted">{{ key }}</span>
-                              <span class="mono">{{ val }}</span>
+                              <span class="mono ext-param-value">{{ val }}</span>
                             </span>
                           </div>
                         </li>
@@ -1122,8 +1122,15 @@ table.task-table {
   padding: 0 12px 6px;
 }
 .ext-param {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+.ext-param-value {
+  white-space: pre-wrap;
 }
 .llm-block-title {
   margin-bottom: 4px;

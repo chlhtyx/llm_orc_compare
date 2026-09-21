@@ -3,6 +3,9 @@
 用伪造的 page 对象(模拟 pymupdf page.get_text("dict") 结构 + 真实发票坐标)
 测试 invoice_layout 的确定性解析逻辑,不依赖真实 PDF 文件,不发起任何网络/LLM 调用。
 """
+import pytest
+
+from document_comparison.statement.amount_column import summarize_table
 from document_comparison.statement.invoice_layout import (
     _normalize_money_cell,
     looks_like_invoice,
@@ -221,3 +224,73 @@ def test_normalize_money_cell_text_unchanged():
     """非纯数字文本不变(如商品名)。"""
     assert _normalize_money_cell("详见包装") == "详见包装"
     assert _normalize_money_cell("") == ""
+
+
+@pytest.mark.parametrize("raw", ["-127913.87", "−127913.87", "－127913.87", "- 127913.87"])
+def test_normalize_negative_money_cell(raw):
+    assert _normalize_money_cell(raw) == "-127913.87元"
+
+
+def test_invoice_discount_amount_and_tax_are_deducted():
+    # 使用反馈截图的六行金额；坐标为合成数据，不依赖真实发票文件。
+    amounts = ["74690.27", "50442.47", "673685.92", "55752.21", "819960.18", "-127913.87"]
+    taxes = ["9709.73", "6557.53", "87579.18", "7247.79", "106594.82", "-16628.80"]
+    spans = [
+        _positioned_span("项目名称", 10, 100),
+        _positioned_span("金额", 210, 100),
+        _positioned_span("税额", 310, 100),
+    ]
+    for i, (amount, tax) in enumerate(zip(amounts, taxes)):
+        y = 120 + i * 20
+        spans.extend([
+            _positioned_span(f"商品{i}", 10, y),
+            _positioned_span(amount, 210, y),
+            _positioned_span(tax, 310, y),
+        ])
+    spans.extend([
+        _positioned_span("合计", 10, 250),
+        _positioned_span("¥1546617.18", 210, 250),
+        _positioned_span("¥201060.25", 310, 250),
+        _positioned_span("价税合计（大写）", 10, 270),
+        _positioned_span("¥1747677.43", 310, 270),
+    ])
+    table, total = parse_invoice_page(_FakePage(spans))
+    summary = summarize_table(table, file_index=0, file_name="synthetic.pdf", table_index=0, page_index=0)
+    assert len(table.rows) == 6
+    assert len(summary.items) == 12
+    assert [item.value for item in summary.items if item.value < 0] == [-127913.87, -16628.80]
+    assert summary.column_sums == {"金额": 1546617.18, "税额": 201060.25}
+    assert summary.tax_inclusive_total == total == 1747677.43
+
+
+# 合成票据:货币符号与数字分片时不重复计入合计行。
+def _positioned_span(text, x, y, width=30):
+    return {"text": text, "bbox": (x, y, x + width, y + 10)}
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("offset", [-0.3, 0.3])
+def test_total_row_is_excluded_with_split_currency_spans(split, offset):
+    spans = [
+        _positioned_span("项目名称", 10, 100), _positioned_span("金额", 210, 100),
+        _positioned_span("税额", 310, 100),
+        _positioned_span("商品A", 10, 120), _positioned_span("100.00", 210, 120),
+        _positioned_span("13.00", 310, 120),
+        _positioned_span("商品B", 10, 140), _positioned_span("200.00", 210, 140),
+        _positioned_span("26.00", 310, 140),
+        _positioned_span("合", 10, 183), _positioned_span("计", 50, 183),
+        _positioned_span("价税合计（大写）", 10, 203),
+        _positioned_span("（小写）", 250, 203),
+    ]
+    for amount, x, y in [("300.00", 205, 180), ("39.00", 305, 180), ("339.00", 305, 200)]:
+        if split:
+            spans.extend([_positioned_span("¥", x, y, 5), _positioned_span(amount, x + 5, y + offset)])
+        else:
+            spans.append(_positioned_span("¥" + amount, x, y, 35))
+    table, grand_total = parse_invoice_page(_FakePage(spans))
+    assert table is not None
+    assert len(table.rows) == 2
+    summary = summarize_table(table, file_index=0, file_name="invoice.pdf", table_index=0, page_index=0)
+    assert summary.column_sums == {"金额": 300.0, "税额": 39.0}
+    assert summary.tax_inclusive_total == 339.0
+    assert grand_total == 339.0

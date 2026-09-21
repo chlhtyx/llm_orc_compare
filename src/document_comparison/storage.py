@@ -164,15 +164,28 @@ def _task_upload_dir(task_id: str) -> Path:
     return settings.uploads_dir / task_id
 
 
-def upload_path(task_id: str, role: str) -> Path | None:
+def upload_path(task_id: str, role: str, index: int | None = None) -> Path | None:
     """查找已上传文件路径。role ∈ {source, target}。
 
     优先在归集目录 uploads/{task_id}/ 内匹配(单文件 `{role}{suffix}` 优先于
     对帐单多文件的 `{role}-{index}{suffix}`);目录不存在或未命中时,回退扫描
     uploads/ 平铺的旧命名 `{task_id}-{role}*`,历史任务数据无需迁移。
+    index 非 None 时仅匹配该序号的原始附件,不会回退到其它序号。
     返回匹配的第一个文件,不存在时返回 None。
     """
     task_dir = _task_upload_dir(task_id)
+    if index is not None:
+        if index < 0:
+            return None
+        for directory, prefix in (
+            (task_dir, f"{role}-{index}."),
+            (settings.uploads_dir, f"{task_id}-{role}-{index}."),
+        ):
+            if directory.is_dir():
+                for path in sorted(directory.iterdir()):
+                    if path.is_file() and path.name.startswith(prefix):
+                        return path
+        return None
     if task_dir.is_dir():
         files = [f for f in task_dir.iterdir() if f.is_file()]
         for f in sorted(files):

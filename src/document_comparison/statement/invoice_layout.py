@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Any
 
 from ..models import TableStructure
@@ -156,8 +157,12 @@ def _find_total_row_y(spans: list[dict], header_y: float) -> float:
         s["y0"] for s in spans
         if "¥" in s["text"] and s["y0"] > header_y + 20
     ]
-    # 取明细区附近的 ¥ 行(最小的 y0,即紧贴明细区下方的合计行)
-    return min(candidates) if candidates else float("inf")
+    if not candidates:
+        return float("inf")
+    # ¥ 与数字可能由不同字体生成独立 span,数字 y0 会略高于 ¥。
+    # 边界取整条视觉行的最上沿,否则数字会落入明细区而把合计重复累加。
+    total_y = min(candidates)
+    return min(s["y0"] for s in spans if abs(s["y0"] - total_y) < _Y_ROW_TOL)
 
 
 def _extract_detail_rows(
@@ -250,12 +255,12 @@ def _normalize_money_cell(cell: str) -> str:
     """
     if not cell:
         return cell
-    s = cell.strip()
+    s = unicodedata.normalize("NFKC", cell).strip().replace("−", "-")
     if "¥" in s or "元" in s:
         return s
-    # 纯数字(可含千分位/小数)→ 补「元」
-    if re.fullmatch(r"[\d,]+\.\d+|[\d,]+", s):
-        return s + "元"
+    # 含折扣/红字负数；符号和数字之间可能存在 PDF 排版空格。
+    if re.fullmatch(r"[+-]?\s*[\d,]+(?:\.\d+)?", s):
+        return re.sub(r"\s+", "", s) + "元"
     return s
 
 
@@ -271,6 +276,18 @@ def _extract_grand_total(spans: list[dict], header_y: float) -> float | None:
     candidates.sort(key=lambda s: s["y0"])
     last = candidates[-1]
     cleaned = last["text"].replace("¥", "").replace(",", "").strip()
+    if not cleaned:
+        # 同一金额的货币符号和数字可能分片;仅拼接同行且紧邻右侧的数字,
+        # 不从全页搜索金额,避免误取其它列或其它行的数值。
+        adjacent = [
+            s for s in spans
+            if abs(s["y0"] - last["y0"]) < _Y_ROW_TOL
+            and -0.5 <= s["x0"] - last["x1"] <= 5.0
+            and re.fullmatch(r"[+-]?[\d,]+(?:\.\d+)?", s["text"].strip())
+        ]
+        if len(adjacent) != 1:
+            return None
+        cleaned = adjacent[0]["text"].replace(",", "").strip()
     try:
         return float(cleaned)
     except ValueError:

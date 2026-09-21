@@ -2,6 +2,8 @@
 
 不依赖 OCR / LLM;覆盖 statement.amount_column 的确定性逻辑。
 """
+import pytest
+
 from document_comparison.models import TableStructure
 from document_comparison.statement.amount_column import (
     detect_amount_columns,
@@ -134,6 +136,31 @@ def test_extract_amounts_multiple():
     out = extract_amounts_from_cell("原币100元 本币700元")
     assert len(out) == 2
     assert out[0][1] == 100.0
+
+
+@pytest.mark.parametrize("cell", [
+    "-127,913.87元", "−127913.87元", "－127913.87元", "- 127913.87元",
+    "¥-127913.87", "￥ -127913.87", "-¥127913.87", "- ￥127913.87",
+    "折扣金额：-127913.87元",
+])
+def test_extract_negative_amounts(cell):
+    assert extract_amounts_from_cell(cell) == [("CNY:-127913.87", -127913.87)]
+
+
+def test_extract_negative_wan_and_mixed_amounts():
+    assert extract_amounts_from_cell("-3万元") == [("CNY:-30000", -30000.0)]
+    assert extract_amounts_from_cell("原价100元 折扣-10元") == [("CNY:100", 100.0), ("CNY:-10", -10.0)]
+
+
+def test_negative_declared_total_is_preserved():
+    table = TableStructure(headers=["项目", "金额", "税额"], rows=[
+        ["红字商品", "-100元", "-13元"],
+        ["合计", "-100元", "-13元"],
+    ])
+    summary = summarize_table(table, file_index=0, file_name="red.pdf", table_index=0, page_index=0)
+    assert summary.tax_inclusive_total == -113.0
+    assert summary.declared_totals == {"金额": -100.0, "税额": -13.0}
+    assert summary.totals_match == {"金额": True, "税额": True}
 
 
 # —— is_total_row ——

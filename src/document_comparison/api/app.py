@@ -239,6 +239,17 @@ def _sanitize_audit_params(params: Any) -> dict[str, Any] | None:
     if not isinstance(params, dict):
         return None
 
+    # multipart 的 JSON URL 数组可能是一个字符串(预读)或单元素列表(端点)。
+    # 先拆成逐条 URL,避免把整个数组当作单个字符串在 512 字符处截断。
+    params = dict(params)
+    target_urls = params.get("target_urls")
+    values = [target_urls] if isinstance(target_urls, str) else target_urls
+    if isinstance(values, list) and all(isinstance(item, str) for item in values):
+        try:
+            params["target_urls"] = _normalize_target_urls(values)
+        except ValueError:
+            pass  # 非法 JSON 仍保留原始参数,供失败请求排查。
+
     def _short(value: Any) -> Any:
         if isinstance(value, str) and len(value) > _AUDIT_PARAM_MAX_STR:
             return value[:_AUDIT_PARAM_MAX_STR] + "…(truncated)"
@@ -2707,6 +2718,23 @@ def create_app() -> FastAPI:
             yield f"event: done\ndata: {json.dumps({'status': status}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/api/v1/statement/{task_id}/files/{file_index}/download")
+    async def statement_download_attachment(task_id: str, file_index: int):
+        """按报告中的零基文件序号下载原始 PDF，兼容历史任务与多 worker。"""
+        record = await asyncio.to_thread(db_repo.get_task, task_id)
+        if record is None or record.kind != "statement":
+            raise HTTPException(404, "statement task not found")
+        names = record.target_names or []
+        if file_index < 0 or file_index >= len(names):
+            raise HTTPException(404, "附件不存在")
+        path = upload_path(task_id, "target", index=file_index)
+        if path is None:
+            raise HTTPException(404, "原始附件已过期或被清理,无法下载")
+        filename = Path((names[file_index] or "").replace("\\", "/")).name
+        return _attachment_file_response(
+            path, "application/pdf", filename or f"target-{file_index}.pdf",
+        )
 
     @app.get("/api/v1/statement/{task_id}/report")
     async def statement_download_report(task_id: str):

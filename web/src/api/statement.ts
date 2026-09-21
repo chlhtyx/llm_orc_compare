@@ -7,7 +7,7 @@ import type {
   StatementTaskInfo,
   TaskStatus,
 } from './types'
-import { ApiError, openEventStream, request } from './client'
+import { ApiError, apiUrl, openEventStream, request } from './client'
 
 export { ApiError }
 
@@ -31,6 +31,11 @@ export function submitStatement(
 
 export function getStatementTask(taskId: string): Promise<StatementTaskInfo> {
   return request(`/api/v1/statement/${encodeURIComponent(taskId)}`)
+}
+
+/** 下载报告中指定文件的原始 PDF，fileIndex 为零基序号。 */
+export function statementAttachmentUrl(taskId: string, fileIndex: number): string {
+  return apiUrl(`/api/v1/statement/${encodeURIComponent(taskId)}/files/${fileIndex}/download`)
 }
 
 /** 金额统计 API 管线测试的对外任务状态（不发送真实回调）。 */

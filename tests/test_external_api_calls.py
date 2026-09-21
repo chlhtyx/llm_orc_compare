@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import time
 
 import pymupdf
@@ -19,6 +20,69 @@ from document_comparison.config import settings
 from document_comparison.db import repository as db_repo
 from document_comparison.external_api import render_external_highlight_images
 from document_comparison.models import Diff, DiffSegment, PageMeta, PageRegion, TamperReport
+
+
+@pytest.mark.parametrize("encoding", ["json", "wrapped-json", "repeated"])
+def test_audit_preserves_many_target_urls(encoding):
+    from document_comparison.api.app import _sanitize_audit_params
+
+    urls = [f"https://files.example.test/invoice-{index:03d}.pdf" for index in range(30)]
+    raw = json.dumps(urls)
+    assert len(raw) > 512
+    value = raw if encoding == "json" else [raw] if encoding == "wrapped-json" else urls
+    params = {"target_urls": value, "token": "private", "document_no": "x" * 600}
+    saved = _sanitize_audit_params(params)
+    assert saved["target_urls"] == urls
+    assert saved["token"] == "***"
+    assert saved["document_no"] == "x" * 512 + "…(truncated)"
+    assert params["target_urls"] == value
+
+
+def test_audit_target_urls_retains_per_url_limit_and_invalid_input():
+    from document_comparison.api.app import _sanitize_audit_params
+
+    long_url = "https://files.example.test/" + "a" * 600 + ".pdf"
+    last_url = "https://files.example.test/last.pdf"
+    saved = _sanitize_audit_params({"target_urls": [json.dumps([long_url, last_url])]})
+    assert saved["target_urls"] == [long_url[:512] + "…(truncated)", last_url]
+    for value in ('["broken', '[1, 2]', ["[invalid"], None):
+        assert _sanitize_audit_params({"target_urls": value}) == {"target_urls": value}
+
+
+@pytest.mark.parametrize("status", [202, 400, 401, 422])
+@pytest.mark.parametrize("encoding", ["json", "repeated"])
+def test_amount_audit_many_urls(external_client, monkeypatch, tmp_path, status, encoding):
+    import importlib
+    from document_comparison.api.app import task_manager
+
+    async def fake_download(url, *, max_bytes, role):
+        path = tmp_path / f"{role}.pdf"
+        path.write_bytes(_pdf_bytes().getvalue())
+        return path, path.name
+
+    async def no_run(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(importlib.import_module("document_comparison.api.app"), "download_to_upload", fake_download)
+    monkeypatch.setattr(task_manager, "run_statement", no_run)
+    urls = [f"https://files.example.test/invoice-{index:03d}.pdf" for index in range(30)]
+    values = [json.dumps(urls)] if encoding == "json" else urls
+    fields = [("target_urls", (None, value)) for value in values]
+    if status != 422:
+        fields.append(("document_no", (None, "AUDIT-MANY-URLS")))
+    if status == 202:
+        fields.append(("callback_url", (None, "https://example.test/callback")))
+    response = external_client.post(
+        "/api/v1/external/amountStat",
+        headers={"X-API-Key": "invalid" if status == 401 else "external-test-key"},
+        files=fields,
+    )
+    # 400 是端点内 callback_url 校验失败,401/422 是端点执行前拦截。
+    assert response.status_code == status, response.json()
+    request_id = response.headers["X-Request-Id"]
+    _wait_for_call_count(lambda: any(c.request_id == request_id for c in _all_calls()))
+    saved = next(c for c in _all_calls() if c.request_id == request_id)
+    assert saved.request_params["target_urls"] == urls
 
 
 def _docx_bytes() -> io.BytesIO:
@@ -160,6 +224,7 @@ def test_submit_success_records_audit_with_task_and_document(external_client, mo
         "target_url": None,
         "document_no": "BILL-AUDIT-1",
         "original_page_count": None,
+        "target_body_end_page": None,
         "callback_url": "http://internal/callback",
         "sync": False,
     }

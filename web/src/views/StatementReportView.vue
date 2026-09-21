@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import LlmCallList from '@/components/LlmCallList.vue'
 import { getTaskLlmCalls, type LlmCallItem } from '@/api/history'
-import { ApiError } from '@/api/statement'
+import { ApiError, statementAttachmentUrl } from '@/api/statement'
 import { useStatementTaskStore } from '@/stores/statementTask'
 import type {
   ChangeVerdict,
@@ -234,6 +234,11 @@ function tableSourceBadge(source: string | undefined): string {
               class="badge badge-none"
             >OCR 待复核</span>
             <span v-else class="badge badge-heuristic">识别可靠</span>
+            <a
+              class="btn"
+              :href="statementAttachmentUrl(taskId, f.file_index)"
+              :aria-label="`下载原始附件：${f.file_name || `文件 ${f.file_index + 1}`}`"
+            >下载原始附件</a>
           </div>
         </header>
 
@@ -515,6 +520,7 @@ code {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .file-idx {
   font-size: 12px;
@@ -522,6 +528,7 @@ code {
 }
 .file-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
 }
