@@ -307,6 +307,36 @@ def test_summarize_table_tax_inclusive_case2_amount_plus_tax():
     assert s.tax_inclusive_method == "金额(不含税)列 + 税额列"
 
 
+def test_summarize_table_missing_tax_value_has_no_usable_total():
+    """税额列存在但未抽到数值时,不能默认为 0 后返回不含税金额。"""
+    table = TableStructure(
+        headers=["项目", "金额", "税额"],
+        rows=[["A", "100元", "无法识别"]],
+    )
+    s = summarize_table(
+        table, file_index=0, file_name="x.pdf",
+        table_index=0, page_index=0,
+    )
+    assert s.column_sums == {"金额": 100.0}
+    assert s.tax_inclusive_method == ""
+    assert s.tax_inclusive_total == 0.0
+
+
+def test_summarize_table_explicit_zero_tax_is_valid():
+    """明确识别到 0 元税额时,可与不含税金额相加。"""
+    table = TableStructure(
+        headers=["项目", "金额", "税额"],
+        rows=[["A", "100元", "0元"]],
+    )
+    s = summarize_table(
+        table, file_index=0, file_name="x.pdf",
+        table_index=0, page_index=0,
+    )
+    assert s.column_sums == {"金额": 100.0, "税额": 0.0}
+    assert s.tax_inclusive_total == 100.0
+    assert s.tax_inclusive_method == "金额(不含税)列 + 税额列"
+
+
 def test_summarize_table_tax_inclusive_case3_amount_only():
     """Case 3:只有金额列,无任何税相关列 → 照旧求和(语义上视作含税)。"""
     table = TableStructure(

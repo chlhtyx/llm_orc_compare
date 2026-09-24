@@ -247,16 +247,18 @@ def summarize_table(
     amount_cols = cols_by_role.get("amount", [])
     tax_cols = cols_by_role.get("tax", [])
 
-    if tax_incl_cols:
+    if any(col in column_sums for col in tax_incl_cols):
         # Case 1:有含税/价税合计列 → 只用它,排除 amount/tax(防重复计入)
         tax_inclusive_total = _sum_cols(tax_incl_cols)
         tax_inclusive_method = "含税/价税合计列"
-    elif amount_cols and tax_cols:
-        # Case 2:无含税列,但有金额(不含税)+税额 → 跨列相加(新增确定性算术)
+    elif any(col in column_sums for col in amount_cols) and any(
+        col in column_sums for col in tax_cols
+    ):
+        # Case 2:金额(不含税)和税额都确实抽到 → 跨列相加
         tax_inclusive_total = _sum_cols(amount_cols) + _sum_cols(tax_cols)
         tax_inclusive_method = "金额(不含税)列 + 税额列"
-    elif amount_cols:
-        # Case 3:只有金额列,无任何税相关列 → 照旧求和(语义上视作含税)
+    elif amount_cols and not tax_cols and any(col in column_sums for col in amount_cols):
+        # Case 3:只有金额列,无税额列 → 照旧求和(语义上视作含税)
         tax_inclusive_total = _sum_cols(amount_cols)
         tax_inclusive_method = "金额列"
     # 否则(只有 paid/unpaid/total 列)→ 含税合计为 0,口径为空(调用方/前端据此标 needs_review 或略过)

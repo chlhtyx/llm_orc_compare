@@ -212,8 +212,8 @@ def test_non_invoice_not_dispatched_to_layout(monkeypatch, tmp_path):
     assert report.files[0].tables[0].tax_inclusive_method == "金额列"
 
 
-def test_heuristic_failure_no_llm_flag_marks_needs_review(monkeypatch, tmp_path):
-    """启发式失败 + 关闭 LLM 兜底 → column_source="none",verdict=needs_review。"""
+def test_heuristic_failure_no_llm_flag_raises(monkeypatch, tmp_path):
+    """启发式失败 + 关闭 LLM 兜底 → 明确报错。"""
     pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
     block = _make_table_block(
         headers=["日期", "项目", "备注"],  # 无金额列关键词
@@ -225,13 +225,10 @@ def test_heuristic_failure_no_llm_flag_marks_needs_review(monkeypatch, tmp_path)
     _patch_page_metas(monkeypatch, 1)
     _disable_render(monkeypatch)
 
-    report = run_statement_pipeline(
-        [pdf_path], ["a.pdf"],
-        enable_llm_column_detection=False,
-    )
-    assert report.verdict == "needs_review"
-    assert report.column_detection_summary.get("none", 0) >= 1
-    assert report.grand_total == 0.0
+    with pytest.raises(RuntimeError, match="未识别到可核验的金额数据"):
+        run_statement_pipeline(
+            [pdf_path], ["a.pdf"], enable_llm_column_detection=False,
+        )
 
 
 def test_cross_page_tables_merged(monkeypatch, tmp_path):
@@ -349,8 +346,8 @@ def test_multi_files_aggregation(monkeypatch, tmp_path):
     assert report.files[1].total_amount == 70000.0
 
 
-def test_single_file_failure_others_continue(monkeypatch, tmp_path):
-    """单文件失败(模拟 OCR 异常)→ 其他文件继续,verdict=needs_review,error 有值。"""
+def test_single_file_failure_raises_instead_of_partial_total(monkeypatch, tmp_path):
+    """任一文件 OCR 失败时,不能把该文件当 0 汇入成功结果。"""
     pdf1 = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
     pdf2 = _make_real_pdf(tmp_path, "b.pdf", num_pages=1)
     block2 = _make_table_block(
@@ -369,19 +366,12 @@ def test_single_file_failure_others_continue(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
     _disable_render(monkeypatch)
 
-    report = run_statement_pipeline([pdf1, pdf2], ["a.pdf", "b.pdf"])
-    assert report.total_files == 2
-    assert report.files[0].error is not None
-    assert "OCR" in report.files[0].error or "不可用" in report.files[0].error
-    assert report.files[1].error is None
-    assert report.files[1].total_amount == 70000.0
-    assert report.grand_total == 70000.0  # 只算成功的
-    assert report.verdict == "needs_review"
-    assert any("失败" in r for r in report.reasons)
+    with pytest.raises(RuntimeError, match="OCR 服务不可用"):
+        run_statement_pipeline([pdf1, pdf2], ["a.pdf", "b.pdf"])
 
 
-def test_no_amount_data_marks_needs_review(monkeypatch, tmp_path):
-    """完全无金额数据 → needs_review。"""
+def test_no_amount_data_raises(monkeypatch, tmp_path):
+    """完全无金额数据 → 异常,不能返回 0。"""
     pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
     block = _make_table_block(
         headers=["日期", "项目", "备注"],  # 无金额列,且 LLM 兜底关闭
@@ -393,12 +383,44 @@ def test_no_amount_data_marks_needs_review(monkeypatch, tmp_path):
     _patch_page_metas(monkeypatch, 1)
     _disable_render(monkeypatch)
 
-    report = run_statement_pipeline(
-        [pdf_path], ["a.pdf"],
-        enable_llm_column_detection=False,
-    )
-    assert report.verdict == "needs_review"
-    assert report.grand_total == 0.0
+    with pytest.raises(RuntimeError, match="未识别到可核验的金额数据"):
+        run_statement_pipeline(
+            [pdf_path], ["a.pdf"], enable_llm_column_detection=False,
+        )
+
+
+def test_only_paid_column_does_not_return_zero(monkeypatch, tmp_path):
+    """已付金额虽能抽到数字,却没有含税金额口径；核对失败后必须报错。"""
+    import document_comparison.statement_pipeline as sp
+    import document_comparison.statement.llm_column_detect as lcd
+    import document_comparison.statement.llm_amount_extract as lae
+
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf")
+    block = _make_table_block(["项目", "已付金额"], [["A", "100元"]])
+    block.content = "项目 已付金额\nA 100元"
+    _patch_get_ocr_engine(monkeypatch, _make_mock_reader([[block]]))
+    _patch_page_metas(monkeypatch, 1)
+    monkeypatch.setattr(sp, "render_page", lambda *a: b"fake-png")
+    monkeypatch.setattr(lcd, "llm_detect_amount_columns", lambda *a, **k: None)
+    extract = MagicMock(return_value=[])
+    monkeypatch.setattr(lae, "llm_extract_amounts", extract)
+
+    with pytest.raises(RuntimeError, match="未识别到可核验的金额数据"):
+        run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert extract.call_count == 2  # 表格抽取 + 整页图片核对
+
+
+def test_explicit_zero_amount_is_valid(monkeypatch, tmp_path):
+    """明确识别到的 0 元是有效数据,不能仅凭合计为 0 报错。"""
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf")
+    block = _make_table_block(["项目", "金额"], [["A", "0元"]])
+    _patch_get_ocr_engine(monkeypatch, _make_mock_reader([[block]]))
+    _patch_page_metas(monkeypatch, 1)
+    _disable_render(monkeypatch)
+
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert report.grand_total == 0
+    assert report.files[0].tables[0].column_sums == {"金额": 0.0}
 
 
 def test_recognition_unreliable_marks_needs_review(monkeypatch, tmp_path):
@@ -459,8 +481,8 @@ def test_llm_fallback_picks_up_columns(monkeypatch, tmp_path):
     assert report.column_detection_summary.get("heuristic", 0) == 0
 
 
-def test_llm_fallback_failure_marks_needs_review(monkeypatch, tmp_path):
-    """启发式失败 + LLM 也失败 → column_source="none",verdict=needs_review。"""
+def test_llm_fallback_failure_raises(monkeypatch, tmp_path):
+    """启发式、表格 LLM 和整页核对均失败 → 抛出异常。"""
     pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
     block = _make_table_block(
         headers=["日期", "Money"],
@@ -485,9 +507,8 @@ def test_llm_fallback_failure_marks_needs_review(monkeypatch, tmp_path):
         lae, "llm_extract_amounts", lambda *a, **k: None,
     )
 
-    report = run_statement_pipeline([pdf_path], ["a.pdf"])
-    assert report.verdict == "needs_review"
-    assert report.column_detection_summary.get("none", 0) >= 1
+    with pytest.raises(RuntimeError, match="未识别到可核验的金额数据"):
+        run_statement_pipeline([pdf_path], ["a.pdf"])
 
 
 # —— 第三级:LLM 金额抽取(发票纯数字场景)——
@@ -584,7 +605,7 @@ def test_invoice_realistic_header_amount_plain_digits(monkeypatch, tmp_path):
 
 
 def test_invoice_amount_extraction_all_fail(monkeypatch, tmp_path):
-    """正则 + 列指认 + 第三级 LLM 金额抽取全失败 → needs_review。"""
+    """正则、列指认、表格抽取和整页核对全失败 → 异常。"""
     pdf_path = _make_real_pdf(tmp_path, "a.pdf", num_pages=1)
     block = _make_table_block(
         headers=["日期", "Money"],
@@ -605,10 +626,8 @@ def test_invoice_amount_extraction_all_fail(monkeypatch, tmp_path):
     import document_comparison.statement.llm_amount_extract as lae
     monkeypatch.setattr(lae, "llm_extract_amounts", lambda *a, **k: None)
 
-    report = run_statement_pipeline([pdf_path], ["a.pdf"])
-    assert report.grand_total == 0.0
-    assert report.verdict == "needs_review"
-    assert report.column_detection_summary.get("none", 0) >= 1
+    with pytest.raises(RuntimeError, match="未识别到可核验的金额数据"):
+        run_statement_pipeline([pdf_path], ["a.pdf"])
 
 
 def test_whole_page_fallback_when_no_table_block(monkeypatch, tmp_path):
@@ -651,6 +670,57 @@ def test_whole_page_fallback_when_no_table_block(monkeypatch, tmp_path):
     assert report.column_detection_summary.get("llm") == 1
 
 
+def test_whole_page_verification_after_table_extraction_fails(monkeypatch, tmp_path):
+    """即使有结构化表格,表格抽空后也要以整页图片核对。"""
+    import document_comparison.statement_pipeline as sp
+    import document_comparison.statement.llm_column_detect as lcd
+    import document_comparison.statement.llm_amount_extract as lae
+    from document_comparison.models import StatementAmountItem
+
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf")
+    block = _make_table_block(["日期", "Money"], [["2024", "1680.00"]])
+    block.content = "日期 Money\n2024 1680.00"
+    _patch_get_ocr_engine(monkeypatch, _make_mock_reader([[block]]))
+    _patch_page_metas(monkeypatch, 1)
+    monkeypatch.setattr(sp, "render_page", lambda *a: b"fake-png")
+    monkeypatch.setattr(lcd, "llm_detect_amount_columns", lambda *a, **k: None)
+    calls = []
+
+    def extract(png, headers, rows, grounding, **kwargs):
+        calls.append(headers)
+        if headers != ["全文"]:
+            return []
+        assert png == b"fake-png" and "1680.00" in grounding
+        return [StatementAmountItem(value=1680.0, canonical="CNY:1680", column="金额(llm)")]
+
+    monkeypatch.setattr(lae, "llm_extract_amounts", extract)
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert calls == [["日期", "Money"], ["全文"]]
+    assert report.grand_total == 1680.0
+
+
+def test_whole_page_verification_rereads_empty_ocr_text(monkeypatch, tmp_path):
+    """初次 OCR 未产出文本时,先用多模态 OCR 重读以获得溯源文本。"""
+    import document_comparison.statement_pipeline as sp
+    import document_comparison.statement.llm_amount_extract as lae
+    from document_comparison.models import StatementAmountItem
+    from document_comparison.ocr.llm import LLMOCREngine
+
+    pdf_path = _make_real_pdf(tmp_path, "a.pdf")
+    _patch_get_ocr_engine(monkeypatch, _make_mock_reader([[]]))
+    _patch_page_metas(monkeypatch, 1)
+    monkeypatch.setattr(sp, "render_page", lambda *a: b"fake-png")
+    monkeypatch.setattr(LLMOCREngine, "recognize_text", lambda self, png: "价税合计 1680.00")
+
+    def extract(png, headers, rows, grounding, **kwargs):
+        assert grounding == "价税合计 1680.00"
+        return [StatementAmountItem(value=1680.0, canonical="CNY:1680", column="金额(llm)")]
+
+    monkeypatch.setattr(lae, "llm_extract_amounts", extract)
+    report = run_statement_pipeline([pdf_path], ["a.pdf"])
+    assert report.grand_total == 1680.0
+
+
 # —— 进度回调 ——
 
 def test_progress_callback_invoked(monkeypatch, tmp_path):
@@ -682,11 +752,9 @@ def test_progress_callback_invoked(monkeypatch, tmp_path):
 
 # —— 空输入 ——
 
-def test_empty_pdf_list_returns_empty_report():
-    report = run_statement_pipeline([], [])
-    assert report.total_files == 0
-    assert report.grand_total == 0.0
-    assert report.files == []
+def test_empty_pdf_list_raises():
+    with pytest.raises(ValueError, match="未提供金额统计文件"):
+        run_statement_pipeline([], [])
 
 
 @pytest.mark.parametrize("structured", [False, True])
@@ -731,7 +799,5 @@ def test_multipage_invoice_conflict_surfaces_review_reason(monkeypatch, tmp_path
     _patch_get_ocr_engine(monkeypatch, _make_mock_reader(pages))
     _patch_page_metas(monkeypatch, 2)
     _disable_render(monkeypatch)
-    report = run_statement_pipeline([pdf_path], ["invoice.pdf"])
-    assert report.grand_total == report.files[0].total_amount == 0
-    assert report.verdict == "needs_review"
-    assert any("价税合计缺失或不一致" in reason for reason in report.reasons)
+    with pytest.raises(RuntimeError, match="价税合计缺失或不一致"):
+        run_statement_pipeline([pdf_path], ["invoice.pdf"])

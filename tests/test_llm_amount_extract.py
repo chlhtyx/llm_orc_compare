@@ -173,6 +173,9 @@ def test_request_kind_and_temperature(monkeypatch):
     assert captured["payload"]["temperature"] == 0
     assert captured["payload"]["chat_template_kwargs"]["enable_thinking"] is False
     assert "model" in captured["payload"]
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert "两列的数据行数值都要抽出" in system_prompt
+    assert "只抽这一列" in system_prompt
 
 
 # —— 列名选择 ——

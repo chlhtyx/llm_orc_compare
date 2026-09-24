@@ -184,7 +184,7 @@ curl -f "$BASE_URL/api/v1/external/contractCompare/example-compare-task-id/repor
 | `reasons` | string[] | 判定理由 |
 | `result_url` | string | 本任务金额统计 JSON 查询地址 |
 
-金额由代码确定性求和，但 `status=done` 只表示处理完成；是否可直接使用金额还须检查 `verdict`、`reasons` 和各文件 `error`。当前外部金额统计结果只返回上述扁平汇总，**不包含完整 `report` 字段**。
+金额由代码确定性求和。表格抽取无可用金额时会追加整页多模态核对；任一文件仍无可溯源金额则任务为 `failed`，在 `error` 中说明原因，不返回部分合计或以 0 代替缺失金额。明确识别的 0 元可正常返回。当前外部金额统计结果只返回上述扁平汇总，**不包含完整 `report` 字段**。
 
 ## 5. 回调与错误处理
 

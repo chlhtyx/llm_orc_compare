@@ -11,13 +11,14 @@
           兜底指认列,再代码求和
        c. 列指认仍抽空(典型:发票纯数字无单位 + 表头乱码)→ llm_extract_amounts
           直接抽取数据行金额,逐值 grounding 校验(OCR 文本逐字溯源)通过后由
-          代码累加;失败/无金额 → column_source="none",标 needs_review
+          代码累加
+    ⑤ 全文件仍无金额 → 多模态模型按整页图片重新核对,仍无可溯源数据则报错
   多文件聚合 → grand_total / grand_totals_by_column / verdict / reasons
 
 与现有 raw_pipeline 的关键区别:
   - 不需要 Word 输入(单端:只读 PDF)
   - 不做 LLM 整篇比对,只做表格抽取 + 代码求和
-  - LLM 调用仅用于列定位兜底(单次调用、范围有限),绝不做算术
+  - LLM 只用于列定位、金额抽取和最终整页核对,绝不做算术
   - 支持一次提交多个 PDF,串行处理并聚合总金额
 """
 from __future__ import annotations
@@ -63,13 +64,12 @@ def run_statement_pipeline(
 ) -> StatementSummaryReport:
     """多文件串行处理,聚合输出总金额。
 
-    单文件失败不阻断其他文件:失败记入 StatementFileSummary.error,
-    且整体 verdict 标 needs_review。
+    任一文件未能获取可核验金额时抛出异常,避免把缺失数据当作 0 返回。
     """
     cfg = cfg or settings
     total_files = len(pdf_paths)
     if total_files == 0:
-        return StatementSummaryReport()
+        raise ValueError("未提供金额统计文件")
 
     def _progress(stage: str, frac: float) -> None:
         if on_progress:
@@ -102,6 +102,8 @@ def run_statement_pipeline(
             on_progress=file_progress,
         )
         file_summaries.append(file_summary)
+        if file_summary.error:
+            raise RuntimeError(f"文件 {file_name} 金额统计失败: {file_summary.error}")
         _progress(f"statement_file_{file_index}_done", base + span * 0.95)
 
     _progress("statement_aggregate", 0.99)
@@ -121,7 +123,7 @@ def _process_one_pdf(
     enable_llm_column_detection: bool,
     on_progress: ProgressCb | None,
 ) -> StatementFileSummary:
-    """处理单个 PDF:OCR + 表格抽取 + 求和。单文件异常 → error 字段,其他文件继续。"""
+    """处理单个 PDF:OCR + 表格抽取 + 求和。异常写入 error,由上层终止任务。"""
     try:
         reader = get_ocr_engine(ocr_backend)
         page_metas = get_page_metas(pdf_path, cfg.pdf_render_dpi)
@@ -221,26 +223,34 @@ def _process_one_pdf(
             )
             table_summaries.append(summary)
 
-        # 整页文本兜底:OCR 未把内容解析成结构化表格(常见于图片型发票/收据),但 OCR
-        # 文本里可能含金额。此时把每页 OCR 文本作为一张"隐式表"喂给 LLM 金额抽取,
-        # 避免因"没出 table block"直接判 needs_review 而漏掉所有金额。
-        if (
-            enable_llm_column_detection
-            and not merged_tables
-            and any(page_groundings.values())
+        # 最后一轮按整页图片核对。表格存在但列/金额抽取均失败时也必须运行；
+        # OCR 文本为空时先用多模态 OCR 重读页面，再以该文本作金额溯源依据。
+        if enable_llm_column_detection and not any(
+            _has_amounts(summary) for summary in table_summaries
         ):
             logger.info(
-                "statement whole-page fallback file=%s (no table block, try LLM on page text)",
+                "statement whole-page fallback file=%s (no amounts, verify page image)",
                 file_name,
             )
-            for page_index, page_text in page_groundings.items():
+            for page_index in range(len(page_metas)):
                 if page_index in consolidated_pages:
                     continue
+                page_text = page_groundings.get(page_index, "")
+                png = render_page_png(page_index)
+                if not page_text.strip() and png:
+                    try:
+                        from .ocr.llm import LLMOCREngine
+                        page_text = LLMOCREngine().recognize_text(png)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "statement verification OCR failed file=%s page=%s: %s",
+                            file_name, page_index, exc,
+                        )
                 if not page_text or not page_text.strip():
                     continue
                 whole_summary = _extract_whole_page_amounts(
                     page_text,
-                    png=render_page_png(page_index),
+                    png=png,
                     file_index=file_index,
                     file_name=file_name,
                     page_index=page_index,
@@ -254,6 +264,13 @@ def _process_one_pdf(
         file_total = Decimal("0")
         for ts in table_summaries:
             file_total += Decimal(str(ts.tax_inclusive_total))
+
+        if not any(_has_amounts(summary) for summary in table_summaries):
+            diagnostic_reasons = list(dict.fromkeys(
+                reason for diagnostic in diagnostics for reason in diagnostic.reasons
+            ))
+            detail = f"；{'；'.join(diagnostic_reasons)}" if diagnostic_reasons else ""
+            raise ValueError(f"文件 {file_name} 未识别到可核验的金额数据{detail}")
 
         return StatementFileSummary(
             file_index=file_index,
@@ -277,13 +294,13 @@ def _process_one_pdf(
 
 
 def _has_amounts(summary: StatementTableSummary) -> bool:
-    """判断 summary 是否真正抽到了金额(而非仅完成列定位)。
+    """判断 summary 是否有可用于含税合计的金额(而非仅完成列定位)。
 
     发票场景的关键:表头"金额"列能被启发式定位(column_source 非空),但单元格是
     纯数字无单位,正则抽不出 → column_sums/declared_totals 都空。此时不能认为
     "已处理完成",必须继续走 LLM 兜底。
     """
-    return bool(summary.column_sums or summary.declared_totals)
+    return bool(summary.tax_inclusive_method and summary.column_sums)
 
 
 def _none_column_source(headers: list[str]) -> dict[str, Literal["none"]]:

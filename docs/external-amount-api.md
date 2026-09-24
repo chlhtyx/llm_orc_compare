@@ -211,14 +211,18 @@ curl -X POST "https://dc.example.com/api/v1/external/amountStat" \
 | --- | --- | --- |
 | `grand_total` | number | **核心输出**:所有文件、所有金额列之和(单位元) |
 | `verdict` | string | 判定:`clean`(声明合计一致)/ `changed`(声明不一致)/ `needs_review`(OCR 或列定位低置信) |
-| `file_totals` | array | 每个输入文件的金额合计。元素含 `file_index`、`file_name`、`total_amount` 与 `error`；单文件失败时 `total_amount` 为 0，`error` 说明原因 |
+| `file_totals` | array | 每个输入文件的金额合计。元素含 `file_index`、`file_name`、`total_amount` 与 `error`；任一文件无法取得金额时任务为 `failed`，不会返回部分合计 |
 | `total_files` | int | 处理的 PDF 文件数 |
 | `total_tables` | int | 识别到的表格总数 |
 | `total_items` | int | 抽取到的金额行总数 |
 | `reasons` | string[] | 判定理由(可审计) |
 | `result_url` | string | 本任务结果查询绝对地址 |
 
-> **算术确定性**:`grand_total` 与各级合计始终由代码用 `Decimal` 求和得出。LLM 仅在正则启发式列定位失败时兜底指认金额列(列索引),且 LLM 抽出的每个金额必须能在 OCR 文本中逐字溯源(数字归一化后子串包含),否则丢弃并标记 `needs_review`。详见[金额统计方案](./金额统计方案.md)。
+> **算术确定性**:`grand_total` 与各级合计始终由代码用 `Decimal` 求和得出。多模态模型只做金额列指认、金额抽取和整页核对；模型抽出的每个金额必须能在 OCR 文本中逐字溯源(数字归一化后子串包含),否则丢弃。详见[金额统计方案](./金额统计方案.md)。
+
+若表格抽取后仍没有可用于含税合计的金额，会增加整页多模态图片核对；初次 OCR 文本为空时先重读图片。核对仍无可溯源金额时，任务进入 `failed` 并返回 `error`，不以 0 代替缺失数据。已明确识别的 0 元可正常返回。
+
+含税合计优先采用已抽取的“价税合计/含税金额”列；没有可用含税列时，只有“不含税金额”和“税额”两列都取得数值才由代码相加。缺失的税额不会按 0 处理。
 
 ### `verdict` 取值
 
